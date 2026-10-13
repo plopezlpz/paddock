@@ -75,7 +75,7 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
     view.compact = area.width < COMPACT_BELOW;
     view.clear();
 
-    // Frame title: the tabs (buttons), then the agent counts.
+    // Frame title: the tabs (buttons) on the left, the agent counts on the right.
     let mut title = vec![Span::raw(" ")];
     let mut x = area.x + 2;
     for tab in [Tab::Sessions, Tab::Agents] {
@@ -87,12 +87,17 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         x += name.len() as u16 + 2;
     }
     let counts = app.snap.counts();
+    let mut tally = vec![];
     for s in State::ALL.into_iter().rev() {
         let n = counts[s as usize];
         if n > 0 {
-            title.push(dot(t, Some(s)));
-            title.push(Span::raw(if view.compact { format!(" {n} ") } else { format!(" {n} {} ", s.label()) }));
+            tally.push(Span::raw(" "));
+            tally.push(dot(t, Some(s)));
+            tally.push(Span::raw(format!(" {n}")));
         }
+    }
+    if !tally.is_empty() {
+        tally.push(Span::raw(" "));
     }
     let mut frame = Block::new()
         .borders(Borders::ALL)
@@ -101,19 +106,20 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         // Titles are drawn over the border and would keep its dim or
         // colour: start from the terminal's plain text.
         .title_style(Style::new().fg(Color::Reset).remove_modifier(Modifier::DIM))
-        .title(Line::from(title));
+        .title(Line::from(title))
+        .title(Line::from(tally).right_aligned());
     if let Some(status) = &app.status {
         frame = frame.title_bottom(status_line(status, area.width.saturating_sub(4) as usize, t));
     }
     let inner = frame.inner(area);
     f.render_widget(frame, area);
 
-    let [input, rule, body, footer] =
+    // A blank line under the input sets it apart from the list.
+    let [input, _, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     let pad = |r: Rect| Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r };
 
     draw_input(f, app, view.compact, pad(input), t);
-    f.render_widget(Paragraph::new(Line::styled("─".repeat(rule.width as usize), t.muted())), rule);
 
     view.preview_fits = body.width >= PREVIEW_FROM;
     let (list, side) = if app.preview_on && view.preview_fits {
@@ -128,13 +134,7 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         let inner = pad(block.inner(side));
         f.render_widget(block, side);
         let [head, text] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(inner);
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![Span::styled("live output  ", bold().fg(t.hint)), Span::styled(preview.title, t.muted())]),
-                Line::styled("─".repeat(head.width as usize), t.muted()),
-            ]),
-            head,
-        );
+        f.render_widget(Paragraph::new(Line::styled(preview.title, t.muted())), head);
         // Bottom-align the tail of the pane, like the end of a terminal.
         let skip = preview.body.lines.len().saturating_sub(text.height as usize);
         f.render_widget(Paragraph::new(preview.body.lines[skip..].to_vec()), text);
@@ -156,8 +156,8 @@ fn status_line(status: &Status, max: usize, t: &Theme) -> Line<'static> {
     Line::from(vec![Span::raw(" "), Span::styled(format!("{mark}{}", fit(text, max.saturating_sub(4))), style), Span::raw(" ")])
 }
 
-/// Prompt and query (its end, when long) or a hint, and the number of
-/// matching rows on the right. While renaming, the query is shown muted
+/// Prompt and query (its end, when long) or a hint, and while filtering the
+/// number of matching rows on the right. While renaming, the query is shown muted
 /// (the list is still filtered by it) and the mode on the right.
 fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
     // A question replaces the line: what will happen, in the asking colour.
@@ -179,18 +179,15 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
         Span::styled(if matches!(c.new, New::Window { .. }) { "+ new window" } else { "+ new session" }, Style::new().fg(t.accent))
     } else if let Mode::Move(c) = &app.mode {
         Span::styled(if compact { "⇅ moving".to_string() } else { format!("⇅ moving {}", c.label) }, Style::new().fg(t.accent))
-    } else {
+    } else if !app.query.is_empty() {
         Span::styled(app.rows.iter().filter(|r| r.target.is_some() && r.score.is_some()).count().to_string(), t.muted())
+    } else {
+        Span::raw("")
     };
     let [left, side] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right.width() as u16 + 1)]).areas(area);
     let mut spans = vec![Span::styled("› ", if naming { t.muted() } else { Style::new().fg(t.accent) })];
     if app.query.is_empty() {
-        let ghost = match app.tab {
-            _ if compact => "filter",
-            Tab::Sessions => "filter sessions, windows, folders",
-            Tab::Agents => "filter agents by task, project or state",
-        };
-        spans.push(Span::styled(ghost, t.muted()));
+        spans.push(Span::styled("filter", t.muted()));
     } else {
         let (text, _) = app.query.window((left.width as usize).saturating_sub(2));
         spans.push(Span::styled(text, if naming { t.muted() } else { Style::new() }));
