@@ -35,6 +35,10 @@ impl Tab {
             Tab::Agents => "agents",
         }
     }
+
+    pub fn parse(label: &str) -> Option<Tab> {
+        [Tab::Sessions, Tab::Agents].into_iter().find(|t| t.label() == label)
+    }
 }
 
 /// What the popup asks the loop to do.

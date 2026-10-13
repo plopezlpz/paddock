@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# paddock -- tmux entrypoint (TPM or run-shell): binds @paddock-key (sessions tab) and
-# @paddock-agents-key (agents tab) to the paddock popup. Both unbound unless set.
+# paddock -- tmux entrypoint (TPM or run-shell): binds @paddock-key (the tab paddock
+# was last closed on) and @paddock-agents-key (agents tab) to the paddock popup.
+# Both unbound unless set.
 set -euf
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # A build in this checkout, else an installed binary. The tmux server's PATH
@@ -50,14 +51,14 @@ bin=$(literal "$BIN")
 popup="display-popup -B -EE -c #{q:client_name} -w $w -h $h -s $style"
 popup="$popup -e PADDOCK_CLIENT=#{q:client_name} -e PADDOCK_SESSION=#{q:session_id} -e PADDOCK_WINDOW=#{q:window_id}"
 
-# bind_tab KEY TAB
+# bind_tab KEY [TAB]: without TAB, paddock reopens the tab it was closed on.
 bind_tab() {
   [ -n "$1" ] || return 0
   if [ -x "$BIN" ]; then
-    tmux bind -N "paddock $2" "$1" run-shell -C "$popup $bin --tab $2"
+    tmux bind -N "paddock ${2:-}" "$1" run-shell -C "$popup $bin${2:+ --tab $2}"
   else
     tmux bind -N "paddock $2" "$1" display-message "paddock: not built -- run cargo build --release in $CURRENT_DIR, then reload tmux"
   fi
 }
-bind_tab "$key" sessions
+bind_tab "$key"
 bind_tab "$agents_key" agents
