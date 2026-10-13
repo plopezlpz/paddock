@@ -39,19 +39,18 @@ paddock is a popup over your panes, so you see which agents are working, which
 are waiting for you and which have finished, and jump to one with a key press.
 
 - **Your tmux.** It is a popup in the tmux you run: your config, prefix and
-  plugins stay. It takes its colours from `@paddock-color-*`, else your tmux
-  theme (see [Options](#options)).
-- **Anywhere tmux goes.** Over ssh, in any terminal that runs tmux.
+  plugins stay.
+- **Anywhere tmux goes.** Over ssh, in any terminal: install paddock where
+  tmux runs (tmux 3.8 or later).
 - **On your phone.** Under 80 columns it switches to a compact layout with
   tappable words, and `@paddock-click` opens it from the session name in the
   status line.
 
-paddock shows state that a producer reports (see [Agent state](#agent-state));
-it doesn't run your agents or work out their state itself. The intro's agent
-list names agents you may run: [agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux)
-is one producer and covers the providers listed under Agent state. Codex has no
-lifecycle hooks for it to use and is not among them, so a Codex pane shows an
-agent only if some other producer sets its state.
+paddock shows the state a producer reports (see [Agent state](#agent-state));
+it doesn't run your agents or work out their state itself.
+[agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) is one
+producer. Its providers don't include Codex, which has no lifecycle hooks, so a
+Codex pane shows an agent only if another producer sets its state.
 
 [herdr](https://herdr.dev) gives your agents a runtime of their own, and
 [cmux](https://cmux.com) is a native macOS terminal built around agents; if your
@@ -60,21 +59,18 @@ server, terminal or config to move to.
 
 ## Features
 
-- **Sessions tab**: the session › window › pane tree, with each window's agent
-  state.
-- **Agents tab**: one card per agent, grouped by status, session or folder
-  (`ctrl-g`), or not grouped. It opens on the agent you are in, and the most
-  recent change comes first within a state.
-- **Preview**: the selected pane, live, when the popup is at least 102 columns
-  wide (`ctrl-o` toggles it).
-- **Fuzzy filter**: `'exact`, `^prefix`, `suffix$`, `!not`.
+- **Sessions and agents in one popup**: a tab for the session tree and a tab
+  for the agents. Agent cards group by status, session or folder, or not at
+  all (`ctrl-g`); within a state, the most recent change comes first.
+- **Preview and filter**: the selected pane, live, when the popup is wide
+  enough (`ctrl-o` toggles it), and a fuzzy filter with `'exact`, `^prefix`,
+  `suffix$` and `!not`.
 - **Edit in place**: rename sessions, windows and agents; move windows and
   panes; kill sessions, windows and panes; create windows and sessions; undo the
   last rename or move. An agent can get a suggested title when the producer
   offers suggestions.
-- **Mouse and touch**: click, double-click, drag, a right-click menu; tabs and
-  footer hints are buttons.
-- **Phone layout**: under 80 columns, two-line rows and tappable words.
+- **Mouse and touch**: click, double-click, drag and a right-click menu; tabs
+  and footer hints are buttons.
 - **Your colours**: `@paddock-color-*`, else your tmux theme and
   `@agent-color-*`, else the defaults (see [Options](#options)).
 
