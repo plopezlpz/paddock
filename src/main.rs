@@ -36,8 +36,9 @@ use ui::Preview;
 /// Refresh triggers, checked by tmux about once a second: every pane in
 /// every session (a control client's %* covers only its own session) with
 /// what paddock shows of it, and agent-status's revision token (bumped when a
-/// description file changes). Structural changes also arrive at once as
-/// notifications (windows added, closed, renamed...). Each value is a
+/// description file changes). Changes to windows in other sessions (added,
+/// closed, renamed) also arrive at once as notifications; pane splits and
+/// focus changes wait for the next check. Each value is a
 /// `field`, so a newline in it cannot end the notification line.
 fn subscriptions() -> [String; 2] {
     let f = |names: &[&str]| names.iter().map(|n| field(n)).collect::<String>();
@@ -175,8 +176,9 @@ fn run(tab: Tab) -> Result<(), String> {
     let ctx = context()?;
     let (tx, rx) = mpsc::channel();
     let mut tmux = connect(tx.clone())?;
-    let descriptions = Descriptions::load(&mut tmux);
-    let theme = Theme::load(&mut tmux);
+    // Options as the invoking window sees them, not paddock's own session.
+    let descriptions = Descriptions::load(&mut tmux, &ctx.window);
+    let theme = Theme::load(&mut tmux, &ctx.window);
     let home = std::env::var("HOME").unwrap_or_default();
     let debug = std::env::var_os("PADDOCK_DEBUG").is_some();
     let can_describe = descriptions.script().is_some();

@@ -30,10 +30,11 @@ pub struct Control {
 /// How long a command may take before the connection is given up.
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The session the control client attaches to, created once and kept. A
-/// client attached to the user's session would be a candidate whenever a
-/// command run from a pane there names no client, and the newest one until
-/// the next key press.
+/// The session the control client attaches to, created on open and
+/// destroyed when the popup closes (kept, it would keep the server alive and
+/// be the session a bare `tmux attach` picks). A client attached to the
+/// user's session would be a candidate whenever a command run from a pane
+/// there names no client, and the newest one until the next key press.
 pub const SESSION: &str = "_paddock";
 
 /// Hooks attaching or detaching fires, emptied on SESSION so the user's
@@ -61,12 +62,9 @@ impl Control {
     pub fn connect(events: impl Fn(Msg) + Send + 'static) -> Result<Control, String> {
         // Exact: a bare name is also tried as a prefix and as a window.
         let target = format!("={SESSION}:");
-        // Create SESSION unless it exists (then new-session fails and the
-        // rest of the list is skipped). It must outlive the popup even under
-        // a global destroy-unattached.
+        // Create SESSION unless it exists (another popup is open).
         let _ = tmux_command()
-            .args(["new-session", "-d", "-s", SESSION, "-n", "paddock", "cat", ";"])
-            .args(["set-option", "-t", &target, "destroy-unattached", "off"])
+            .args(["new-session", "-d", "-s", SESSION, "-n", "paddock", "cat"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -79,7 +77,7 @@ impl Control {
         for hook in HOOKS {
             cmd.args(["set-hook", "-t", &target, hook, "", ";"]);
         }
-        cmd.args(["set-option", "-t", &target, "destroy-unattached", "off", ";"]);
+        cmd.args(["set-option", "-t", &target, "destroy-unattached", "on", ";"]);
         cmd.args(["attach-session", "-f", "ignore-size,no-output", "-t", &target]);
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -125,9 +123,10 @@ impl Control {
         Ok(lines.iter().map(|l| l.split(SEP).map(String::from).collect::<Vec<_>>()).filter(|f| f.len() == names.len()).collect())
     }
 
-    /// The one row of `display-message -p` over NAMES; empty on failure.
-    pub fn row(&mut self, names: &[&str]) -> Vec<String> {
-        self.fields("display-message -p", names).ok().and_then(|r| r.into_iter().next()).unwrap_or_default()
+    /// The one row of `display-message -p` over NAMES in TARGET (so its
+    /// session and window options count); empty on failure.
+    pub fn row(&mut self, target: &str, names: &[&str]) -> Vec<String> {
+        self.fields(&format!("display-message -p -t {}", quote(target)), names).ok().and_then(|r| r.into_iter().next()).unwrap_or_default()
     }
 }
 

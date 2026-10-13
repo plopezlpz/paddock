@@ -139,8 +139,8 @@ pub struct Described {
 }
 
 impl Descriptions {
-    pub fn load(tmux: &mut Control) -> Descriptions {
-        let mut row = tmux.row(&["@agent-descriptions-dir", "start_time", "@agent-scripts-dir"]).into_iter();
+    pub fn load(tmux: &mut Control, window: &str) -> Descriptions {
+        let mut row = tmux.row(window, &["@agent-descriptions-dir", "start_time", "@agent-scripts-dir"]).into_iter();
         let mut next = || row.next().unwrap_or_default();
         Descriptions { dir: next(), start: next(), scripts: next() }
     }

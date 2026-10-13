@@ -37,8 +37,8 @@ const OPTIONS: &[&str] = &[
 ];
 
 impl Theme {
-    pub fn load(tmux: &mut Control) -> Theme {
-        let row = tmux.row(OPTIONS);
+    pub fn load(tmux: &mut Control, window: &str) -> Theme {
+        let row = tmux.row(window, OPTIONS);
         Theme::from_values(&row.iter().map(String::as_str).collect::<Vec<_>>())
     }
 

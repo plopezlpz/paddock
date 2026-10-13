@@ -15,7 +15,7 @@ changes.
 
 ## Install
 
-You need tmux 3.3+ (3.8 recommended) and Rust 1.88+.
+You need tmux 3.8+ and Rust 1.88+.
 
 With [TPM](https://github.com/tmux-plugins/tpm), in `~/.tmux.conf` (set the
 options before the plugin loads):
@@ -95,7 +95,7 @@ Only `@agent-state` is required. A producer:
 - **clears** `@agent-unseen` when the pane gets focus, from a `pane-focus-in`
   hook. Jumping there from paddock fires it.
 
-paddock ignores values it doesn't know, so producers can add states.
+A pane whose `@agent-state` paddock doesn't know is shown without an agent.
 agent-status.tmux's `@agent-auto-description` is read when
 `@agent-description` is unset, and its description overrides
 (`@agent-descriptions-dir`, `@agent-revision`) when it sets them.
@@ -104,10 +104,12 @@ agent-status.tmux's `@agent-auto-description` is read when
 
 While open, paddock is attached to tmux as a control client. So that it never
 becomes the "current client" of your sessions, it attaches to a session of its
-own, `_paddock` (one idle `cat`), created on first use and kept. paddock hides
-it; `tmux ls`, `choose-tree` and tmux-resurrect still list it. The
-`client-attached`, `client-detached` and other client hooks are emptied on
-that session, so your global ones do not run when the popup opens or closes.
+own, `_paddock` (one idle `cat`), which exists only while the popup is open.
+paddock hides it; `tmux ls` and `choose-tree` show it meanwhile.
+
+The `client-attached`, `client-detached` and other client hooks are emptied
+on that session, so yours don't run when the popup opens or closes. Global
+`client-created`, `session-created` and `session-closed` hooks still do.
 
 A tmux command run from outside tmux without `-c` or `-t` may still pick
 paddock's client while the popup is open.
