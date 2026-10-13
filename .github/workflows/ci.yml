@@ -10,6 +10,7 @@ env:
 
 jobs:
   test:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +48,7 @@ jobs:
           # macOS needs explicit utf8proc and jemalloc choices: enable both, as
           # Homebrew's tmux does.
           if [ "$RUNNER_OS" = macOS ]; then mac="--enable-utf8proc --enable-jemalloc"; else mac=; fi
+          # shellcheck disable=SC2086 # $mac is two flags or none
           ./configure --prefix="$HOME/.local" $mac
           make -j4
           make install

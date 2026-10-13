@@ -31,7 +31,8 @@ set -g @plugin 'plopezlpz/paddock'
 Press `prefix I`, then the key. It offers to download the matching binary
 from the GitHub release (checksum verified); press the key again. No Rust
 needed. After `prefix U`, the key offers the new version. Outside tmux, run
-`~/.tmux/plugins/paddock/scripts/install.sh`.
+`bash ~/.tmux/plugins/paddock/scripts/install.sh` (TPM may use
+`~/.config/tmux/plugins/` instead).
 
 ### Homebrew
 
@@ -45,8 +46,9 @@ run-shell 'paddock init'
 ```
 
 If tmux's `PATH` lacks Homebrew's, write out the full path,
-`$(brew --prefix)/bin/paddock`: `/opt/homebrew/bin/paddock` (`/usr/local/bin`
-on Intel Macs).
+`$(brew --prefix)/bin/paddock`: `/opt/homebrew/bin/paddock` (Apple silicon),
+`/usr/local/bin/paddock` (Intel Mac), `/home/linuxbrew/.linuxbrew/bin/paddock`
+(Linux).
 
 After `brew upgrade`, reload tmux; until then the key says its bindings are
 for another version.
@@ -73,7 +75,9 @@ For development. Clone it anywhere, run `cargo build --release`, and use
 `run-shell '<clone>/paddock.tmux'` in place of the `@plugin` line.
 paddock.tmux binds the clone's build, else a `bin/paddock` it downloaded, and
 only if that reports the plugin's version; otherwise the key offers the
-download. `PADDOCK_BIN=<path>` overrides the choice.
+download. `PADDOCK_BIN` overrides the choice, set inline (an exported variable
+does not reach a running tmux server):
+`run-shell 'PADDOCK_BIN=/path/to/paddock <clone>/paddock.tmux'`.
 
 ## Use
 

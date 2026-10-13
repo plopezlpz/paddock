@@ -11,5 +11,5 @@ TPM follows master, so master must never carry a version whose release doesn't e
 5. Update the Homebrew tap: `scripts/update-formula.sh X.Y.Z` (prints the
    formula; the hashes come from the release), then commit it to the tap.
 
-Any change to the popup's flags or env is a version bump and a release in the
-same push.
+Any change to the popup's flags or env is a version bump, released (steps 2-4)
+before master carries it.

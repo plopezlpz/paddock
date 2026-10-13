@@ -5,6 +5,7 @@
 # for the paddock binary. Needs tmux 3.8+; skips otherwise, except in CI.
 # Run: bash tests/paddock-tmux.sh
 set -u
+unset CDPATH # the relative cd below must not be steered; the checks set their own
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # skip REASON: a pass locally, a failure in CI (which must run the test).
 skip() { echo "skip: $1"; [ -z "${CI:-}" ]; exit; }
@@ -15,6 +16,7 @@ TMP=$(cd "$TMP" && pwd) # TMPDIR's trailing / would differ from the paths the pl
 IN=paddock-test-in-$$
 OUT=paddock-test-out-$$
 cleanup() {
+  chmod -R u+w "$TMP" 2>/dev/null # an interrupt inside the unwritable-dir check
   tmux -L "$OUT" kill-server 2>/dev/null
   tmux -L "$IN" kill-server 2>/dev/null
   rm -rf "$TMP"
@@ -253,9 +255,10 @@ cp "$TMP/plugin/paddock.tmux" "$TMP/plugin/Cargo.toml" "$Q/"
 cp "$TMP/plugin/scripts/install.sh" "$Q/scripts/"
 stub "$Q/bin/paddock" "$V"
 t set -g @paddock-agents-key g
+t unbind -n MouseUp1StatusLeft # else the real init's binding above would satisfy the checks
 t run-shell "$(tmq "$Q/paddock.tmux")"
-check "quoted dir: the click binds its binary" has "$(root_click)" "paddock"
-check "quoted dir: no installer" lacks "$(root_click)" "install.sh"
+check "quoted dir: the click binds its binary" has "$(root_click)" "dir=x"
+check "quoted dir: and it is bin/paddock, not the installer" has "$(root_click)" "bin/paddock"
 rm -f "$TMP/opened"
 wait_screen "[main]"
 press 4d
@@ -263,10 +266,13 @@ press 6d
 wait_opened
 expected="$Q/bin/paddock $client $(t display -p -t main '#{session_id} #{window_id}') "
 check "quoted dir: a click opens paddock" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected"
-sleep 0.5 # the popup is closing; a key sent now would land in it
 rm -f "$TMP/opened"
-tmux -L "$OUT" send-keys C-b g
-wait_opened
+# The click's popup may still be closing, and a key sent into it is lost: resend until it lands.
+for _ in $(seq 20); do
+  tmux -L "$OUT" send-keys C-b g
+  for _ in $(seq 3); do [ -s "$TMP/opened" ] || sleep 0.1; done
+  [ -s "$TMP/opened" ] && break
+done
 check "quoted dir: the agents key opens paddock --tab agents" test "$(cat "$TMP/opened" 2>/dev/null)" = "${expected}--tab agents"
 
 # The installer, offline: releases are directories (PADDOCK_RELEASE_URL), built
@@ -309,6 +315,23 @@ for tg in $TARGETS; do
   echo "not a tarball" >"$TMP/rel/notgz/$a"
 done
 sums "$TMP/rel/notgz"
+
+# The Homebrew formula, offline from the same .sha256 files.
+UF=$ROOT/scripts/update-formula.sh
+if [ -f "$UF" ]; then
+  formula=$(bash "$UF" --from "$TMP/rel/good" "$V" 2>&1); rc=$?
+  check "formula: exits 0" test "$rc" -eq 0
+  for tg in $TARGETS; do
+    check "formula: $tg hash" has "$formula" "sha256 \"$(cut -d' ' -f1 "$TMP/rel/good/paddock-$tg.tar.gz.sha256")\""
+    check "formula: $tg url" has "$formula" "url \"https://github.com/plopezlpz/paddock/releases/download/v$V/paddock-$tg.tar.gz\""
+  done
+  ruby=$(command -v ruby || { [ -x /usr/bin/ruby ] && echo /usr/bin/ruby; })
+  if [ -n "$ruby" ]; then
+    check "formula: ruby -c says Syntax OK" has "$(printf '%s\n' "$formula" | "$ruby" -c 2>&1)" "Syntax OK"
+  else
+    echo "skip formula syntax: no ruby"
+  fi
+fi
 
 PLUG=$TMP/plugin
 no_leftovers() { [ -z "$(find "$1/bin" -name '.install.*' 2>/dev/null)" ]; }
