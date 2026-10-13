@@ -87,7 +87,7 @@ of room, ⋯ opens the menu.
 | Option | Default | |
 |---|---|---|
 | `@paddock-key`, `@paddock-agents-key` | unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
-| `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone |
+| `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%` | may be a format, e.g. `#{?#{e\|<:#{client_width},140},100%,80%}` |
 | `@paddock-popup-style` | `bg=terminal,fg=terminal` | popup background and text |
 | `@paddock-color-accent` | `pane-active-border-style` fg, else yellow | selection, active tab |

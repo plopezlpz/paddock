@@ -6,6 +6,7 @@ on:
 
 env:
   TMUX_VERSION: "3.8"
+  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
 
 jobs:
   test:
@@ -35,7 +36,9 @@ jobs:
       - name: Build tmux
         working-directory: ${{ runner.temp }}
         run: |
-          curl -fsSL "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz" | tar xz
+          curl -fsSLo tmux.tar.gz "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+          echo "$TMUX_SHA256  tmux.tar.gz" | shasum -a 256 -c
+          tar xzf tmux.tar.gz
           cd "tmux-$TMUX_VERSION"
           # macOS needs explicit utf8proc and jemalloc choices: enable both, as
           # Homebrew's tmux does.
