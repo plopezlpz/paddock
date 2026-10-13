@@ -26,6 +26,10 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+      # paddock.tmux is compiled in (include_str!), so this keeps the crate publishable.
+      - name: Package
+        if: runner.os == 'Linux'
+        run: cargo package --locked
       # paddock.tmux needs tmux 3.8, newer than the runners' packages: build it.
       - name: Install tmux build deps (Linux)
         if: runner.os == 'Linux'
@@ -48,4 +52,4 @@ jobs:
           make install
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Plugin
-        run: tmux -V && bash tests/paddock-tmux.sh
+        run: cargo build && tmux -V && bash tests/paddock-tmux.sh

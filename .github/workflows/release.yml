@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # A dry run: builds and uploads artifacts, never publishes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Cargo.toml version matches the metadata and the tag
+        id: v
+        run: |
+          v=$(awk -F'"' '/^\[/ { p = ($0 == "[package]") } p && /^version *=/ { print $2; exit }' Cargo.toml)
+          m=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ -z "$v" ] || [ "$v" != "$m" ]; then
+            echo "::error::Cargo.toml version '$v' does not match cargo metadata '$m'"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version v$v"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      V: ${{ needs.check.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          mkdir stage dist
+          cp "target/$TARGET/release/paddock" LICENSE stage/
+          tar -czf "dist/paddock-$TARGET.tar.gz" -C stage paddock LICENSE
+          (cd dist && shasum -a 256 "paddock-$TARGET.tar.gz" > "paddock-$TARGET.tar.gz.sha256")
+      # Every runner is native for its target, so run the binary.
+      - name: Smoke check
+        run: |
+          got=$(stage/paddock --version)
+          if [ "$got" != "paddock $V" ]; then
+            echo "::error::stage/paddock reports '$got', expected 'paddock $V'"
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            file stage/paddock
+            file stage/paddock | grep -Eq 'statically linked|static-pie linked'
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: paddock-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # A dispatch never publishes, even on a tag.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: paddock-*
+          merge-multiple: true
+      - name: Publish
+        run: |
+          ls -l dist
+          n=$(find dist -type f | wc -l)
+          if [ "$n" -ne 8 ]; then
+            echo "::error::expected 8 files in dist, found $n"
+            exit 1
+          fi
+          # Published releases are immutable: never touch their assets.
+          published=$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[] | select(.tag_name == env.TAG and (.draft | not)) | .id')
+          if [ -n "$published" ]; then
+            have=$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[] | select(.tag_name == env.TAG and (.draft | not)) | .assets[].name')
+            for f in dist/*; do
+              if ! printf '%s\n' "$have" | grep -qxF "$(basename "$f")"; then
+                echo "::error::$TAG is published without $(basename "$f"); cut a new version"
+                exit 1
+              fi
+            done
+            echo "$TAG is already published with all 8 assets"
+            exit 0
+          fi
+          # Leftover drafts are from interrupted runs: start over. By id, since
+          # a tag can name several drafts and gh resolves it to only one.
+          draft_ids() { gh api --paginate "repos/$GH_REPO/releases" --jq '.[] | select(.tag_name == env.TAG and .draft) | .id'; }
+          for id in $(draft_ids); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh release create "$TAG" --draft --verify-tag --title "paddock ${TAG#v}" --generate-notes dist/*
+          ids=$(draft_ids)
+          if [ "$(printf '%s\n' "$ids" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one draft for $TAG, found: $ids"
+            exit 1
+          fi
+          gh api -X PATCH "repos/$GH_REPO/releases/$ids" -F draft=false

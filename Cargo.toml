@@ -9,7 +9,7 @@ repository = "https://github.com/plopezlpz/paddock"
 readme = "README.md"
 keywords = ["tmux", "tui", "ai", "agents", "terminal"]
 categories = ["command-line-utilities"]
-exclude = ["docs/screenshots/*"]
+include = ["/src", "/paddock.tmux", "/LICENSE", "/README.md"]
 
 [dependencies]
 ansi-to-tui = "8.0.1"
