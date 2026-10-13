@@ -19,7 +19,10 @@ mod theme;
 mod tmux;
 mod ui;
 
+use std::env;
+use std::ffi::OsStr;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,25 +85,107 @@ fn context() -> Result<Context, String> {
 }
 
 /// Without --tab, paddock opens on the tab it was last closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents] | paddock --version";
+const USAGE: &str = "usage: paddock [--tab sessions|agents] | paddock init | paddock --version";
+
+/// For `paddock init`: a binary installed without the plugin checkout
+/// (Homebrew, cargo) still binds the keys, by running this script itself.
+const PLUGIN: &str = include_str!("../paddock.tmux");
+
+enum Cmd {
+    Run(Option<Tab>),
+    Init,
+    Version,
+    Help,
+}
+
+fn parse(args: &[&str]) -> Result<Cmd, String> {
+    match args {
+        [] => Ok(Cmd::Run(None)),
+        ["--tab", "sessions"] => Ok(Cmd::Run(Some(Tab::Sessions))),
+        ["--tab", "agents"] => Ok(Cmd::Run(Some(Tab::Agents))),
+        ["init"] => Ok(Cmd::Init),
+        ["--version" | "-V"] => Ok(Cmd::Version),
+        ["--help" | "-h"] => Ok(Cmd::Help),
+        _ => Err(USAGE.to_string()),
+    }
+}
+
+/// The error (without main's "paddock: " prefix) if the key bindings that
+/// started us, from plugin version PLUGIN, are not for OURS: the popup's
+/// flags and env are a contract between the two.
+fn version_mismatch(plugin: Option<&str>, ours: &str) -> Option<String> {
+    plugin.filter(|p| *p != ours).map(|p| format!("these key bindings are for paddock {p} but this is paddock {ours} -- reload tmux (or update the plugin)"))
+}
+
+/// The path the key bindings should use for this binary, one that survives an
+/// upgrade: Homebrew's `current_exe()` is a versioned Cellar path that is
+/// deleted by the next `brew upgrade`, while the symlink we were started
+/// through is not. ARGV0 with a `/` is that path (made absolute against CWD,
+/// not canonicalized, to keep the symlink); with no CWD (unreadable) and a
+/// relative ARGV0, it falls through to the next step. A bare name was found
+/// through PATH: the first absolute entry whose `paddock` is the same file as
+/// EXE (by CANON, the canonicalizer). Failing both, EXE.
+fn stable_path(argv0: &Path, cwd: Option<&Path>, path: &OsStr, canon: impl Fn(&Path) -> Option<PathBuf>, exe: &Path) -> PathBuf {
+    if argv0.to_string_lossy().contains('/') {
+        // components() also drops a "." in the middle.
+        if argv0.is_absolute() {
+            return argv0.components().collect();
+        }
+        if let Some(cwd) = cwd {
+            return cwd.join(argv0).components().collect();
+        }
+    }
+    if let Some(real) = canon(exe) {
+        // A relative entry (empty, ".", "bin") is the cwd's, which a key binding
+        // would resolve elsewhere: skip it rather than trust it.
+        let found = env::split_paths(path).filter(|d| d.is_absolute()).map(|d| d.join("paddock")).find(|c| canon(c).is_some_and(|c| c == real));
+        if let Some(found) = found {
+            return found;
+        }
+    }
+    exe.to_path_buf()
+}
+
+fn self_path() -> Result<PathBuf, String> {
+    let exe = env::current_exe().map_err(|e| format!("cannot find the paddock binary: {e}"))?;
+    let argv0 = env::args_os().next().unwrap_or_default();
+    // Only a relative argv0 with a `/` needs it: an unreadable cwd is not an error otherwise.
+    let cwd = env::current_dir().ok();
+    Ok(stable_path(Path::new(&argv0), cwd.as_deref(), &env::var_os("PATH").unwrap_or_default(), |p| p.canonicalize().ok(), &exe))
+}
+
+/// Bind the keys from the embedded paddock.tmux. It vouches for this binary
+/// (PADDOCK_BIN, PADDOCK_VERSION); it prints nothing on success. bash comes
+/// from PATH (not every system has /bin/bash).
+fn init() -> Result<(), String> {
+    let bin = self_path()?;
+    let e = Command::new("bash")
+        .args(["-c", PLUGIN, "paddock.tmux"])
+        .env("PADDOCK_BIN", bin)
+        .env("PADDOCK_VERSION", env!("CARGO_PKG_VERSION"))
+        .exec();
+    Err(format!("cannot run bash: {e}"))
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = match args.as_slice() {
-        [] => run(None),
-        ["--tab", "sessions"] => run(Some(Tab::Sessions)),
-        ["--tab", "agents"] => run(Some(Tab::Agents)),
-        ["--version" | "-V"] => {
+    let result = parse(&args).and_then(|cmd| match cmd {
+        Cmd::Run(tab) => match version_mismatch(env::var("PADDOCK_PLUGIN_VERSION").ok().as_deref(), env!("CARGO_PKG_VERSION")) {
+            Some(e) => Err(e),
+            None => run(tab),
+        },
+        Cmd::Init => init(),
+        Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        ["--help" | "-h"] => {
+        Cmd::Help => {
             println!("{USAGE}");
+            println!("init: bind the keys from ~/.tmux.conf with run-shell 'paddock init' (no plugin checkout needed)");
             Ok(())
         }
-        _ => Err(USAGE.to_string()),
-    };
+    });
     if let Err(e) = result {
         eprintln!("paddock: {e}");
         std::process::exit(1);
@@ -498,5 +583,71 @@ mod tests {
     fn names_and_folders_stay_literal() {
         assert_eq!(literal("#S #(rm -rf ~) it's"), r"'##S ##(rm -rf ~) it'\''s'");
         assert_eq!(window_in("$1", "@2"), "'$1:@2'");
+    }
+
+    #[test]
+    fn parses_commands() {
+        assert!(matches!(parse(&["init"]), Ok(Cmd::Init)));
+        assert!(parse(&["init", "x"]).is_err());
+        assert!(matches!(parse(&["--tab", "agents"]), Ok(Cmd::Run(Some(Tab::Agents)))));
+        assert!(matches!(parse(&["--tab", "sessions"]), Ok(Cmd::Run(Some(Tab::Sessions)))));
+        assert!(parse(&["--tab", "nope"]).is_err());
+        assert!(matches!(parse(&[]), Ok(Cmd::Run(None))));
+        assert!(matches!(parse(&["--version"]), Ok(Cmd::Version)));
+        assert!(matches!(parse(&["-V"]), Ok(Cmd::Version)));
+        assert!(matches!(parse(&["--help"]), Ok(Cmd::Help)));
+        assert!(matches!(parse(&["-h"]), Ok(Cmd::Help)));
+        assert_eq!(parse(&["bogus"]).err().as_deref(), Some(USAGE));
+    }
+
+    #[test]
+    fn embedded_plugin_is_the_init_mode_script() {
+        assert!(PLUGIN.contains("PADDOCK_VERSION"));
+        assert!(PLUGIN.contains("PADDOCK_BIN"));
+    }
+
+    #[test]
+    fn handshake_refuses_other_versions() {
+        assert_eq!(version_mismatch(None, "0.1.0"), None);
+        assert_eq!(version_mismatch(Some("0.1.0"), "0.1.0"), None);
+        let e = version_mismatch(Some("0.2.0"), "0.1.0").unwrap();
+        assert_eq!(e, "these key bindings are for paddock 0.2.0 but this is paddock 0.1.0 -- reload tmux (or update the plugin)");
+    }
+
+    #[test]
+    fn stable_path_prefers_how_we_were_started() {
+        let exe = Path::new("/opt/Cellar/paddock/0.1.0/bin/paddock");
+        let cwd = Path::new("/work");
+        let path = OsStr::new("/usr/bin:/opt/homebrew/bin:/other");
+        // Only the Homebrew symlink resolves to the exe; /usr/bin/paddock is a different file.
+        let canon = |p: &Path| match p.to_str().unwrap() {
+            "/opt/Cellar/paddock/0.1.0/bin/paddock" | "/opt/homebrew/bin/paddock" => Some(exe.to_path_buf()),
+            "/usr/bin/paddock" => Some(PathBuf::from("/usr/bin/other")),
+            _ => None,
+        };
+        let go = |argv0: &str, path: &OsStr| stable_path(Path::new(argv0), Some(cwd), path, canon, exe);
+        // A path is kept as given: absolute, or against cwd, with no canonicalizing.
+        assert_eq!(go("/opt/homebrew/bin/paddock", path), Path::new("/opt/homebrew/bin/paddock"));
+        assert_eq!(go("./target/debug/paddock", path), Path::new("/work/target/debug/paddock"));
+        assert_eq!(go("bin/paddock", path), Path::new("/work/bin/paddock"));
+        // A bare name: the PATH entry that is the same file as the exe.
+        assert_eq!(go("paddock", path), Path::new("/opt/homebrew/bin/paddock"));
+        // No match, an empty PATH, or an exe that cannot be resolved: the exe.
+        assert_eq!(go("paddock", OsStr::new("/usr/bin:/other")), exe);
+        assert_eq!(go("paddock", OsStr::new("")), exe);
+        assert_eq!(stable_path(Path::new("paddock"), Some(cwd), path, |_| None, exe), exe);
+        // Relative PATH entries (".", "bin", empty) are never trusted, even when they resolve to the exe.
+        let canon_rel = |p: &Path| match p.to_str().unwrap() {
+            "./paddock" | "bin/paddock" | "paddock" | "/opt/Cellar/paddock/0.1.0/bin/paddock" | "/opt/homebrew/bin/paddock" => Some(exe.to_path_buf()),
+            _ => None,
+        };
+        let rel = |path: &str| stable_path(Path::new("paddock"), Some(cwd), OsStr::new(path), canon_rel, exe);
+        assert_eq!(rel(".:bin::/usr/bin"), exe);
+        assert_eq!(rel(".:bin:/opt/homebrew/bin"), Path::new("/opt/homebrew/bin/paddock"));
+        // No cwd: an absolute argv0 still stands; a relative one with a `/` falls through to PATH, then the exe.
+        let nocwd = |argv0: &str, path: &str| stable_path(Path::new(argv0), None, OsStr::new(path), canon_rel, exe);
+        assert_eq!(nocwd("/opt/homebrew/bin/paddock", ""), Path::new("/opt/homebrew/bin/paddock"));
+        assert_eq!(nocwd("./target/debug/paddock", "/opt/homebrew/bin"), Path::new("/opt/homebrew/bin/paddock"));
+        assert_eq!(nocwd("bin/paddock", "bin"), exe);
     }
 }
