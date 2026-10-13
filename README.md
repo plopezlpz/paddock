@@ -7,15 +7,18 @@ pi, …): which one is working, which is waiting for you, which has finished.
 It uses one tmux control-mode connection and redraws only when something
 changes.
 
-![Sessions tab](docs/screenshots/sessions.png)
-![Agents tab](docs/screenshots/agents.png)
+![Sessions tab](https://raw.githubusercontent.com/plopezlpz/paddock/master/docs/screenshots/sessions.png)
+![Agents tab](https://raw.githubusercontent.com/plopezlpz/paddock/master/docs/screenshots/agents.png)
 
 > **Status: prototype.** It's used daily on macOS. Linux should work. Expect
 > changes.
 
 ## Install
 
-You need tmux 3.8+ and Rust 1.88+.
+You need tmux 3.8 or later (`tmux -V`); distribution packages are usually
+older. Prebuilt binaries cover macOS and Linux, arm64 and x86_64.
+
+### TPM
 
 With [TPM](https://github.com/tmux-plugins/tpm), in `~/.tmux.conf` (set the
 options before the plugin loads):
@@ -25,16 +28,52 @@ set -g @paddock-key 'C'          # prefix C opens paddock (replaces customize-mo
 set -g @plugin 'plopezlpz/paddock'
 ```
 
-Press `prefix I`, then build once and reload tmux:
+Press `prefix I`, then the key. It offers to download the matching binary
+from the GitHub release (checksum verified); press the key again. No Rust
+needed. After `prefix U`, the key offers the new version. Outside tmux, run
+`~/.tmux/plugins/paddock/scripts/install.sh`.
+
+### Homebrew
 
 ```sh
-cd ~/.tmux/plugins/paddock && cargo build --release
+brew install plopezlpz/tap/paddock
 ```
 
-Without TPM, clone it anywhere, build it, and use
-`run-shell '<clone>/paddock.tmux'` instead of the `@plugin` line. If the
-clone has no build, paddock uses a `paddock` binary from `PATH` or
-`~/.cargo/bin`. Rebuild after updating.
+```tmux
+set -g @paddock-key 'C'
+run-shell 'paddock init'
+```
+
+If tmux's `PATH` lacks Homebrew's, write out the full path,
+`$(brew --prefix)/bin/paddock`: `/opt/homebrew/bin/paddock` (`/usr/local/bin`
+on Intel Macs).
+
+After `brew upgrade`, reload tmux; until then the key says its bindings are
+for another version.
+
+### From source
+
+Needs Rust 1.88+.
+
+```sh
+cargo install --git https://github.com/plopezlpz/paddock
+```
+
+```tmux
+set -g @paddock-key 'C'
+run-shell '~/.cargo/bin/paddock init'
+```
+
+(`cargo install paddock` will work once it is on crates.io.) Reload tmux
+after `cargo install` too.
+
+### From a clone
+
+For development. Clone it anywhere, run `cargo build --release`, and use
+`run-shell '<clone>/paddock.tmux'` in place of the `@plugin` line.
+paddock.tmux binds the clone's build, else a `bin/paddock` it downloaded, and
+only if that reports the plugin's version; otherwise the key offers the
+download. `PADDOCK_BIN=<path>` overrides the choice.
 
 ## Use
 
