@@ -1962,8 +1962,8 @@ mod tests {
     fn clicks_hit_list_rows_only() {
         let mut app = agents_app();
         let mut view = View::new();
-        // 9 list lines: header, card, card, header, then a card cut off after one line.
-        let term = draw(&app, &mut view, 120, 14);
+        // 8 list lines: header, card, card, blank and header, then a card cut off after one line.
+        let term = draw(&app, &mut view, 120, 13);
         assert!(view.preview_fits);
         let (x, y) = find(&term, "three");
         let before = app.selected;

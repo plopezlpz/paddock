@@ -60,7 +60,8 @@ pub enum RowKind {
     Window { index: String, name: String, meta: String, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
     Agent { state: State, stale: bool, title: String, session: String, meta: String, age: String },
-    Header { label: String, count: usize },
+    /// `gap`: not the first header (wide, a blank line goes above it).
+    Header { label: String, count: usize, gap: bool },
     /// The "+ new" row being named (App's create mode says what it is).
     New,
 }
@@ -75,13 +76,13 @@ pub enum New {
 }
 
 impl Row {
-    /// Screen lines. Wide: an agent card is two lines and a blank one.
-    /// Compact (a phone): windows and agents take two lines each, with no
-    /// blank between cards.
+    /// Screen lines. Agents take two lines; compact (a phone), windows
+    /// do too. Wide, a header after the first has a blank line above it.
     pub fn height(&self, compact: bool) -> u16 {
         match self.kind {
-            RowKind::Agent { .. } if !compact => 3,
-            RowKind::Agent { .. } | RowKind::Window { .. } if compact => 2,
+            RowKind::Agent { .. } => 2,
+            RowKind::Window { .. } if compact => 2,
+            RowKind::Header { gap: true, .. } if !compact => 2,
             _ => 1,
         }
     }
@@ -350,7 +351,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
             group_rows.push(it.3);
         }
         if group != Group::Flat {
-            out.push(Row { target: None, kind: RowKind::Header { label, count: group_rows.len() }, preview: None, score: None });
+            out.push(Row { target: None, kind: RowKind::Header { label, count: group_rows.len(), gap: !out.is_empty() }, preview: None, score: None });
         }
         out.extend(group_rows);
     }
@@ -386,7 +387,7 @@ mod tests {
                 RowKind::Window { name, .. } => format!("  {name}"),
                 RowKind::Pane { command, .. } => format!("    {command}"),
                 RowKind::Agent { title, .. } => format!("  {title}"),
-                RowKind::Header { label, count } => format!("{label} ({count})"),
+                RowKind::Header { label, count, .. } => format!("{label} ({count})"),
                 RowKind::New => "new".into(),
             })
             .collect()

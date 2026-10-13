@@ -322,13 +322,13 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
             });
             (card_lines(Line::from(first), mark, row, compact, width, t, None), None)
         }
-        RowKind::Header { label, count } => (
-            vec![Line::from(vec![
+        RowKind::Header { label, count, gap } => {
+            let line = Line::from(vec![
                 Span::styled(format!(" {label} "), t.muted().add_modifier(Modifier::BOLD)),
                 Span::styled(count.to_string(), t.muted()),
-            ])],
-            None,
-        ),
+            ]);
+            (if *gap && !compact { vec![Line::raw(""), line] } else { vec![line] }, None)
+        }
         // Only listed while it is being named: see create_lines.
         RowKind::New => (vec![Line::from(vec![mark, Span::raw(" "), Span::styled("+ new", Style::new().fg(t.accent))])], None),
     }
@@ -371,8 +371,8 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
     vec![Line::from(line)]
 }
 
-/// An agent card: FIRST, then where it runs and for how long (and a blank
-/// line, wide). Compact, SLOT (the rename field's status) ends line two.
+/// An agent card: FIRST, then how long it has been in its state and where
+/// it runs. Compact, SLOT (the rename field's status) ends line two.
 fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
     let RowKind::Agent { state, stale, session, meta, age, .. } = &row.kind else { return vec![first] };
     // A stale state is unconfirmed: "working?".
@@ -395,10 +395,20 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
         }
         return vec![first, Line::from(second)];
     }
-    let when = if age.is_empty() { format!("{}{unsure}", state.label()) } else { format!("{}{unsure} {age}", state.label()) };
-    second.extend([Span::styled(when, t.state(*state)), Span::styled("  ·  ", t.muted())]);
+    // Wide: the age in its state's colour, padded so the places line up
+    // (ages are at most three columns); the group header or the dot says
+    // the state, spelled out only when it is unconfirmed.
+    let when = match (*stale, age.is_empty()) {
+        (true, true) => format!("{}?", state.label()),
+        (true, false) => format!("{}? {age}", state.label()),
+        (false, true) => String::new(),
+        (false, false) => format!("{age:<3}"),
+    };
+    if !when.is_empty() {
+        second.extend([Span::styled(when, t.state(*state)), Span::raw("  ")]);
+    }
     second.push(Span::styled(fit(meta, width.saturating_sub(cols(&second))), t.muted()));
-    vec![first, Line::from(second), Line::raw("")]
+    vec![first, Line::from(second)]
 }
 
 /// The row being renamed: its name or title is the field, with the
@@ -562,7 +572,8 @@ mod tests {
             RowKind::Window { index: "1".into(), name: "w".into(), meta: "~/a".into(), state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
             RowKind::Agent { state: State::Working, stale: false, title: "t".into(), session: "s".into(), meta: "m".into(), age: "5m".into() },
-            RowKind::Header { label: "working".into(), count: 1 },
+            RowKind::Header { label: "working".into(), count: 1, gap: false },
+            RowKind::Header { label: "idle".into(), count: 1, gap: true },
         ];
         let t = Theme::from_values(&[]);
         for kind in kinds {
