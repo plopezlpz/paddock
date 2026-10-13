@@ -81,14 +81,16 @@ fn context() -> Result<Context, String> {
     }
 }
 
+/// Without --tab, paddock opens on the tab it was last closed on.
 const USAGE: &str = "usage: paddock [--tab sessions|agents] | paddock --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
-        [] | ["--tab", "sessions"] => run(Tab::Sessions),
-        ["--tab", "agents"] => run(Tab::Agents),
+        [] => run(None),
+        ["--tab", "sessions"] => run(Some(Tab::Sessions)),
+        ["--tab", "agents"] => run(Some(Tab::Agents)),
         ["--version" | "-V"] => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -338,10 +340,17 @@ fn connect(tx: &Sender<Ev>) -> Result<Control, String> {
     Err(format!("cannot attach to tmux session {SESSION}: {failure}"))
 }
 
-fn run(tab: Tab) -> Result<(), String> {
+/// Global option holding the tab paddock was last closed on.
+const LAST_TAB: &str = "@paddock-last-tab";
+
+fn run(tab: Option<Tab>) -> Result<(), String> {
     let ctx = context()?;
     let (tx, rx) = mpsc::channel();
     let mut tmux = connect(&tx)?;
+    let tab = tab.unwrap_or_else(|| {
+        let last = tmux.cmd(&format!("show-option -gqv {LAST_TAB}")).unwrap_or_default();
+        Tab::parse(last.first().map_or("", |l| l.trim())).unwrap_or(Tab::Sessions)
+    });
     // Options as the invoking window sees them, not paddock's own session.
     let [host, suggest_command] = <[String; 2]>::try_from(tmux.row(&ctx.window, &["host", "@agent-suggest-command"])).unwrap_or_default();
     let theme = Theme::load(&mut tmux, &ctx.window);
@@ -464,6 +473,8 @@ fn run(tab: Tab) -> Result<(), String> {
         }
     })();
     drop(tui);
+    // The next bare `paddock` reopens this tab.
+    let _ = tmux.cmd(&format!("set-option -gq {LAST_TAB} {}", app.tab.label()));
     if let Some(target) = result? {
         // Switch in one command: a pane target also selects the pane, and -Z
         // keeps a zoomed window zoomed (select-pane would unzoom it).
