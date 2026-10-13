@@ -306,11 +306,16 @@ enum GroupKey {
     All,
 }
 
+/// A card with its group, the group's header label and its sort key (state,
+/// then when it entered it).
+type GroupItem = (GroupKey, String, (State, Option<u64>), Row);
+
 /// One card per agent pane, grouped under headers (none for Group::Flat);
-/// inside a group the most urgent state comes first.
+/// inside a group the most urgent state comes first, then the agent that
+/// entered it most recently.
 /// KEEP is listed whatever the filter says (see `Tree::keep`).
 pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64) -> Vec<Row> {
-    let mut items: Vec<(GroupKey, String, State, Row)> = Vec::new();
+    let mut items: Vec<GroupItem> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
         let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
@@ -339,9 +344,9 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
             preview: Some(p.id.clone()),
             score,
         };
-        items.push((key, label, a.state, row));
+        items.push((key, label, (a.state, a.since), row));
     }
-    // Stable: equal states keep tmux's order.
+    // Descending: no time (None) sorts last; equal times keep tmux's order.
     items.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
     let mut out = Vec::new();
     let mut items = items.into_iter().peekable();
@@ -434,6 +439,19 @@ mod tests {
         let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0);
         assert_eq!(names(&rows), ["waiting (1)", "  deploy", "working (1)", "  fix parser"]);
         assert_eq!(snap().counts(), [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn agents_in_a_state_list_the_most_recent_first() {
+        let snap = fixture(&[
+            "$1|s|@1|1|w|1|%1|0|1|zsh||idle|1|claude|old||100||/a",
+            "$1|s|@2|2|w|0|%2|0|1|zsh||idle|1|claude|unknown||||/a",
+            "$1|s|@3|3|w|0|%3|0|1|zsh||idle|1|claude|new||300||/a",
+            "$1|s|@4|4|w|0|%4|0|1|zsh||asking|0|claude|asks||50||/a",
+            "$1|s|@5|5|w|0|%5|0|1|zsh||idle|1|claude|mid||200||/a",
+        ]);
+        let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 400);
+        assert_eq!(names(&rows), ["/a (5)", "  asks", "  new", "  mid", "  old", "  unknown"]);
     }
 
     #[test]
