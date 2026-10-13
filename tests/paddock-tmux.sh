@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # paddock.tmux against disposable tmux servers: the key and click bindings,
 # reloads, and a real click on the session name. A stub stands in for the
-# paddock binary. Needs tmux 3.8+; skips otherwise.
+# paddock binary. Needs tmux 3.8+; skips otherwise, except in CI.
 # Run: bash tests/paddock-tmux.sh
 set -u
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-command -v tmux >/dev/null || { echo "skip: no tmux"; exit 0; }
+# skip REASON: a pass locally, a failure in CI (which must run the test).
+skip() { echo "skip: $1"; [ -z "${CI:-}" ]; exit; }
+command -v tmux >/dev/null || skip "no tmux"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/paddock-tmux-test.XXXXXX")
 IN=paddock-test-in-$$
@@ -29,7 +31,7 @@ chmod +x "$TMP/plugin/target/release/paddock"
 
 t() { tmux -L "$IN" "$@"; }
 t -f /dev/null new -d -s main -x 60 -y 10 'sleep 600'
-t show-hooks -g client-closed >/dev/null 2>&1 || { echo "skip: tmux 3.8+ needed"; exit 0; }
+t show-hooks -g client-closed >/dev/null 2>&1 || skip "tmux 3.8+ needed"
 t set -g mouse on \; set -g status-left '[main] '
 
 fails=0
