@@ -511,10 +511,10 @@ mod tests {
     /// Agents in two folders: header, card, card, header, card, card.
     fn agents_app() -> App {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||/a",
-            "$1|s|@2|2|w|0|%3|0|1|zsh|working|0|claude|three||/b",
-            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||/b",
+            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|%3|0|1|zsh|working|0|claude|three||||/b",
+            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||||/b",
         ]);
         let mut app = new(snap, Tab::Agents, "@1");
         app.group = Group::Folder;
@@ -524,10 +524,10 @@ mod tests {
 
     fn sessions_app(window: &str) -> App {
         let snap = fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||/h/a",
-            "$1|work|@1|1|edit|1|%2|1|0|zsh||||||/h/a",
-            "$1|work|@2|2|logs|0|%3|0|1|tail||||||/h/b",
-            "$2|play|@3|1|game|1|%4|0|1|zsh|asking|0|codex|deploy||/h/c",
+            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/h/a",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh||||||||/h/a",
+            "$1|work|@2|2|logs|0|%3|0|1|tail||||||||/h/b",
+            "$2|play|@3|1|game|1|%4|0|1|zsh|asking|0|codex|deploy||||/h/c",
         ]);
         new(snap, Tab::Sessions, window)
     }
@@ -606,17 +606,17 @@ mod tests {
         let mut app = agents_app();
         app.selected = 4; // "three"
         app.set_snapshot(fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||/a",
-            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||/b",
+            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||||/b",
         ]));
         assert_eq!(selected_title(&app), "four");
     }
 
     #[test]
     fn the_selection_follows_an_agent_into_another_group() {
-        let line = |state: &str| format!("$1|s|@1|1|w|1|%2|1|0|zsh|{state}|0|claude|two||/a");
-        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||/a", &line(state)]);
+        let line = |state: &str| format!("$1|s|@1|1|w|1|%2|1|0|zsh|{state}|0|claude|two||||/a");
+        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a", &line(state)]);
         let mut app = new(snap("working"), Tab::Agents, "@1");
         app.move_by(1, false);
         assert_eq!(selected_title(&app), "two");
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn a_window_linked_twice_keeps_its_selected_row() {
-        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||||||/a", "$1|s|@1|2|w|0|%1|0|1|zsh||||||/a"]), Tab::Sessions, "@1");
+        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||||||||/a", "$1|s|@1|2|w|0|%1|0|1|zsh||||||||/a"]), Tab::Sessions, "@1");
         assert_eq!(app.selected, 1);
         app.selected = 2;
         app.refresh();
@@ -780,11 +780,18 @@ mod tests {
 
     #[test]
     fn a_generating_description_shows_on_its_card() {
-        let rows = [["$1", "s", "@1", "1", "w", "1", "%1", "0", "1", "zsh", "working", "0", "claude", "task", "", "/a"].map(String::from).to_vec()];
+        let rows = [["$1", "s", "@1", "1", "w", "1", "%1", "0", "1", "zsh", "working", "0", "claude", "task", "", "", "", "/a"].map(String::from).to_vec()];
         let snap = crate::model::parse(&rows, |_| crate::model::Described { text: None, generating: true });
         let app = new(snap, Tab::Agents, "@1");
         let lines = screen(&draw(&app, &mut View::new(), 120, 12));
         assert!(lines.iter().any(|l| l.contains("task  ✦ generating…")), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_stale_state_is_marked_unconfirmed() {
+        let app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|task|0|1||/a"]), Tab::Agents, "@1");
+        let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+        assert!(lines.iter().any(|l| l.contains("working? ")), "{lines:#?}");
     }
 
     #[test]
@@ -816,7 +823,7 @@ mod tests {
 
     #[test]
     fn left_collapses_and_right_expands() {
-        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|nvim||||||/a", "$1|s|@1|1|w|1|%2|1|0|zsh||||||/a"]);
+        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|nvim||||||||/a", "$1|s|@1|1|w|1|%2|1|0|zsh||||||||/a"]);
         let mut app = new(snap, Tab::Sessions, "@1");
         assert_eq!(app.rows.len(), 2);
         app.on_key(key(KeyCode::Left, KeyModifiers::NONE));

@@ -271,7 +271,9 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
             Span::raw(" "),
             Span::styled(command.clone(), sel(Style::new())),
         ])],
-        RowKind::Agent { state, title, generating, session, meta, age } => {
+        RowKind::Agent { state, stale, title, generating, session, meta, age } => {
+            // A stale state is unconfirmed: "working?".
+            let unsure = if *stale { "?" } else { "" };
             let busy = Span::styled(if *generating { "  ✦ generating…" } else { "" }, Style::new().fg(t.hint));
             let mut first = vec![mark.clone(), Span::raw(" "), dot(t, Some(*state)), Span::raw(" ")];
             first.push(if title.is_empty() {
@@ -284,12 +286,12 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
             if compact {
                 // Compact: where and how long; the group header or the dot
                 // says the state.
-                let tail = [Span::styled(" · ", t.muted()), Span::styled(age.clone(), t.state(*state))];
+                let tail = [Span::styled(" · ", t.muted()), Span::styled(format!("{age}{unsure}"), t.state(*state))];
                 second.push(Span::styled(fit(session, width.saturating_sub(cols(&second) + cols(&tail))), t.muted()));
                 second.extend(tail);
                 return vec![Line::from(first), Line::from(second)];
             }
-            second.extend([Span::styled(format!("{} {age}", state.label()), t.state(*state)), Span::styled("  ·  ", t.muted())]);
+            second.extend([Span::styled(format!("{}{unsure} {age}", state.label()), t.state(*state)), Span::styled("  ·  ", t.muted())]);
             second.push(Span::styled(fit(meta, width.saturating_sub(cols(&second))), t.muted()));
             vec![Line::from(first), Line::from(second), Line::raw("")]
         }
@@ -338,7 +340,7 @@ mod tests {
             RowKind::Session { name: "s".into(), windows: 2, current: true },
             RowKind::Window { index: "1".into(), name: "w".into(), meta: "~/a".into(), state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, title: "t".into(), generating: true, session: "s".into(), meta: "m".into(), age: "5m".into() },
+            RowKind::Agent { state: State::Working, stale: false, title: "t".into(), generating: true, session: "s".into(), meta: "m".into(), age: "5m".into() },
             RowKind::Header { label: "working".into(), count: 1 },
         ];
         let t = Theme::from_values(&[]);

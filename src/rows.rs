@@ -59,7 +59,7 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, meta: String, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    Agent { state: State, title: String, generating: bool, session: String, meta: String, age: String },
+    Agent { state: State, stale: bool, title: String, generating: bool, session: String, meta: String, age: String },
     Header { label: String, count: usize },
 }
 
@@ -245,7 +245,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, home: &str, no
         let Some(a) = &p.agent else { continue };
         let folder = p.path.rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or(&p.path);
         let kind = p.label();
-        let Some(score) = filter.score(&format!("{} {} {} {} {}", a.title, s.name, folder, kind, a.state.label())) else {
+        let Some(score) = filter.score(&format!("{} {} {} {} {}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" })) else {
             continue;
         };
         let (key, label) = match group {
@@ -258,6 +258,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, home: &str, no
             target: Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() }),
             kind: RowKind::Agent {
                 state: a.state,
+                stale: a.stale,
                 title: a.title.clone(),
                 generating: a.generating,
                 session: s.name.clone(),
@@ -293,12 +294,12 @@ mod tests {
 
     fn snap() -> Snapshot {
         fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||/h/a/src",
-            "$1|work|@1|1|edit|1|%2|1|0|zsh|working|0|claude|fix parser||/h/a/src",
-            "$1|work|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||/h/b/src",
-            "$2|play|@3|1|game|1|%4|0|1|zsh||||||/h/c",
+            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/h/a/src",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh|working|0|claude|fix parser||||/h/a/src",
+            "$1|work|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||||/h/b/src",
+            "$2|play|@3|1|game|1|%4|0|1|zsh||||||||/h/c",
             // @2 linked into play too.
-            "$2|play|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||/h/b/src",
+            "$2|play|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||||/h/b/src",
         ])
     }
 

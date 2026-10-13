@@ -76,15 +76,29 @@ paddock displays agent state; something else produces it.
 by hooking into each agent. Without a producer, paddock is a session switcher
 with a live preview.
 
-Any producer can feed paddock by setting these pane options:
+Any producer can feed paddock by setting these options on the agent's pane
+(one agent per pane):
 
 | Pane option | Value |
 |---|---|
 | `@agent-state` | `working`, `asking` or `idle` |
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
+| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown as `working?`) |
 | `@agent-kind` | the agent's name, e.g. `claude` |
-| `@agent-auto-description` | what the agent is working on |
+| `@agent-description` | what the agent is working on |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
+
+Only `@agent-state` is required. A producer:
+
+- **unsets** them all when the agent exits. A pane without `@agent-state` has
+  no agent.
+- **clears** `@agent-unseen` when the pane gets focus, from a `pane-focus-in`
+  hook. Jumping there from paddock fires it.
+
+paddock ignores values it doesn't know, so producers can add states.
+agent-status.tmux's `@agent-auto-description` is read when
+`@agent-description` is unset, and its description overrides
+(`@agent-descriptions-dir`, `@agent-revision`) when it sets them.
 
 ## The `_paddock` session
 

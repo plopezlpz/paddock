@@ -41,7 +41,7 @@ use ui::Preview;
 /// `field`, so a newline in it cannot end the notification line.
 fn subscriptions() -> [String; 2] {
     let f = |names: &[&str]| names.iter().map(|n| field(n)).collect::<String>();
-    let panes = f(&["pane_id", "pane_active", "pane_current_command", "pane_current_path", "@agent-state", "@agent-unseen", "@agent-state-at", "@agent-kind", "@agent-auto-description"]);
+    let panes = f(&["pane_id", "pane_active", "pane_current_command", "pane_current_path", "@agent-state", "@agent-unseen", "@agent-state-at", "@agent-stale", "@agent-kind", "@agent-description", "@agent-auto-description"]);
     let windows = f(&["window_index", "window_name", "window_active"]);
     let all = format!("panes::#{{S:{}#{{W:{windows}#{{P:{panes}}}}}}}", f(&["session_name"]));
     [all, format!("revision::{}", f(&["@agent-revision"]))].map(|s| format!("refresh-client -B {}", quote(&s)))

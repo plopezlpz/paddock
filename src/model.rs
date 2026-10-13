@@ -40,13 +40,16 @@ impl State {
 pub struct Agent {
     pub state: State,
     pub kind: String,
-    /// The override, else the automatic first-prompt description.
+    /// The override, else @agent-description, else agent-status.tmux's
+    /// @agent-auto-description.
     pub title: String,
     /// Whether the title is an override (not the automatic one).
     pub overridden: bool,
     /// A generated description is on its way.
     pub generating: bool,
     pub since: Option<u64>,
+    /// The producer hasn't confirmed this state recently.
+    pub stale: bool,
 }
 
 pub struct Pane {
@@ -113,6 +116,8 @@ const FIELDS: &[&str] = &[
     "@agent-kind",
     "@agent-auto-description",
     "@agent-state-at",
+    "@agent-stale",
+    "@agent-description",
     "pane_current_path",
 ];
 
@@ -171,7 +176,7 @@ pub fn snapshot(tmux: &mut Control, descriptions: &Descriptions) -> Result<Snaps
 pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snapshot {
     let mut sessions: Vec<Session> = Vec::new();
     for row in rows {
-        let [sid, sname, wid, windex, wname, wactive, pid, pindex, pactive, command, state, unseen, kind, desc, at, path] =
+        let [sid, sname, wid, windex, wname, wactive, pid, pindex, pactive, command, state, unseen, kind, auto_desc, at, stale, desc, path] =
             row.as_slice()
         else {
             continue;
@@ -199,9 +204,10 @@ pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snap
                 state,
                 kind: kind.clone(),
                 overridden: described.text.is_some(),
-                title: described.text.unwrap_or_else(|| desc.clone()),
+                title: described.text.unwrap_or_else(|| if desc.is_empty() { auto_desc } else { desc }.clone()),
                 generating: described.generating,
                 since: at.parse().ok(),
+                stale: stale == "1",
             }
         });
         session.windows.last_mut().unwrap().panes.push(Pane {
@@ -280,12 +286,12 @@ mod tests {
     #[test]
     fn parses_the_tree() {
         let rows: Vec<Vec<String>> = [
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||/w",
-            "$1|work|@1|1|edit|1|%2|1|0|claude|working|0|claude|fix it|100|/w",
+            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/w",
+            "$1|work|@1|1|edit|1|%2|1|0|claude|working|0|claude|fix it|100|||/w",
             // The same window linked at a second index.
-            "$1|work|@1|2|edit|0|%1|0|1|nvim||||||/w",
-            "$1|work|@2|3|logs|0|%3|0|1|tail|idle|1||||/w|with|bars",
-            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat||||||/",
+            "$1|work|@1|2|edit|0|%1|0|1|nvim||||||||/w",
+            "$1|work|@2|3|logs|0|%3|0|1|tail|idle|1||||||/w|with|bars",
+            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat||||||||/",
             "broken|line",
         ]
         .iter()
@@ -302,6 +308,16 @@ mod tests {
         assert_eq!((agent.state, agent.title.as_str(), agent.overridden, agent.generating), (State::Finished, "override", true, true));
         assert_eq!(w[2].panes[0].path, "/w|with|bars", "the last field keeps separators");
         assert!(w[0].panes[0].agent.is_none());
+    }
+
+    #[test]
+    fn description_and_stale() {
+        let snap = fixture(&[
+            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|pi|auto|100|1|set|/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|pi|auto|100|||/a",
+        ]);
+        let agents: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| (a.title.as_str(), a.stale)).collect();
+        assert_eq!(agents, [("set", true), ("auto", false)], "@agent-description wins over @agent-auto-description");
     }
 
     #[test]
