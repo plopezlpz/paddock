@@ -86,11 +86,17 @@ Any producer can feed paddock by setting these pane options:
 | `@agent-auto-description` | what the agent is working on |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
 
-## Limitation
+## The `_paddock` session
 
-While open, paddock is attached to tmux as a control client. A tmux command
-run elsewhere without `-c` or `-t` may treat it as the current client, and
-`client-attached` hooks fire when the popup opens.
+While open, paddock is attached to tmux as a control client. So that it never
+becomes the "current client" of your sessions, it attaches to a session of its
+own, `_paddock` (one idle `cat`), created on first use and kept. paddock hides
+it; `tmux ls`, `choose-tree` and tmux-resurrect still list it. The
+`client-attached`, `client-detached` and other client hooks are emptied on
+that session, so your global ones do not run when the popup opens or closes.
+
+A tmux command run from outside tmux without `-c` or `-t` may still pick
+paddock's client while the popup is open.
 
 ## License
 

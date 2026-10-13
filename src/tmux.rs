@@ -30,6 +30,17 @@ pub struct Control {
 /// How long a command may take before the connection is given up.
 const TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The session the control client attaches to, created once and kept. A
+/// client attached to the user's session would be a candidate whenever a
+/// command run from a pane there names no client, and the newest one until
+/// the next key press.
+pub const SESSION: &str = "_paddock";
+
+/// Hooks attaching or detaching fires, emptied on SESSION so the user's
+/// global ones do not run for paddock (client-created fires before the
+/// client has a session, so only the global one applies).
+const HOOKS: &[&str] = &["client-attached", "client-session-changed", "client-resized", "client-active", "client-detached", "client-closed"];
+
 /// `tmux` invocation for the server the popup runs on. Inside tmux the TMUX
 /// variable names the socket; it is dropped so `attach` is not refused as
 /// nesting.
@@ -45,12 +56,31 @@ fn tmux_command() -> Command {
 }
 
 impl Control {
-    /// Attach a control client to `session` without resizing windows or
+    /// Attach a control client to SESSION without resizing windows or
     /// streaming pane output. Notifications are passed to `events`.
-    pub fn connect(session: &str, events: impl Fn(Msg) + Send + 'static) -> Result<Control, String> {
+    pub fn connect(events: impl Fn(Msg) + Send + 'static) -> Result<Control, String> {
+        // Exact: a bare name is also tried as a prefix and as a window.
+        let target = format!("={SESSION}:");
+        // Create SESSION unless it exists (then new-session fails and the
+        // rest of the list is skipped). It must outlive the popup even under
+        // a global destroy-unattached.
+        let _ = tmux_command()
+            .args(["new-session", "-d", "-s", SESSION, "-n", "paddock", "cat", ";"])
+            .args(["set-option", "-t", &target, "destroy-unattached", "off"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let mut cmd = tmux_command();
         // -u: UTF-8 output whatever the popup's locale says.
-        cmd.args(["-u", "-C", "attach-session", "-f", "ignore-size,no-output", "-t", session]);
+        cmd.args(["-u", "-C"]);
+        // Every time, before attaching: a session from an older paddock or
+        // restored by tmux-resurrect has no overrides.
+        for hook in HOOKS {
+            cmd.args(["set-hook", "-t", &target, hook, "", ";"]);
+        }
+        cmd.args(["set-option", "-t", &target, "destroy-unattached", "off", ";"]);
+        cmd.args(["attach-session", "-f", "ignore-size,no-output", "-t", &target]);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

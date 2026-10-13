@@ -30,7 +30,7 @@ use app::{Action, App, Op, Tab, View};
 use live::Live;
 use model::{snapshot, Descriptions, Target};
 use theme::Theme;
-use tmux::{field, quote, Control, Msg, SEP};
+use tmux::{field, quote, Control, Msg, SEP, SESSION};
 use ui::Preview;
 
 /// Refresh triggers, checked by tmux about once a second: every pane in
@@ -161,12 +161,12 @@ fn next_minute() -> Instant {
     Instant::now() + Duration::from_secs(60 - now.as_secs() % 60)
 }
 
-fn connect(session: &str, tx: mpsc::Sender<Ev>) -> Result<Control, String> {
-    let mut tmux = Control::connect(session, move |m| {
+fn connect(tx: mpsc::Sender<Ev>) -> Result<Control, String> {
+    let mut tmux = Control::connect(move |m| {
         let _ = tx.send(Ev::Tmux(m));
     })?;
     for s in subscriptions() {
-        tmux.cmd(&s).map_err(|e| format!("cannot attach to tmux session {session}: {e}"))?;
+        tmux.cmd(&s).map_err(|e| format!("cannot attach to tmux session {SESSION}: {e}"))?;
     }
     Ok(tmux)
 }
@@ -174,7 +174,7 @@ fn connect(session: &str, tx: mpsc::Sender<Ev>) -> Result<Control, String> {
 fn run(tab: Tab) -> Result<(), String> {
     let ctx = context()?;
     let (tx, rx) = mpsc::channel();
-    let mut tmux = connect(&ctx.session, tx.clone())?;
+    let mut tmux = connect(tx.clone())?;
     let descriptions = Descriptions::load(&mut tmux);
     let theme = Theme::load(&mut tmux);
     let home = std::env::var("HOME").unwrap_or_default();

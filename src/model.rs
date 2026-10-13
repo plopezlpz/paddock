@@ -2,7 +2,7 @@
 //! per-pane agent options, from a single `list-panes -a`; and the targets
 //! commands act on.
 
-use crate::tmux::{quote, Control};
+use crate::tmux::{quote, Control, SESSION};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum State {
@@ -166,7 +166,8 @@ pub fn snapshot(tmux: &mut Control, descriptions: &Descriptions) -> Result<Snaps
 }
 
 /// Build the tree from `list-panes -a` rows (FIELDS, in session and window
-/// order). DESCRIBE gives a pane's description override.
+/// order), without paddock's own session. DESCRIBE gives a pane's
+/// description override.
 pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snapshot {
     let mut sessions: Vec<Session> = Vec::new();
     for row in rows {
@@ -175,6 +176,9 @@ pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snap
         else {
             continue;
         };
+        if sname == SESSION {
+            continue;
+        }
         if sessions.last().is_none_or(|s| &s.id != sid) {
             sessions.push(Session { id: sid.clone(), name: sname.clone(), windows: Vec::new() });
         }
@@ -281,12 +285,14 @@ mod tests {
             // The same window linked at a second index.
             "$1|work|@1|2|edit|0|%1|0|1|nvim||||||/w",
             "$1|work|@2|3|logs|0|%3|0|1|tail|idle|1||||/w|with|bars",
+            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat||||||/",
             "broken|line",
         ]
         .iter()
         .map(|l| l.splitn(FIELDS.len(), '|').map(String::from).collect())
         .collect();
         let snap = parse(&rows, |p| Described { text: (p == "%3").then(|| "override".to_string()), generating: p == "%3" });
+        assert_eq!(snap.sessions.len(), 1, "paddock's own session is left out");
         let w = &snap.sessions[0].windows;
         assert_eq!(w.iter().map(|w| (w.id.as_str(), w.index.as_str())).collect::<Vec<_>>(), [("@1", "1"), ("@1", "2"), ("@2", "3")]);
         assert_eq!(w[0].panes.len(), 2);
