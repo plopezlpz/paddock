@@ -22,3 +22,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+      # The tmux entrypoint needs tmux 3.8+: Homebrew has it, Ubuntu's apt does not.
+      - name: Plugin
+        if: runner.os == 'macOS'
+        run: brew install tmux && bash tests/paddock-tmux.sh

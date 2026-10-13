@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # paddock -- tmux entrypoint (TPM or run-shell): binds @paddock-key (the tab paddock
-# was last closed on) and @paddock-agents-key (agents tab) to the paddock popup.
-# Both unbound unless set.
+# was last closed on) and @paddock-agents-key (agents tab) to the paddock popup,
+# and with @paddock-click on, a click on the session name (status-left). All
+# unbound unless set.
 set -euf
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # A build in this checkout, else an installed binary. The tmux server's PATH
@@ -24,7 +25,9 @@ tmux set-option -gqo @paddock-popup-style  'bg=terminal,fg=terminal'
 
 key=$(tmux show-option -gqv @paddock-key)
 agents_key=$(tmux show-option -gqv @paddock-agents-key)
-if [ -z "$key$agents_key" ]; then
+click=$(tmux show-option -gqv @paddock-click)
+[ "$click" = on ] || click=
+if [ -z "$key$agents_key$click" ]; then
   tmux display-message "paddock: set @paddock-key before loading paddock.tmux"
 fi
 # On reload, drop the keys bound last time (the options may have changed),
@@ -35,6 +38,9 @@ for old in $(tmux show-option -gqv @paddock-bound-keys); do
   esac
 done
 tmux set-option -gq @paddock-bound-keys "$key $agents_key"
+case $(tmux list-keys -N -T root MouseUp1StatusLeft 2>/dev/null) in
+  *paddock*) tmux unbind -n MouseUp1StatusLeft ;;
+esac
 
 # arg VALUE: VALUE as one single-quoted tmux argument.
 arg() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -56,14 +62,17 @@ bin=$(literal "$BIN")
 popup="display-popup -B -EE -c #{q:client_name} -w $w -h $h -s $style"
 popup="$popup -e PADDOCK_CLIENT=#{q:client_name} -e PADDOCK_SESSION=#{q:session_id} -e PADDOCK_WINDOW=#{q:window_id}"
 
-# bind_tab KEY [TAB]: without TAB, paddock reopens the tab it was closed on.
+# bind_tab TABLE KEY [TAB]: without TAB, paddock reopens the tab it was closed on.
 bind_tab() {
-  [ -n "$1" ] || return 0
+  [ -n "$2" ] || return 0
   if [ -x "$BIN" ]; then
-    tmux bind -N "paddock${2:+ $2}" "$1" run-shell -C "$popup $bin${2:+ --tab $2}"
+    tmux bind -N "paddock${3:+ $3}" -T "$1" "$2" run-shell -C "$popup $bin${3:+ --tab $3}"
   else
-    tmux bind -N "paddock${2:+ $2}" "$1" display-message "paddock: not built -- run cargo build --release in $CURRENT_DIR, then reload tmux"
+    tmux bind -N "paddock${3:+ $3}" -T "$1" "$2" display-message "paddock: not built -- run cargo build --release in $CURRENT_DIR, then reload tmux"
   fi
 }
-bind_tab "$key"
-bind_tab "$agents_key" agents
+bind_tab prefix "$key"
+bind_tab prefix "$agents_key" agents
+# On release, not press: the popup opens once the click is over, so the
+# release can't land on a paddock row. Copy mode lets it through too.
+bind_tab root "${click:+MouseUp1StatusLeft}"
