@@ -87,15 +87,19 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         x += name.len() as u16 + 2;
     }
     let counts = app.snap.counts();
-    let mut tally = vec![];
-    for s in State::ALL.into_iter().rev() {
-        let n = counts[s as usize];
-        if n > 0 {
-            tally.push(Span::raw(" "));
-            tally.push(dot(t, Some(s)));
-            tally.push(Span::raw(format!(" {n}")));
-        }
+    let mut groups: Vec<[Span; 3]> = State::ALL
+        .into_iter()
+        .rev()
+        .filter(|&s| counts[s as usize] > 0)
+        .map(|s| [Span::raw(" "), dot(t, Some(s)), Span::raw(format!(" {}", counts[s as usize]))])
+        .collect();
+    // Drawn over the tabs where they meet: the least urgent states go
+    // first, so no count is left without its dot.
+    let fits = |g: &[[Span; 3]]| g.is_empty() || cols(&title) + g.iter().map(|g| cols(g)).sum::<usize>() + 4 <= area.width as usize;
+    while !fits(&groups) {
+        groups.pop();
     }
+    let mut tally: Vec<Span> = groups.into_iter().flatten().collect();
     if !tally.is_empty() {
         tally.push(Span::raw(" "));
     }
