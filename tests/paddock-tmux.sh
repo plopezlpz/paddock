@@ -19,6 +19,9 @@ cleanup() {
 }
 trap cleanup EXIT
 unset TMUX
+# No real paddock: paddock.tmux falls back to PATH and ~/.cargo/bin.
+PATH="$(dirname "$(command -v tmux)"):/usr/bin:/bin"
+export HOME="$TMP" PATH
 
 # A checkout with a stub build: it records how the popup started it.
 mkdir -p "$TMP/plugin/target/release"
@@ -30,7 +33,7 @@ EOF
 chmod +x "$TMP/plugin/target/release/paddock"
 
 t() { tmux -L "$IN" "$@"; }
-t -f /dev/null new -d -s main -x 60 -y 10 'sleep 600'
+t -f /dev/null new -d -s main -x 60 -y 10 'sleep 600' || { echo "FAIL server start"; exit 1; }
 t show-hooks -g client-closed >/dev/null 2>&1 || skip "tmux 3.8+ needed"
 t set -g mouse on \; set -g status-left '[main] '
 
@@ -53,17 +56,18 @@ check "nothing on press" test -z "$(t list-keys -T root MouseDown1StatusLeft 2>/
 # A real click: an outer server's pane runs a client of the inner one, and
 # SGR mouse bytes typed into it press and release on the status line.
 tmux -L "$OUT" -f /dev/null new -d -x 60 -y 10 "env -u TMUX tmux -L $IN attach -t main"
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 50); do
   [ -n "$(t list-clients)" ] && break
   sleep 0.1
 done
 client=$(t list-clients -F '#{client_name}')
+check "nested client attached" test -n "$client"
 press() { tmux -L "$OUT" send-keys -H 1b 5b 3c 30 3b 32 3b 31 30 "$1"; }
 press 4d; sleep 0.3
 check "press alone opens nothing" test ! -e "$TMP/opened"
 press 6d
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -e "$TMP/opened" ] && break
+for _ in $(seq 50); do
+  [ -s "$TMP/opened" ] && break
   sleep 0.1
 done
 expected="$client $(t display -p -t main '#{session_id} #{window_id}') "
@@ -81,6 +85,8 @@ t unbind -n MouseUp1StatusLeft
 t set -gu @paddock-key \; set -g @paddock-click on
 load
 check "the click alone is enough" has "$(root_click)" "display-popup"
+# Messages are only logged with a client attached.
+check "nested client still attached" test -n "$(t list-clients)"
 check "no missing-key warning" test -z "$(t show-messages 2>/dev/null | grep 'set @paddock-key')"
 
 rm "$TMP/plugin/target/release/paddock"
