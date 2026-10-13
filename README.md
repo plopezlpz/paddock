@@ -39,7 +39,7 @@ clone has no build, paddock uses a `paddock` binary from `PATH` or
 ## Use
 
 - **Sessions tab**: session › window › pane tree with each window's agent state.
-- **Agents tab**: one card per agent, grouped by status, session or folder.
+- **Agents tab**: one card per agent, grouped by status, session or folder; it opens on the agent you are in.
 - **Preview**: the selected pane, live, when the popup is at least 102
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.

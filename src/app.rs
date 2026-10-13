@@ -569,7 +569,13 @@ impl App {
             } else if self.tab == Tab::Sessions {
                 self.position(&Target::Window { session: self.current_session.clone(), window: self.current_window.clone() })
             } else {
-                None
+                // The agent in the window selected before (a tab change from
+                // sessions), else in the current one.
+                let window = match &keep {
+                    Some(Target::Window { window, .. }) => window.clone(),
+                    _ => self.current_window.clone(),
+                };
+                self.agent_in(&window)
             }
         });
         self.selected = pick.or_else(|| self.nearest(0)).unwrap_or(0);
@@ -579,6 +585,14 @@ impl App {
         {
             self.selected = i;
         }
+    }
+
+    /// The card of WINDOW's active pane, else of its first agent.
+    fn agent_in(&self, window: &str) -> Option<usize> {
+        let active = self.snap.unique_panes().find(|(_, w, p)| w.id == window && p.active).map(|(_, _, p)| p.id.as_str());
+        let card = |i: &usize| matches!(&self.rows[*i].target, Some(Target::Pane { window: w, .. }) if w == window);
+        let pane = |i: &usize| matches!(&self.rows[*i].target, Some(Target::Pane { pane, .. }) if Some(pane.as_str()) == active);
+        (0..self.rows.len()).filter(card).find(pane).or_else(|| (0..self.rows.len()).find(card))
     }
 
     fn position(&self, target: &Target) -> Option<usize> {
@@ -1821,6 +1835,25 @@ mod tests {
         assert_eq!(selected_title(&app), "logs");
         type_(&mut app, "codex");
         assert_eq!(selected_title(&app), "game", "the window whose agent matches");
+    }
+
+    #[test]
+    fn agents_open_on_the_agent_you_are_in() {
+        let snap = || {
+            fixture(&[
+                "$1|s|@1|1|w|1|%1|0|0|zsh||working|0|claude|one||||/a",
+                "$1|s|@1|1|w|1|%2|1|1|zsh||asking|0|claude|two||||/a",
+                "$1|s|@2|2|w|0|%3|0|1|nvim|||||||||/b",
+                "$1|s|@2|2|w|0|%4|1|0|zsh||idle|0|codex|four||||/b",
+                "$1|s|@3|3|w|0|%5|0|1|zsh||working|0|claude|five||||/c",
+            ])
+        };
+        assert_eq!(selected_title(&new(snap(), Tab::Agents, "@1")), "two", "the active pane");
+        assert_eq!(selected_title(&new(snap(), Tab::Agents, "@2")), "four", "the window's agent when its active pane is none");
+        let mut app = new(snap(), Tab::Sessions, "@1");
+        app.selected = app.position(&Target::Window { session: "$1".into(), window: "@3".into() }).unwrap();
+        app.run(Command::Tab(Tab::Agents));
+        assert_eq!(selected_title(&app), "five", "the window selected in sessions");
     }
 
     #[test]
