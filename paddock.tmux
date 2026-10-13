@@ -8,15 +8,14 @@ CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BIN="$CURRENT_DIR/target/release/paddock"
 [ -x "$BIN" ] || BIN=$(command -v paddock 2>/dev/null || printf '%s' "$HOME/.cargo/bin/paddock")
 
-# tmux 3.8 added the client-closed hook paddock empties on its session.
-version=$(tmux -V | sed 's/[^0-9.]//g')
-if [ "$(printf '%s\n' 3.8 "$version" | sort -V | head -1)" != 3.8 ]; then
-  tmux display-message "paddock: needs tmux 3.8 or later (this is $(tmux -V))"
+# paddock needs tmux 3.8: it empties the client-closed hook (new in 3.8) on
+# its session. Ask the server for the hook rather than parse version strings
+# (3.8a, next-3.9, master, openbsd-7.6).
+if ! tmux show-hooks -g client-closed >/dev/null 2>&1; then
+  tmux display-message "paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
   exit 0
 fi
 
-tmux set-option -gqo @paddock-key ''
-tmux set-option -gqo @paddock-agents-key ''
 tmux set-option -gqo @paddock-popup-width  '80%'
 tmux set-option -gqo @paddock-popup-height '80%'
 # The terminal's own colours, not tmux's default popup style.

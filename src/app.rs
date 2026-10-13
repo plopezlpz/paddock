@@ -1,14 +1,19 @@
-//! Popup state: the snapshot, the current tab's rows, selection and input.
-//! Where things landed on screen is the View, written by each draw.
+//! Popup state: the snapshot, the current tab's rows, the selection, the
+//! filter and the mode (the list, renaming, a menu). Where things landed on
+//! screen is the View, written by each draw.
+//!
+//! Every action has one Command, whether it comes from a key, a footer hint,
+//! a menu item or a tap; `hints` and `menu_items` say which apply where.
 
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use crate::edit::{Edited, LineEdit};
 use crate::model::{Snapshot, Target};
-use crate::rows::{self, Filter, Group, Row, RowKind};
+use crate::rows::{self, Filter, Group, New, Row, RowKind, Tree};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -32,35 +37,89 @@ impl Tab {
     }
 }
 
+/// What the popup asks the loop to do.
+#[derive(Debug)]
 pub enum Action {
     None,
     Quit,
     Activate(Target),
-    Run(Op),
+    /// Run the job's change on the tmux server, then report through `ran`.
+    Run(Job),
+    /// Ask the suggest command for PANE's title; the answer comes back
+    /// through `suggested` with the same ID.
+    Suggest { pane: String, id: u64 },
 }
 
-/// A change paddock carries out while staying open (Action::Run).
-#[derive(Debug, PartialEq)]
+/// A change paddock makes on the tmux server. Sessions, windows and panes
+/// are named by id.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op {
-    /// Set PANE's description override; empty clears it.
-    Describe { pane: String, text: String },
-    /// Have pi generate PANE's description in the background.
-    Generate { pane: String },
+    /// Set PANE's @agent-description; None unsets it (back to automatic).
+    SetTitle { pane: String, title: Option<String> },
+    RenameSession { session: String, name: String },
+    /// An empty NAME turns automatic naming back on.
+    RenameWindow { window: String, name: String },
+    Kill(Target),
+    /// Swap windows A and B of SESSION (named through it: a window linked
+    /// into several sessions is the copy in this one).
+    SwapWindows { session: String, a: String, b: String },
+    SwapPanes(String, String),
+    /// Move WINDOW of session FROM beside window TO of session INTO: after
+    /// it, or BEFORE.
+    MoveWindow { from: String, window: String, into: String, to: String, before: bool },
+    /// Move PANE into a split beside pane TO: after it, or BEFORE.
+    JoinPane { pane: String, to: String, before: bool },
+    /// Make PANE a window of its own at the end of SESSION.
+    BreakPane { pane: String, session: String },
+    NewSession { name: String, dir: String },
+    NewWindow { session: String, after: String, name: String, dir: String },
 }
 
-/// The selected agent's description being edited in the input line.
-pub struct Edit {
-    pub pane: String,
-    pub text: String,
-    /// The title when editing began, and whether it was an override: an
-    /// untouched automatic description is not saved as one.
-    original: String,
-    overridden: bool,
+/// An Op, what undoes it, what to say once it is done, and what to select
+/// (by id) or open afterwards.
+#[derive(Debug)]
+pub struct Job {
+    pub op: Op,
+    undo: Option<Op>,
+    done: String,
+    /// Select this window or pane wherever it lands.
+    follow: Option<String>,
+    /// Jump to what the op created.
+    pub open: bool,
 }
 
-/// What a key or a tap on the title or footer does.
+impl Job {
+    fn new(op: Op, done: impl Into<String>) -> Job {
+        Job { op, undo: None, done: done.into(), follow: None, open: false }
+    }
+
+    fn undo(mut self, op: Option<Op>) -> Job {
+        self.undo = op;
+        self
+    }
+
+    /// What undoes the job, to adjust once the server says more.
+    pub fn undo_op(&mut self) -> Option<&mut Op> {
+        self.undo.as_mut()
+    }
+
+    fn follow(mut self, id: &str) -> Job {
+        self.follow = Some(id.to_string());
+        self
+    }
+}
+
+/// A message on the frame's bottom edge until the next key or click.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Status {
+    Done(String),
+    Failed(String),
+    Note(String),
+}
+
+/// Every action, whatever triggers it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Button {
+pub enum Command {
     Tab(Tab),
     Open,
     /// Expand or collapse the selected window's panes.
@@ -68,30 +127,214 @@ pub enum Button {
     Group,
     Preview,
     Close,
-    /// Edit the selected agent's description.
-    Describe,
+    Rename,
+    /// Rename, starting with a suggestion (a menu item for the mouse).
+    RenameSuggest,
+    Kill,
+    /// Name a new window, after the selected one, or a new session (^s;
+    /// ^s again switches between them).
+    NewWindow,
+    NewSession,
+    /// Pick the selected window or pane up, to drop it elsewhere.
+    Move,
+    /// Swap with the row above or below (across sessions and windows at
+    /// the ends).
+    MoveUp,
+    MoveDown,
+    Undo,
+    /// The selected row's menu (the footer's ⋯).
+    Menu,
+    // While renaming:
     Save,
-    Generate,
+    Suggest,
+    Clear,
     Cancel,
+    /// Confirm (a kill), or drop what is carried.
+    Confirm,
+}
+
+/// A footer hint: the key, the word, and the command a tap runs. Hints are
+/// listed in display order; `rank` says which go first when room runs out
+/// (lower goes first).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hint {
+    pub key: &'static str,
+    pub label: String,
+    pub command: Command,
+    pub rank: u8,
+}
+
+fn hint(key: &'static str, label: impl Into<String>, command: Command, rank: u8) -> Hint {
+    Hint { key, label: label.into(), command, rank }
+}
+
+/// A menu entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item {
+    pub label: String,
+    pub key: &'static str,
+    pub command: Command,
+}
+
+fn item(label: impl Into<String>, key: &'static str, command: Command) -> Item {
+    Item { label: label.into(), key, command }
+}
+
+/// What a rename names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Renaming {
+    /// An agent's title (@agent-description).
+    Agent { pane: String },
+    Session { session: String },
+    Window { window: String },
+}
+
+/// A title or name being edited in place.
+#[derive(Debug)]
+pub struct Rename {
+    pub target: Target,
+    pub what: Renaming,
+    pub field: LineEdit,
+    /// The title when renaming began, and whether the user had set it.
+    original: String,
+    renamed: bool,
+    /// What an empty field means: the automatic title or name.
+    pub placeholder: String,
+    /// The suggestion on its way, if any (agents only).
+    pub suggesting: Option<u64>,
+    /// Why the last suggestion or save failed.
+    pub error: Option<String>,
+}
+
+/// A change waiting for a yes: what it is, and the question.
+#[derive(Debug)]
+pub struct Confirm {
+    pub job: Job,
+    pub question: String,
+    /// The yes button's word ("kill", "move").
+    pub verb: &'static str,
+}
+
+/// A new window or session being named, on its own row where it will go.
+#[derive(Debug)]
+pub struct Create {
+    pub new: New,
+    /// The other one (^s switches): a session for a window, and back.
+    other: New,
+    pub field: LineEdit,
+    /// Why the name was refused.
+    pub error: Option<String>,
+}
+
+/// A window or pane picked up, to drop after the selected row.
+#[derive(Debug)]
+pub struct Carry {
+    pub target: Target,
+    /// "window api", "pane webshop:1.1".
+    pub label: String,
+    /// Picked up by dragging: the release drops it.
+    dragging: bool,
+}
+
+#[derive(Debug)]
+pub struct Menu {
+    pub items: Vec<Item>,
+    pub selected: usize,
+    /// The screen cell it hangs from (the click, or the selected row).
+    pub anchor: Position,
+}
+
+#[derive(Debug)]
+pub enum Mode {
+    List,
+    Rename(Rename),
+    Menu(Menu),
+    Confirm(Confirm),
+    Move(Carry),
+    Create(Create),
+}
+
+/// Titles are cut to this many characters (graphemes), as suggestions are.
+const TITLE_MAX: usize = 80;
+/// Two clicks on a row this close together open it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// PageUp and PageDown move this many rows.
+const PAGE: isize = 10;
+
+/// The tmux id a target names.
+fn id_of(t: &Target) -> &str {
+    match t {
+        Target::Session { session } => session,
+        Target::Window { window, .. } => window,
+        Target::Pane { pane, .. } => pane,
+        Target::New(_) => "",
+    }
+}
+
+/// "codex waiting, claude working" for the agents among PANES.
+fn agents_in<'a>(panes: impl Iterator<Item = &'a crate::model::Pane>) -> String {
+    let agents: Vec<String> = panes.filter_map(|p| p.agent.as_ref().map(|a| format!("{} {}", p.label(), a.state.label()))).collect();
+    agents.join(", ")
+}
+
+/// What a mouse press landed on; the release completes it there.
+#[derive(Clone, Debug, PartialEq)]
+enum Hit {
+    /// A list row: its index when drawn, and its target.
+    Row(usize, Target),
+    Button(Command),
+    /// A window's ▸/▾.
+    Toggle(Target),
+    MenuItem(usize),
+}
+
+struct Press {
+    hit: Option<Hit>,
+    at: Position,
+    /// The row was already selected (compact: a tap on it opens).
+    was_selected: bool,
 }
 
 /// Where the last draw put things: the scroll position and what is under
 /// each screen cell. Owned by the loop, written by `ui::draw`.
 pub struct View {
-    /// Under 80 columns (a phone): fewer details, two-line rows.
+    /// Under 80 columns (a phone): fewer details, two-line rows, taps.
     pub compact: bool,
     /// Whether the preview has room. Assumed until the first draw, so the
     /// first frame already has it.
     pub preview_fits: bool,
     /// The first list row on screen.
     pub offset: usize,
-    pub rows: Vec<(Rect, Target)>,
-    pub buttons: Vec<(Rect, Button)>,
+    /// List rows: where, their index, their target.
+    pub rows: Vec<(Rect, usize, Target)>,
+    pub buttons: Vec<(Rect, Command)>,
+    pub toggles: Vec<(Rect, Target)>,
+    /// The open menu's box and its items.
+    pub menu: Option<Rect>,
+    pub items: Vec<(Rect, usize)>,
 }
 
 impl View {
     pub fn new() -> View {
-        View { compact: false, preview_fits: true, offset: 0, rows: Vec::new(), buttons: Vec::new() }
+        View {
+            compact: false,
+            preview_fits: true,
+            offset: 0,
+            rows: Vec::new(),
+            buttons: Vec::new(),
+            toggles: Vec::new(),
+            menu: None,
+            items: Vec::new(),
+        }
+    }
+
+    /// Forget the last draw's hit areas.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.buttons.clear();
+        self.toggles.clear();
+        self.menu = None;
+        self.items.clear();
     }
 
     /// Scroll so the selection (with a header right above it) is visible in
@@ -116,66 +359,86 @@ impl View {
         }
     }
 
-    fn row_at(&self, at: Position) -> Option<&Target> {
-        self.rows.iter().find(|(r, _)| r.contains(at)).map(|(_, t)| t)
-    }
-
-    fn button_at(&self, at: Position) -> Option<Button> {
-        self.buttons.iter().find(|(r, _)| r.contains(at)).map(|&(_, b)| b)
+    /// What is under AT, menus first (they are drawn on top).
+    fn hit(&self, at: Position) -> Option<Hit> {
+        let inside = |r: &Rect| r.contains(at);
+        if let Some(menu) = self.menu {
+            return self.items.iter().find(|(r, _)| inside(r)).map(|&(_, i)| Hit::MenuItem(i)).filter(|_| inside(&menu));
+        }
+        (self.buttons.iter().find(|(r, _)| inside(r)).map(|&(_, c)| Hit::Button(c)))
+            .or_else(|| self.toggles.iter().find(|(r, _)| inside(r)).map(|(_, t)| Hit::Toggle(t.clone())))
+            .or_else(|| self.rows.iter().find(|(r, ..)| inside(r)).map(|(_, i, t)| Hit::Row(*i, t.clone())))
     }
 }
-
-/// PageUp and PageDown move this many rows.
-const PAGE: isize = 10;
 
 pub struct App {
     pub(crate) snap: Snapshot,
     pub(crate) tab: Tab,
     pub(crate) group: Group,
-    pub(crate) query: String,
+    pub(crate) query: LineEdit,
     pub(crate) rows: Vec<Row>,
     pub(crate) selected: usize,
     pub(crate) preview_on: bool,
+    pub(crate) mode: Mode,
+    pub(crate) status: Option<Status>,
+    /// Whether a suggest command is configured (@agent-suggest-command).
+    pub(crate) can_suggest: bool,
     current_session: String,
     current_window: String,
-    /// A message shown instead of the footer until the next key or tap.
-    pub(crate) status: String,
-    pub(crate) edit: Option<Edit>,
-    /// Windows whose panes are listed.
     expanded: HashSet<Target>,
+    collapsed: HashSet<Target>,
+    /// Listed whatever the filter says until the query changes (just renamed).
+    keep: Option<Target>,
     filter: Filter,
     home: String,
     debug: bool,
-    /// Whether descriptions can be edited: off without agent-status.tmux's
-    /// describe.sh, so ^e is neither offered nor handled.
-    pub(crate) can_describe: bool,
+    /// The last suggestion asked for.
+    suggestions: u64,
+    /// What ^z undoes, latest last, and what it did.
+    undo: Vec<(Op, String)>,
+    press: Option<Press>,
+    /// The last click on a row, for double-clicks.
+    last_click: Option<(Target, Instant)>,
+    /// A window or pane to select once the next snapshot shows where it is.
+    follow: Option<String>,
 }
 
 impl App {
-    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, debug: bool, can_describe: bool) -> App {
+    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, debug: bool, can_suggest: bool) -> App {
         let mut app = App {
             snap,
             tab,
             group: Group::Status,
-            query: String::new(),
+            query: LineEdit::default(),
             rows: Vec::new(),
             selected: 0,
             preview_on: true,
+            mode: Mode::List,
+            status: None,
+            can_suggest,
             current_session,
             current_window,
-            status: String::new(),
-            edit: None,
             expanded: HashSet::new(),
+            collapsed: HashSet::new(),
+            keep: None,
             filter: Filter::new(),
             home,
             debug,
-            can_describe,
+            suggestions: 0,
+            undo: Vec::new(),
+            press: None,
+            last_click: None,
+            follow: None,
         };
         app.rebuild(true);
         app
     }
 
-    fn selected_target(&self) -> Option<&Target> {
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+
+    pub fn selected_target(&self) -> Option<&Target> {
         self.rows.get(self.selected)?.target.as_ref()
     }
 
@@ -187,9 +450,71 @@ impl App {
         self.rows.get(self.selected)?.preview.as_deref()
     }
 
+    /// The suggestion the loop should still be waiting for.
+    pub fn suggesting(&self) -> Option<u64> {
+        match &self.mode {
+            Mode::Rename(r) => r.suggesting,
+            _ => None,
+        }
+    }
+
     pub fn set_snapshot(&mut self, snap: Snapshot) {
         self.snap = snap;
+        // What is being renamed went away: there is nothing left to name.
+        if let Mode::Rename(r) = &self.mode {
+            let gone = match &r.what {
+                Renaming::Agent { pane } => self.snap.pane(pane).and_then(|(_, _, p)| p.agent.as_ref()).is_none().then_some("that agent has exited"),
+                Renaming::Session { session } => self.find(session).is_none().then_some("that session has closed"),
+                Renaming::Window { window } => self.find(window).is_none().then_some("that window has closed"),
+            };
+            if let Some(why) = gone {
+                self.mode = Mode::List;
+                self.status = Some(Status::Failed(why.into()));
+            }
+        }
+        if let Mode::Move(c) = &self.mode
+            && self.find(id_of(&c.target)).is_none()
+        {
+            let why = format!("the {} has closed", c.label);
+            self.mode = Mode::List;
+            self.status = Some(Status::Failed(why));
+        }
+        // A moved window or pane: select it where it landed.
+        if let Some(id) = self.follow.take()
+            && let Some(target) = self.find(&id)
+        {
+            self.keep = Some(target.clone());
+            self.rebuild(false);
+            // A pane alone in its window is shown as the window.
+            let window = match &target {
+                Target::Pane { session, window, .. } => Some(Target::Window { session: session.clone(), window: window.clone() }),
+                _ => None,
+            };
+            if let Some(i) = self.position(&target).or_else(|| window.and_then(|w| self.position(&w))) {
+                self.selected = i;
+            }
+            return;
+        }
         self.rebuild(false);
+    }
+
+    /// The session, window or pane with tmux id ID, as a target (a window
+    /// linked into several sessions: its first).
+    fn find(&self, id: &str) -> Option<Target> {
+        for s in &self.snap.sessions {
+            if s.id == id {
+                return Some(Target::Session { session: s.id.clone() });
+            }
+            for w in &s.windows {
+                if w.id == id {
+                    return Some(Target::Window { session: s.id.clone(), window: w.id.clone() });
+                }
+                if let Some(p) = w.panes.iter().find(|p| p.id == id) {
+                    return Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() });
+                }
+            }
+        }
+        None
     }
 
     /// Rebuild from the same snapshot (ages tick over).
@@ -205,10 +530,23 @@ impl App {
         let keep = self.selected_target().cloned();
         let old = self.selected;
         self.rows = match self.tab {
-            Tab::Sessions => rows::sessions(&self.snap, &mut self.filter, &self.expanded, &self.current_session, &self.home),
+            Tab::Sessions => {
+                let tree = Tree {
+                    expanded: &self.expanded,
+                    collapsed: &self.collapsed,
+                    keep: self.keep.as_ref(),
+                    current: &self.current_session,
+                    home: &self.home,
+                };
+                let mut rows = rows::sessions(&self.snap, &mut self.filter, &tree);
+                if let Mode::Create(c) = &self.mode {
+                    rows::place_new(&mut rows, &c.new);
+                }
+                rows
+            }
             Tab::Agents => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                rows::agents(&self.snap, &mut self.filter, self.group, &self.home, now)
+                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &self.home, now)
             }
         };
         let kept = keep.as_ref().and_then(|t| self.locate(t, old));
@@ -231,17 +569,23 @@ impl App {
             }
         });
         self.selected = pick.or_else(|| self.nearest(0)).unwrap_or(0);
+        // Naming something new: its row is the selection.
+        if matches!(self.mode, Mode::Create(_))
+            && let Some(i) = self.position(&Target::New(0))
+        {
+            self.selected = i;
+        }
     }
 
     fn position(&self, target: &Target) -> Option<usize> {
         self.rows.iter().position(|r| r.target.as_ref() == Some(target))
     }
 
-    /// TARGET's row: still OLD if it is there (a window linked twice into a
-    /// session is listed twice), else its first.
-    fn locate(&self, target: &Target, old: usize) -> Option<usize> {
-        let at_old = self.rows.get(old).is_some_and(|r| r.target.as_ref() == Some(target));
-        if at_old { Some(old) } else { self.position(target) }
+    /// TARGET's row: still at index AT if it is there (a window linked twice
+    /// into a session is listed twice), else its first.
+    fn locate(&self, target: &Target, at: usize) -> Option<usize> {
+        let there = self.rows.get(at).is_some_and(|r| r.target.as_ref() == Some(target));
+        if there { Some(at) } else { self.position(target) }
     }
 
     fn selectable(&self, i: usize) -> bool {
@@ -279,12 +623,13 @@ impl App {
         }
     }
 
-    /// The expandable window the selected row is, or is a pane of.
-    fn selected_window(&self) -> Option<Target> {
+    /// The window the selected row is, or is a pane of, if it has panes to
+    /// list, and whether they are listed.
+    fn selected_window(&self) -> Option<(Target, bool)> {
         match self.rows.get(self.selected)? {
-            Row { target: Some(t @ Target::Window { .. }), kind: RowKind::Window { expanded: Some(_), .. }, .. } => Some(t.clone()),
+            Row { target: Some(t @ Target::Window { .. }), kind: RowKind::Window { expanded: Some(open), .. }, .. } => Some((t.clone(), *open)),
             Row { target: Some(Target::Pane { session, window, .. }), kind: RowKind::Pane { .. }, .. } => {
-                Some(Target::Window { session: session.clone(), window: window.clone() })
+                Some((Target::Window { session: session.clone(), window: window.clone() }, true))
             }
             _ => None,
         }
@@ -293,133 +638,854 @@ impl App {
     /// Expand (Some(true)), collapse (Some(false)) or toggle (None) the
     /// selected row's window; collapsing from a pane selects its window.
     fn expand(&mut self, how: Option<bool>) {
-        let Some(window) = self.selected_window() else { return };
-        if how.unwrap_or(!self.expanded.contains(&window)) {
+        let Some((window, open)) = self.selected_window() else { return };
+        if how.unwrap_or(!open) {
+            self.collapsed.remove(&window);
             self.expanded.insert(window);
         } else {
             if let Some(i) = self.position(&window) {
                 self.selected = i;
             }
             self.expanded.remove(&window);
+            // A window the filter opens stays closed until the query changes.
+            self.collapsed.insert(window);
         }
         self.rebuild(false);
     }
 
+    fn edit_query(&mut self, key: KeyEvent) {
+        if self.query.key(key) == Edited::Text {
+            self.requery();
+        }
+    }
+
     fn requery(&mut self) {
-        self.filter.set(&self.query);
+        self.filter.set(self.query.text());
+        // What is carried stays listed, whatever the query.
+        self.keep = match &self.mode {
+            Mode::Move(c) => Some(c.target.clone()),
+            _ => None,
+        };
+        self.collapsed.clear();
         self.rebuild(true);
     }
 
-    /// Pasted text joins the query or the description being edited
-    /// (bracketed paste: a newline in it must not act as Enter).
+    /// Pasted text joins the query or the title being edited (bracketed
+    /// paste: a newline in it must not act as Enter).
     pub fn paste(&mut self, text: &str) {
-        let text = text.chars().filter(|c| !c.is_control());
-        match &mut self.edit {
-            Some(edit) => edit.text.extend(text),
-            None => {
-                self.query.extend(text);
-                self.requery();
+        match &mut self.mode {
+            Mode::Rename(r) => {
+                if r.field.insert(text) {
+                    r.suggesting = None;
+                    r.error = None;
+                }
             }
-        }
-    }
-
-    /// Start editing the selected agent's description.
-    fn describe(&mut self) {
-        if !self.can_describe {
-            return;
-        }
-        let Some(Target::Pane { pane, .. }) = self.selected_target() else { return };
-        let Some(agent) = self.snap.pane(pane).and_then(|(_, _, p)| p.agent.as_ref()) else {
-            return;
-        };
-        let (original, overridden) = (agent.title.clone(), agent.overridden);
-        self.edit = Some(Edit { pane: pane.clone(), text: original.clone(), original, overridden });
-    }
-
-    /// Finish editing: Save, Generate or Cancel.
-    fn finish_edit(&mut self, button: Button) -> Action {
-        let Some(edit) = self.edit.take() else { return Action::None };
-        let text = edit.text.trim().to_string();
-        match button {
-            // An untouched automatic description stays automatic.
-            Button::Save if edit.overridden || text != edit.original => Action::Run(Op::Describe { pane: edit.pane, text }),
-            Button::Generate => Action::Run(Op::Generate { pane: edit.pane }),
-            _ => Action::None,
+            Mode::Create(c) => {
+                if c.field.insert(text) {
+                    c.error = None;
+                }
+            }
+            Mode::Menu(_) | Mode::Confirm(_) => {}
+            Mode::List | Mode::Move(_) => {
+                if self.query.insert(text) {
+                    self.requery();
+                }
+            }
         }
     }
 
     fn set_tab(&mut self, tab: Tab) {
         if tab != self.tab {
             self.tab = tab;
+            self.keep = None;
             self.rebuild(true);
         }
     }
 
-    /// Do what BUTTON says, whether pressed by key or tapped.
-    pub fn press(&mut self, button: Button) -> Action {
-        if self.edit.is_some() {
-            return match button {
-                Button::Save | Button::Generate | Button::Cancel => self.finish_edit(button),
-                _ => Action::None,
-            };
+    /// The agent pane the selected row is (a card, or a pane row), if any.
+    fn selected_agent(&self) -> Option<(Target, String)> {
+        let target = self.selected_target()?;
+        let Target::Pane { pane, .. } = target else { return None };
+        self.snap.pane(pane)?.2.agent.as_ref()?;
+        Some((target.clone(), pane.clone()))
+    }
+
+    /// Start renaming the selected row: an agent's title (a card, or an
+    /// agent's pane row), a session's or a window's name.
+    fn rename(&mut self) {
+        let Some(target) = self.selected_target().cloned() else { return };
+        let (what, text, renamed, placeholder) = match &target {
+            Target::Pane { pane, .. } => {
+                let Some(agent) = self.snap.pane(pane).and_then(|(_, _, p)| p.agent.as_ref()) else { return };
+                (Renaming::Agent { pane: pane.clone() }, agent.title.clone(), agent.renamed, agent.auto.clone())
+            }
+            Target::Session { session } => {
+                let Some(s) = self.snap.sessions.iter().find(|s| &s.id == session) else { return };
+                (Renaming::Session { session: s.id.clone() }, s.name.clone(), true, String::new())
+            }
+            Target::Window { session, window } => {
+                let Some(w) = self.snap.sessions.iter().find(|s| &s.id == session).and_then(|s| s.windows.iter().find(|w| &w.id == window)) else {
+                    return;
+                };
+                (Renaming::Window { window: w.id.clone() }, w.name.clone(), true, "named after what runs".to_string())
+            }
+            Target::New(_) => return,
+        };
+        // Listed while it is renamed, whatever its row's text turns into.
+        self.keep = Some(target.clone());
+        self.mode = Mode::Rename(Rename {
+            target,
+            what,
+            field: LineEdit::new(&text, Some(TITLE_MAX)),
+            original: text,
+            renamed,
+            placeholder,
+            suggesting: None,
+            error: None,
+        });
+    }
+
+    /// Ask for a title to fill the field with, unless one is on its way.
+    fn suggest(&mut self) -> Action {
+        let Mode::Rename(r) = &mut self.mode else { return Action::None };
+        let Renaming::Agent { pane } = &r.what else { return Action::None };
+        if r.suggesting.is_some() {
+            return Action::None;
         }
-        match button {
-            Button::Tab(tab) => self.set_tab(tab),
-            Button::Open => return self.selected_target().cloned().map_or(Action::None, Action::Activate),
-            Button::Panes => self.expand(None),
-            Button::Group if self.tab == Tab::Agents => {
+        if !self.can_suggest {
+            self.status = Some(Status::Note("no title suggestions: the agent producer sets none (@agent-suggest-command)".into()));
+            return Action::None;
+        }
+        self.suggestions += 1;
+        r.suggesting = Some(self.suggestions);
+        r.error = None;
+        Action::Suggest { pane: pane.clone(), id: self.suggestions }
+    }
+
+    /// The answer to suggestion ID: it fills the field, unless renaming
+    /// ended or the user typed since asking (typing drops the suggestion).
+    pub fn suggested(&mut self, id: u64, result: Result<String, String>) {
+        let Mode::Rename(r) = &mut self.mode else { return };
+        if r.suggesting != Some(id) {
+            return;
+        }
+        r.suggesting = None;
+        match result {
+            Ok(title) => r.field.set(&title),
+            Err(e) => r.error = Some(e),
+        }
+    }
+
+    /// Finish renaming: Save sets the name when it changed (an empty title
+    /// or window name: back to automatic), unless tmux would refuse it, which
+    /// keeps the field open with the reason; anything else cancels.
+    fn finish_rename(&mut self, save: bool) -> Action {
+        let Mode::Rename(r) = &mut self.mode else { return Action::None };
+        let text = r.field.text().trim().to_string();
+        if !save || text == r.original || (text.is_empty() && !r.renamed) {
+            self.mode = Mode::List;
+            return Action::None;
+        }
+        let refuse = match &r.what {
+            Renaming::Session { .. } if text.is_empty() => Some("a session needs a name".to_string()),
+            Renaming::Session { .. } if text.contains(['.', ':']) => Some("session names can't have . or :".to_string()),
+            Renaming::Session { session } if self.snap.sessions.iter().any(|s| s.name == text && &s.id != session) => {
+                Some(format!("a session called {text} exists"))
+            }
+            _ => None,
+        };
+        if let Some(why) = refuse {
+            r.error = Some(why);
+            return Action::None;
+        }
+        let Mode::Rename(r) = std::mem::replace(&mut self.mode, Mode::List) else { return Action::None };
+        // The row stays listed even if its new name doesn't match the filter.
+        self.keep = Some(r.target);
+        let auto = text.is_empty();
+        let (op, undo, done) = match r.what {
+            Renaming::Agent { pane } => (
+                Op::SetTitle { pane: pane.clone(), title: (!auto).then(|| text.clone()) },
+                Op::SetTitle { pane, title: r.renamed.then_some(r.original) },
+                if auto { "back to the automatic title" } else { "renamed" },
+            ),
+            Renaming::Session { session } => (
+                Op::RenameSession { session: session.clone(), name: text.clone() },
+                Op::RenameSession { session, name: r.original },
+                "renamed",
+            ),
+            Renaming::Window { window } => (
+                Op::RenameWindow { window: window.clone(), name: text.clone() },
+                Op::RenameWindow { window, name: r.original },
+                if auto { "named after what runs" } else { "renamed" },
+            ),
+        };
+        Action::Run(Job::new(op, done).undo(Some(undo)))
+    }
+
+    /// The loop ran JOB, which made CREATED (if anything): remember how to
+    /// undo it, say how it went, and return what to open.
+    pub fn ran(&mut self, job: Job, result: Result<Option<Target>, String>) -> Option<Target> {
+        match result {
+            Ok(created) => {
+                self.follow = job.follow;
+                if let Some(undo) = job.undo {
+                    self.undo.push((undo, job.done.clone()));
+                    self.status = Some(Status::Done(format!("{}   ^z undo", job.done)));
+                } else {
+                    self.status = Some(Status::Done(job.done));
+                }
+                created.filter(|_| job.open)
+            }
+            Err(e) => {
+                self.status = Some(Status::Failed(e));
+                None
+            }
+        }
+    }
+
+    fn undo(&mut self) -> Action {
+        match self.undo.pop() {
+            // A title for an agent that has exited would go to the pane's next one.
+            Some((Op::SetTitle { pane, .. }, _)) if self.snap.pane(&pane).and_then(|(_, _, p)| p.agent.as_ref()).is_none() => {
+                self.note("that agent has exited");
+                Action::None
+            }
+            Some((op, what)) => {
+                let follow = match &op {
+                    Op::MoveWindow { window: id, .. } | Op::JoinPane { pane: id, .. } | Op::SwapWindows { a: id, .. } | Op::SwapPanes(id, _) => Some(id.clone()),
+                    _ => None,
+                };
+                let mut job = Job::new(op, format!("undone: {what}"));
+                job.follow = follow;
+                Action::Run(job)
+            }
+            None => {
+                self.status = Some(Status::Note("nothing to undo".into()));
+                Action::None
+            }
+        }
+    }
+
+    fn note(&mut self, text: impl Into<String>) {
+        self.status = Some(Status::Note(text.into()));
+    }
+
+    /// Where a window is: its session's index, its own index (first copy).
+    fn window_at(&self, session: &str, window: &str) -> Option<(usize, usize)> {
+        let si = self.snap.sessions.iter().position(|s| s.id == session)?;
+        let wi = self.snap.sessions[si].windows.iter().position(|w| w.id == window)?;
+        Some((si, wi))
+    }
+
+    /// TARGET in words, and what it holds: ("window webshop:2 web",
+    /// "2 panes · codex waiting").
+    fn describe(&self, target: &Target) -> (String, String) {
+        let with = |count: String, agents: String| if agents.is_empty() { count } else { format!("{count} · {agents}") };
+        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+        match target {
+            Target::Session { session } => match self.snap.sessions.iter().find(|s| &s.id == session) {
+                Some(s) => (format!("session {}", s.name), with(plural(s.windows.len(), "window"), agents_in(s.windows.iter().flat_map(|w| &w.panes)))),
+                None => ("session".into(), String::new()),
+            },
+            Target::Window { session, window } => match self.window_at(session, window) {
+                Some((si, wi)) => {
+                    let (s, w) = (&self.snap.sessions[si], &self.snap.sessions[si].windows[wi]);
+                    (format!("window {}:{} {}", s.name, w.index, w.name), with(plural(w.panes.len(), "pane"), agents_in(w.panes.iter())))
+                }
+                None => ("window".into(), String::new()),
+            },
+            Target::Pane { pane, .. } => match self.snap.pane(pane) {
+                Some((s, w, p)) => (format!("pane {}:{}.{}", s.name, w.index, p.index), agents_in(std::iter::once(p))),
+                None => ("pane".into(), String::new()),
+            },
+            Target::New(_) => (String::new(), String::new()),
+        }
+    }
+
+    /// Ask before killing the selected session, window or pane.
+    fn kill(&mut self) {
+        let Some(target) = self.selected_target().cloned().filter(|t| !matches!(t, Target::New(_))) else { return };
+        if matches!(target, Target::Session { .. }) && self.snap.sessions.len() == 1 {
+            return self.note("that is the only session: kill the server instead");
+        }
+        let (label, detail) = self.describe(&target);
+        let detail = match (&target, detail.is_empty()) {
+            (Target::Pane { pane, .. }, true) => self.snap.pane(pane).map(|(_, _, p)| p.command.clone()).unwrap_or_default(),
+            (_, _) => detail,
+        };
+        let question = if detail.is_empty() { format!("kill {label}?") } else { format!("kill {label}? {detail}") };
+        self.mode = Mode::Confirm(Confirm { job: Job::new(Op::Kill(target), format!("killed {label}")), question, verb: "kill" });
+    }
+
+    /// Run JOB now, or ask first when QUESTION says it does more than it
+    /// seems (a move that closes a session).
+    fn maybe_confirm(&mut self, job: Job, question: Option<String>) -> Action {
+        match question {
+            Some(question) => {
+                self.mode = Mode::Confirm(Confirm { job, question, verb: "move" });
+                Action::None
+            }
+            None => Action::Run(job),
+        }
+    }
+
+    /// Swap the selected window or pane with its neighbour; past the first or
+    /// last, into the previous or next session (window) or window (pane).
+    fn shift(&mut self, down: bool) -> Action {
+        if self.tab != Tab::Sessions {
+            return Action::None;
+        }
+        let result = match self.selected_target().cloned() {
+            Some(Target::Window { session, window }) => self.shift_window(&session, &window, down),
+            Some(Target::Pane { session, window, pane }) => self.shift_pane(&session, &window, &pane, down),
+            Some(Target::Session { .. }) => Err("sessions are listed by name: rename one to move it".into()),
+            _ => return Action::None,
+        };
+        match result {
+            Ok((job, question)) => self.maybe_confirm(job, question),
+            Err(why) => {
+                self.note(why);
+                Action::None
+            }
+        }
+    }
+
+    fn shift_window(&self, session: &str, window: &str, down: bool) -> Result<(Job, Option<String>), String> {
+        let (si, wi) = self.window_at(session, window).ok_or("that window has closed")?;
+        let sessions = &self.snap.sessions;
+        let ws = &sessions[si].windows;
+        let neighbour = if down { ws.get(wi + 1) } else { wi.checked_sub(1).map(|i| &ws[i]) };
+        if let Some(n) = neighbour.filter(|n| n.id != window) {
+            let op = Op::SwapWindows { session: session.into(), a: window.into(), b: n.id.clone() };
+            return Ok((Job::new(op.clone(), if down { "moved down" } else { "moved up" }).undo(Some(op)).follow(window), None));
+        }
+        let other = if down { sessions.get(si + 1) } else { si.checked_sub(1).map(|i| &sessions[i]) };
+        let other = other.ok_or(if down { "already the last window" } else { "already the first window" })?;
+        let to = if down { other.windows.first() } else { other.windows.last() }.ok_or("that session has no windows")?;
+        let op = Op::MoveWindow { from: session.into(), window: window.into(), into: other.id.clone(), to: to.id.clone(), before: down };
+        let job = Job::new(op, format!("moved to {}", other.name)).undo(self.window_return(si, wi, &other.id)).follow(window);
+        let closes = (ws.len() == 1).then(|| format!("move window {} to {}? {} closes: it is its only window", ws[wi].name, other.name, sessions[si].name));
+        Ok((job, closes))
+    }
+
+    /// The move that puts window WI of session SI back where it is now,
+    /// from session FROM, where it is going.
+    fn window_return(&self, si: usize, wi: usize, from: &str) -> Option<Op> {
+        let session = &self.snap.sessions[si];
+        let ws = &session.windows;
+        let back = |to: &str, before| Op::MoveWindow { from: from.into(), window: ws[wi].id.clone(), into: session.id.clone(), to: to.into(), before };
+        match (wi.checked_sub(1).map(|i| &ws[i]), ws.get(wi + 1)) {
+            (Some(prev), _) => Some(back(&prev.id, false)),
+            (None, Some(next)) => Some(back(&next.id, true)),
+            _ => None,
+        }
+    }
+
+    /// The move that puts PANE back beside its neighbours in its window.
+    fn pane_return(&self, session: &str, window: &str, pane: &str) -> Option<Op> {
+        let (si, wi) = self.window_at(session, window)?;
+        let ps = &self.snap.sessions[si].windows[wi].panes;
+        let pi = ps.iter().position(|p| p.id == pane)?;
+        let to = |p: &crate::model::Pane, before| Op::JoinPane { pane: pane.into(), to: p.id.clone(), before };
+        match (pi.checked_sub(1).map(|i| &ps[i]), ps.get(pi + 1)) {
+            (Some(prev), _) => Some(to(prev, false)),
+            (None, Some(next)) => Some(to(next, true)),
+            _ => None,
+        }
+    }
+
+    fn shift_pane(&self, session: &str, window: &str, pane: &str, down: bool) -> Result<(Job, Option<String>), String> {
+        let (si, wi) = self.window_at(session, window).ok_or("that pane has closed")?;
+        let ps = &self.snap.sessions[si].windows[wi].panes;
+        let pi = ps.iter().position(|p| p.id == pane).ok_or("that pane has closed")?;
+        if ps.len() == 1 {
+            return Err("it is its window's only pane: move the window".into());
+        }
+        let neighbour = if down { ps.get(pi + 1) } else { pi.checked_sub(1).map(|i| &ps[i]) };
+        if let Some(n) = neighbour {
+            let op = Op::SwapPanes(pane.into(), n.id.clone());
+            return Ok((Job::new(op.clone(), if down { "moved down" } else { "moved up" }).undo(Some(op)).follow(pane), None));
+        }
+        // Into the next (previous) window, in tree order across sessions.
+        let windows: Vec<(&crate::model::Session, &crate::model::Window)> = self.snap.sessions.iter().flat_map(|s| s.windows.iter().map(move |w| (s, w))).collect();
+        let here = windows.iter().position(|(s, w)| s.id == session && w.id == window).ok_or("that pane has closed")?;
+        let other = if down { windows.get(here + 1) } else { here.checked_sub(1).map(|i| &windows[i]) };
+        let (s, w) = other.ok_or(if down { "already the last pane" } else { "already the first pane" })?;
+        let to = if down { w.panes.first() } else { w.panes.last() }.ok_or("that window has no panes")?;
+        let op = Op::JoinPane { pane: pane.into(), to: to.id.clone(), before: down };
+        Ok((Job::new(op, format!("moved to {}:{} {}", s.name, w.index, w.name)).undo(self.pane_return(session, window, pane)).follow(pane), None))
+    }
+
+    /// Pick up the selected window or pane (sessions tab).
+    fn pick_up(&mut self, dragging: bool) {
+        if self.tab != Tab::Sessions {
+            return;
+        }
+        let Some(target) = self.selected_target().cloned() else { return };
+        if !matches!(target, Target::Window { .. } | Target::Pane { .. }) {
+            return self.note("pick up a window or a pane");
+        }
+        let (label, _) = self.describe(&target);
+        self.keep = Some(target.clone());
+        self.mode = Mode::Move(Carry { target, label, dragging });
+    }
+
+    /// What dropping what is carried after the selected row does: the job
+    /// and, when it closes a session or window, the question to ask first;
+    /// None when it is already there.
+    pub fn drop_job(&self) -> Result<Option<(Job, Option<String>)>, String> {
+        let Mode::Move(carry) = &self.mode else { return Ok(None) };
+        let at = self.selected_target().ok_or("choose a session, window or pane")?;
+        match (&carry.target, at) {
+            (_, Target::New(_)) => Err("drop it on a session, window or pane".into()),
+            (Target::Window { session, window }, at) => {
+                let (si, wi) = self.window_at(session, window).ok_or("that window has closed")?;
+                let ws = &self.snap.sessions[si].windows;
+                let (into, to, before, done) = match at {
+                    Target::Session { session: other } => {
+                        let s = self.snap.sessions.iter().find(|s| &s.id == other).ok_or("that session has closed")?;
+                        let first = s.windows.first().ok_or("that session has no windows")?;
+                        (other.clone(), first.id.clone(), true, format!("moved to the top of {}", s.name))
+                    }
+                    Target::Window { session: other, window: to } | Target::Pane { session: other, window: to, .. } => {
+                        let (osi, owi) = self.window_at(other, to).ok_or("that window has closed")?;
+                        let (s, w) = (&self.snap.sessions[osi], &self.snap.sessions[osi].windows[owi]);
+                        (other.clone(), to.clone(), false, format!("moved after {}:{} {}", s.name, w.index, w.name))
+                    }
+                    Target::New(_) => unreachable!(),
+                };
+                let already = to == *window || (!before && wi > 0 && ws[wi - 1].id == to) || (before && ws.get(wi + 1).is_some_and(|w| w.id == to));
+                if already {
+                    return Ok(None);
+                }
+                let leaving = into != *session;
+                let undo = self.window_return(si, wi, &into);
+                let op = Op::MoveWindow { from: session.clone(), window: window.clone(), into, to, before };
+                let job = Job::new(op, done).undo(undo).follow(window);
+                let closes = (ws.len() == 1 && leaving).then(|| format!("move {}? {} closes: it is its only window", carry.label, self.snap.sessions[si].name));
+                Ok(Some((job, closes)))
+            }
+            (Target::Pane { session, window, pane }, at) => {
+                let undo = self.pane_return(session, window, pane);
+                let (op, done) = match at {
+                    Target::Session { session: other } => {
+                        let name = self.snap.sessions.iter().find(|s| &s.id == other).map(|s| s.name.clone()).unwrap_or_default();
+                        (Op::BreakPane { pane: pane.clone(), session: other.clone() }, format!("a window of its own in {name}"))
+                    }
+                    Target::Window { session: other, window: to } => {
+                        if to == window {
+                            return Ok(None);
+                        }
+                        let (osi, owi) = self.window_at(other, to).ok_or("that window has closed")?;
+                        let w = &self.snap.sessions[osi].windows[owi];
+                        let last = w.panes.last().ok_or("that window has no panes")?;
+                        (Op::JoinPane { pane: pane.clone(), to: last.id.clone(), before: false }, format!("moved into {}", w.name))
+                    }
+                    Target::Pane { window: to_window, pane: to, .. } => {
+                        if to == pane {
+                            return Ok(None);
+                        }
+                        if to_window == window {
+                            let op = Op::SwapPanes(pane.clone(), to.clone());
+                            return Ok(Some((Job::new(op.clone(), "swapped").undo(Some(op)).follow(pane), None)));
+                        }
+                        (Op::JoinPane { pane: pane.clone(), to: to.clone(), before: false }, "moved".to_string())
+                    }
+                    Target::New(_) => unreachable!(),
+                };
+                let alone = self.window_at(session, window).is_some_and(|(si, wi)| self.snap.sessions[si].windows[wi].panes.len() == 1);
+                let closes = alone.then(|| format!("move {}? its window closes: it is its only pane", carry.label));
+                Ok(Some((Job::new(op, done).undo(undo).follow(pane), closes)))
+            }
+            _ => Err("pick up a window or a pane".into()),
+        }
+    }
+
+    /// What ⏎ would do with what is carried, said on the selected row: Ok
+    /// when it would do something.
+    pub fn drop_note(&self) -> Result<String, String> {
+        match self.drop_job() {
+            Ok(Some((job, _))) => Ok(match &job.op {
+                Op::MoveWindow { before: true, .. } if matches!(self.selected_target(), Some(Target::Session { .. })) => "first in this session",
+                Op::MoveWindow { .. } => "after this window",
+                Op::JoinPane { .. } if matches!(self.selected_target(), Some(Target::Window { .. })) => "into this window",
+                Op::JoinPane { .. } => "beside this pane",
+                Op::SwapPanes(..) => "swap with this pane",
+                Op::BreakPane { .. } => "a new window here",
+                _ => "here",
+            }
+            .to_string()),
+            Ok(None) => Err("already here".into()),
+            Err(why) => Err(why),
+        }
+    }
+
+    /// Drop what is carried after the selected row.
+    fn drop_here(&mut self) -> Action {
+        let result = self.drop_job();
+        self.mode = Mode::List;
+        match result {
+            Ok(Some((job, question))) => self.maybe_confirm(job, question),
+            Ok(None) => {
+                self.note("already there");
+                Action::None
+            }
+            Err(why) => {
+                self.note(why);
+                Action::None
+            }
+        }
+    }
+
+    /// Start naming a new window (after the selected row's window, or last
+    /// in a selected session) or a new session, in the selected row's
+    /// folder. From the agents tab, the agent's window; the tree shows it.
+    fn start_new(&mut self, session: bool) {
+        let here = self.selected_target().cloned().unwrap_or(Target::Window { session: self.current_session.clone(), window: self.current_window.clone() });
+        let window = match &here {
+            Target::Session { session } => self.snap.sessions.iter().find(|s| &s.id == session).and_then(|s| {
+                let dir = s.active_window().and_then(|w| w.active_pane()).map(|p| p.path.clone());
+                s.windows.last().map(|w| (s.id.clone(), w.id.clone(), dir))
+            }),
+            Target::Window { session, window } => self.window_at(session, window).map(|(si, wi)| {
+                let w = &self.snap.sessions[si].windows[wi];
+                (session.clone(), window.clone(), w.active_pane().map(|p| p.path.clone()))
+            }),
+            Target::Pane { session, window, pane } => Some((session.clone(), window.clone(), self.snap.pane(pane).map(|(_, _, p)| p.path.clone()))),
+            Target::New(_) => None,
+        };
+        let Some((sid, after, dir)) = window else { return };
+        let dir = dir.unwrap_or_else(|| self.home.clone());
+        let (window, session_new) = (New::Window { session: sid, after, dir: dir.clone() }, New::Session { dir });
+        let (new, other) = if session { (session_new, window) } else { (window, session_new) };
+        self.set_tab(Tab::Sessions);
+        self.mode = Mode::Create(Create { new, other, field: LineEdit::new("", Some(TITLE_MAX)), error: None });
+        self.rebuild(false);
+    }
+
+    /// Switch the row being named between a new window and a new session,
+    /// keeping the name typed so far.
+    fn switch_new(&mut self) {
+        let Mode::Create(c) = &mut self.mode else { return };
+        std::mem::swap(&mut c.new, &mut c.other);
+        c.error = None;
+        self.rebuild(false);
+    }
+
+    /// Create the window or session being named and go there, unless tmux
+    /// would refuse its name (the row says why); or cancel.
+    fn finish_create(&mut self, save: bool) -> Action {
+        let Mode::Create(c) = &mut self.mode else { return Action::None };
+        if !save {
+            self.mode = Mode::List;
+            self.rebuild(false);
+            return Action::None;
+        }
+        let name = c.field.text().trim().to_string();
+        let refuse = match &c.new {
+            New::Session { .. } if name.is_empty() => Some("a session needs a name".to_string()),
+            New::Session { .. } if name.contains(['.', ':']) => Some("session names can't have . or :".to_string()),
+            New::Session { .. } if self.snap.sessions.iter().any(|s| s.name == name) => Some(format!("a session called {name} exists")),
+            _ => None,
+        };
+        if let Some(why) = refuse {
+            c.error = Some(why);
+            return Action::None;
+        }
+        let Mode::Create(c) = std::mem::replace(&mut self.mode, Mode::List) else { return Action::None };
+        self.rebuild(false);
+        let mut job = match c.new {
+            New::Session { dir } => Job::new(Op::NewSession { name: name.clone(), dir }, format!("created session {name}")),
+            New::Window { session, after, dir } => Job::new(Op::NewWindow { session, after, name, dir }, "created a window"),
+        };
+        job.open = true;
+        Action::Run(job)
+    }
+
+    /// What the selected row can be renamed as, if anything.
+    fn renamable(&self) -> bool {
+        match self.selected_target() {
+            Some(Target::Session { .. } | Target::Window { .. }) => true,
+            Some(Target::Pane { .. }) => self.selected_agent().is_some(),
+            _ => false,
+        }
+    }
+
+    /// The selected row's menu, hanging from ANCHOR. PREVIEW_FITS: whether
+    /// toggling the preview would show anything.
+    fn open_menu(&mut self, anchor: Position, preview_fits: bool) {
+        let items = self.menu_items(preview_fits);
+        if !items.is_empty() {
+            self.mode = Mode::Menu(Menu { items, selected: 0, anchor });
+        }
+    }
+
+    /// What can be done with the selected row, and in the popup.
+    pub fn menu_items(&self, preview_fits: bool) -> Vec<Item> {
+        let mut items = Vec::new();
+        let target = self.selected_target();
+        if target.is_some() {
+            items.push(item("open", "⏎", Command::Open));
+        }
+        if let Some((_, open)) = self.selected_window() {
+            items.push(item(if open { "hide panes" } else { "show panes" }, if open { "←" } else { "→" }, Command::Panes));
+        }
+        if self.renamable() {
+            items.push(item("rename", "^r", Command::Rename));
+        }
+        if self.selected_agent().is_some() && self.can_suggest {
+            items.push(item("suggest a title", "^r^r", Command::RenameSuggest));
+        }
+        if self.tab == Tab::Sessions && matches!(target, Some(Target::Window { .. } | Target::Pane { .. })) {
+            items.push(item("move…", "^t", Command::Move));
+            items.push(item("move up", "⇧↑", Command::MoveUp));
+            items.push(item("move down", "⇧↓", Command::MoveDown));
+        }
+        if target.is_some() {
+            items.push(item("kill…", "^x", Command::Kill));
+        }
+        items.push(item("new window here", "^s", Command::NewWindow));
+        items.push(item("new session", "^s^s", Command::NewSession));
+        if !self.undo.is_empty() {
+            items.push(item("undo", "^z", Command::Undo));
+        }
+        if self.tab == Tab::Agents {
+            items.push(item(format!("group by {}", self.group.next().label()), "^g", Command::Group));
+        }
+        if preview_fits {
+            items.push(item(if self.preview_on { "hide preview" } else { "show preview" }, "^o", Command::Preview));
+        }
+        items.push(item(format!("{} tab", self.tab.other().label()), "⇥", Command::Tab(self.tab.other())));
+        items
+    }
+
+    /// The footer: hints in display order, and the one pinned on the right.
+    pub fn hints(&self, view: &View) -> (Vec<Hint>, Hint) {
+        let mut out = Vec::new();
+        match &self.mode {
+            Mode::Rename(r) => {
+                out.push(hint("⏎", "save", Command::Save, 0));
+                if self.can_suggest {
+                    out.push(hint("^r", if r.error.is_some() { "retry" } else { "suggest" }, Command::Suggest, 1));
+                }
+                out.push(hint("^u", "clear", Command::Clear, 2));
+                return (out, hint("esc", "cancel", Command::Cancel, 0));
+            }
+            Mode::Menu(_) => return (vec![hint("⏎", "choose", Command::Open, 0)], hint("esc", "back", Command::Cancel, 0)),
+            Mode::Confirm(c) => return (vec![hint("⏎", c.verb, Command::Confirm, 0)], hint("esc", "cancel", Command::Cancel, 0)),
+            Mode::Move(_) => return (vec![hint("⏎", "drop here", Command::Confirm, 0)], hint("esc", "cancel", Command::Cancel, 0)),
+            Mode::Create(c) => {
+                let other = if matches!(c.new, New::Window { .. }) { "session" } else { "window" };
+                let hints = vec![hint("⏎", "create", Command::Save, 0), hint("^s", other, Command::NewSession, 1), hint("^u", "clear", Command::Clear, 2)];
+                return (hints, hint("esc", "cancel", Command::Cancel, 0));
+            }
+            Mode::List => {}
+        }
+        if self.selected_target().is_some() {
+            out.push(hint("⏎", "open", Command::Open, 0));
+        }
+        let other = self.tab.other();
+        out.push(if view.compact { hint("", other.label(), Command::Tab(other), 3) } else { hint("⇥", "tab", Command::Tab(other), 3) });
+        match self.tab {
+            Tab::Sessions => {
+                if let Some((_, open)) = self.selected_window() {
+                    out.push(if open { hint("←", "hide panes", Command::Panes, 4) } else { hint("→", "panes", Command::Panes, 4) });
+                }
+            }
+            Tab::Agents => {
+                let group = if view.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
+                out.push(hint("^g", group, Command::Group, 5));
+            }
+        }
+        if self.renamable() {
+            out.push(hint("^r", "rename", Command::Rename, 1));
+        }
+        if self.tab == Tab::Sessions && matches!(self.selected_target(), Some(Target::Window { .. } | Target::Pane { .. })) {
+            out.push(hint("^t", "move", Command::Move, 4));
+        }
+        if self.selected_target().is_some() {
+            out.push(hint("^x", "kill", Command::Kill, 5));
+        }
+        if self.tab == Tab::Sessions {
+            out.push(hint("^s", "new", Command::NewWindow, 7));
+        }
+        if !self.undo.is_empty() {
+            out.push(hint("^z", "undo", Command::Undo, 2));
+        }
+        if view.preview_fits {
+            out.push(hint("^o", "preview", Command::Preview, 6));
+        }
+        (out, hint("esc", "close", Command::Close, 0))
+    }
+
+    /// Do what COMMAND says, whether by key, tap or menu.
+    pub fn run(&mut self, command: Command) -> Action {
+        match (&mut self.mode, command) {
+            (Mode::Rename(_), Command::Save) => return self.finish_rename(true),
+            (Mode::Rename(_), Command::Cancel) => return self.finish_rename(false),
+            (Mode::Rename(_), Command::Suggest) => return self.suggest(),
+            (Mode::Rename(r), Command::Clear) => {
+                if !r.field.is_empty() {
+                    r.field.set("");
+                    r.suggesting = None;
+                }
+                return Action::None;
+            }
+            (Mode::Rename(_), _) => return Action::None,
+            (Mode::Menu(_), Command::Cancel) => {
+                self.mode = Mode::List;
+                return Action::None;
+            }
+            (Mode::Menu(_), _) => self.mode = Mode::List,
+            (Mode::Confirm(_), Command::Confirm) => {
+                let Mode::Confirm(c) = std::mem::replace(&mut self.mode, Mode::List) else { unreachable!() };
+                return Action::Run(c.job);
+            }
+            (Mode::Confirm(_), _) => {
+                self.mode = Mode::List;
+                return Action::None;
+            }
+            (Mode::Move(_), Command::Confirm) => return self.drop_here(),
+            (Mode::Move(_), Command::Cancel) => {
+                self.mode = Mode::List;
+                self.keep = None;
+                return Action::None;
+            }
+            (Mode::Move(_), Command::Preview) => {}
+            (Mode::Move(_), _) => return Action::None,
+            (Mode::Create(_), Command::Save) => return self.finish_create(true),
+            (Mode::Create(_), Command::NewWindow | Command::NewSession) => {
+                self.switch_new();
+                return Action::None;
+            }
+            (Mode::Create(_), Command::Cancel) => return self.finish_create(false),
+            (Mode::Create(c), Command::Clear) => {
+                c.field.set("");
+                c.error = None;
+                return Action::None;
+            }
+            (Mode::Create(_), _) => return Action::None,
+            (Mode::List, _) => {}
+        }
+        match command {
+            Command::Tab(tab) => self.set_tab(tab),
+            Command::Open => return self.selected_target().cloned().map_or(Action::None, Action::Activate),
+            Command::Panes => self.expand(None),
+            Command::Group if self.tab == Tab::Agents => {
                 self.group = self.group.next();
                 self.rebuild(false);
             }
-            Button::Preview => self.preview_on = !self.preview_on,
-            Button::Close => return Action::Quit,
-            Button::Describe => self.describe(),
-            Button::Group | Button::Save | Button::Generate | Button::Cancel => {}
-        }
-        Action::None
-    }
-
-    /// Keys while editing a description: text, ⏎ save, ^g generate, esc
-    /// cancel.
-    fn edit_key(&mut self, key: KeyEvent, ctrl: bool, plain: bool) -> Action {
-        match key.code {
-            KeyCode::Enter => return self.press(Button::Save),
-            KeyCode::Esc => return self.press(Button::Cancel),
-            KeyCode::Char('c') if ctrl => return self.press(Button::Cancel),
-            KeyCode::Char('g') if ctrl => return self.press(Button::Generate),
-            _ => {}
-        }
-        let Some(edit) = &mut self.edit else { return Action::None };
-        match key.code {
-            KeyCode::Char('u') if ctrl => edit.text.clear(),
-            KeyCode::Backspace => {
-                edit.text.pop();
+            Command::Preview => self.preview_on = !self.preview_on,
+            Command::Close => return Action::Quit,
+            Command::Rename => self.rename(),
+            Command::RenameSuggest => {
+                self.rename();
+                return self.suggest();
             }
-            KeyCode::Char(c) if plain => edit.text.push(c),
-            _ => {}
+            Command::Undo => return self.undo(),
+            Command::Kill => self.kill(),
+            Command::NewWindow => self.start_new(false),
+            Command::NewSession => self.start_new(true),
+            Command::Move => self.pick_up(false),
+            Command::MoveUp => return self.shift(false),
+            Command::MoveDown => return self.shift(true),
+            Command::Menu => self.open_menu(Position::default(), true),
+            Command::Group | Command::Save | Command::Suggest | Command::Clear | Command::Cancel | Command::Confirm => {}
         }
         Action::None
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         if !self.debug {
-            self.status.clear();
+            self.status = None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        if self.edit.is_some() {
-            return self.edit_key(key, ctrl, plain);
+        match &mut self.mode {
+            Mode::Rename(r) => {
+                return match key.code {
+                    KeyCode::Enter => self.run(Command::Save),
+                    KeyCode::Esc => self.run(Command::Cancel),
+                    KeyCode::Char('c') if ctrl => self.run(Command::Cancel),
+                    KeyCode::Char('r') if ctrl => self.run(Command::Suggest),
+                    _ => {
+                        if r.field.key(key) == Edited::Text {
+                            r.suggesting = None;
+                            r.error = None;
+                        }
+                        Action::None
+                    }
+                };
+            }
+            Mode::Menu(menu) => {
+                let n = menu.items.len();
+                match key.code {
+                    KeyCode::Esc => return self.run(Command::Cancel),
+                    KeyCode::Char('c') if ctrl => return self.run(Command::Cancel),
+                    KeyCode::Enter => {
+                        let command = menu.items[menu.selected].command;
+                        return self.run(command);
+                    }
+                    KeyCode::Up => menu.selected = (menu.selected + n - 1) % n,
+                    KeyCode::Char('p' | 'k') if ctrl => menu.selected = (menu.selected + n - 1) % n,
+                    KeyCode::Down => menu.selected = (menu.selected + 1) % n,
+                    KeyCode::Char('n' | 'j') if ctrl => menu.selected = (menu.selected + 1) % n,
+                    // Any other key closes the menu and does what it does.
+                    _ => {
+                        self.mode = Mode::List;
+                        return self.on_key(key);
+                    }
+                }
+                return Action::None;
+            }
+            Mode::Confirm(c) => {
+                // Not Delete: it asked, and a held key repeats.
+                let yes = match key.code {
+                    KeyCode::Enter => true,
+                    KeyCode::Char('x') => ctrl && c.verb == "kill",
+                    _ => false,
+                };
+                return self.run(if yes { Command::Confirm } else { Command::Cancel });
+            }
+            Mode::Create(c) => {
+                return match key.code {
+                    KeyCode::Enter => self.run(Command::Save),
+                    KeyCode::Esc => self.run(Command::Cancel),
+                    KeyCode::Char('c') if ctrl => self.run(Command::Cancel),
+                    KeyCode::Char('s') if ctrl => self.run(Command::NewSession),
+                    _ => {
+                        if c.field.key(key) == Edited::Text {
+                            c.error = None;
+                        }
+                        Action::None
+                    }
+                };
+            }
+            Mode::Move(_) => match key.code {
+                KeyCode::Enter => return self.run(Command::Confirm),
+                KeyCode::Esc => return self.run(Command::Cancel),
+                KeyCode::Char('c' | 't') if ctrl => return self.run(Command::Cancel),
+                // Moving, filtering and the preview work as in the list.
+                _ => {}
+            },
+            Mode::List => {}
         }
         match key.code {
-            KeyCode::Esc => return self.press(Button::Close),
-            KeyCode::Char('c') if ctrl => return self.press(Button::Close),
-            KeyCode::Enter => return self.press(Button::Open),
-            KeyCode::Tab | KeyCode::BackTab => return self.press(Button::Tab(self.tab.other())),
-            KeyCode::Char('g') if ctrl => return self.press(Button::Group),
-            KeyCode::Char('e') if ctrl => return self.press(Button::Describe),
+            KeyCode::Esc => return self.run(Command::Close),
+            KeyCode::Char('c') if ctrl => return self.run(Command::Close),
+            KeyCode::Enter => return self.run(Command::Open),
+            KeyCode::Tab | KeyCode::BackTab => return self.run(Command::Tab(self.tab.other())),
+            KeyCode::Char('g') if ctrl => return self.run(Command::Group),
+            KeyCode::Char('r') if ctrl => return self.run(Command::Rename),
+            KeyCode::Char('z') if ctrl => return self.run(Command::Undo),
+            KeyCode::Char('x') if ctrl => return self.run(Command::Kill),
+            KeyCode::Delete => return self.run(Command::Kill),
+            KeyCode::Char('t') if ctrl => return self.run(Command::Move),
+            KeyCode::Char('s') if ctrl => return self.run(Command::NewWindow),
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => return self.run(Command::MoveUp),
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => return self.run(Command::MoveDown),
             // ^/ too: terminals send it as ^_, which crossterm reports as
             // ctrl-7 or ctrl-_.
-            KeyCode::Char('o' | '/' | '7' | '_') if ctrl => return self.press(Button::Preview),
+            KeyCode::Char('o' | '/' | '7' | '_') if ctrl => return self.run(Command::Preview),
             KeyCode::Up => self.move_by(-1, true),
             KeyCode::Down => self.move_by(1, true),
             KeyCode::Char('p' | 'k') if ctrl => self.move_by(-1, true),
@@ -428,66 +1494,207 @@ impl App {
             KeyCode::PageDown => self.move_by(PAGE, false),
             KeyCode::Right => self.expand(Some(true)),
             KeyCode::Left => self.expand(Some(false)),
-            KeyCode::Char('u') if ctrl && !self.query.is_empty() => {
-                self.query.clear();
-                self.requery();
-            }
-            KeyCode::Backspace => {
-                if self.query.pop().is_some() {
-                    self.requery();
-                }
-            }
-            KeyCode::Char(c) if plain => {
-                self.query.push(c);
-                self.requery();
-            }
+            // The query is typed at its end (←/→ belong to the tree): text,
+            // Backspace (^h), ^w and ^u.
+            KeyCode::Backspace => self.edit_query(key),
+            KeyCode::Char('h' | 'w' | 'u') if ctrl => self.edit_query(key),
+            KeyCode::Char(_) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.edit_query(key),
             _ => {}
         }
         Action::None
     }
 
-    /// A click or tap, resolved against what the last draw showed: tapping
-    /// a row selects it, tapping the selected row opens it (so a
-    /// double-click opens too).
-    pub fn on_mouse(&mut self, ev: MouseEvent, view: &View) -> Action {
+    /// A mouse event, resolved against what the last draw showed. A press
+    /// selects; the release on the same thing acts, so the rest of a click
+    /// never reaches whatever is under the pointer once the popup is gone.
+    /// Desktop: a double-click opens a row. Compact (a phone, where a
+    /// double-tap may arrive as something else): a tap on the selected row
+    /// opens it. Right-click (or ctrl-click) opens the row's menu.
+    pub fn on_mouse(&mut self, ev: MouseEvent, view: &View, now: Instant) -> Action {
         if self.debug {
-            self.status = format!("mouse {:?} at {},{}", ev.kind, ev.column, ev.row);
-        } else if !matches!(ev.kind, MouseEventKind::Up(_)) {
-            // Not on the release of the tap that set it.
-            self.status.clear();
+            self.status = Some(Status::Note(format!("mouse {:?} at {},{}", ev.kind, ev.column, ev.row)));
         }
         let at = Position::new(ev.column, ev.row);
-        if self.edit.is_some() {
-            // Only the footer's save, generate and cancel while editing.
-            return match (ev.kind, view.button_at(at)) {
-                (MouseEventKind::Down(MouseButton::Left), Some(button)) => self.press(button),
-                _ => Action::None,
-            };
-        }
+        let hit = view.hit(at);
         match ev.kind {
-            MouseEventKind::ScrollUp => self.move_by(-1, false),
-            MouseEventKind::ScrollDown => self.move_by(1, false),
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(button) = view.button_at(at) {
-                    return self.press(button);
+            MouseEventKind::Down(button) => {
+                if !self.debug {
+                    self.status = None;
                 }
-                let Some(target) = view.row_at(at) else { return Action::None };
-                if self.selected_target() == Some(target) {
-                    return Action::Activate(target.clone());
+                let context = button == MouseButton::Right || (button == MouseButton::Left && ev.modifiers.contains(KeyModifiers::CONTROL));
+                self.press = None;
+                if matches!(self.mode, Mode::Menu(_)) && hit.is_none() {
+                    // A click outside a menu only closes it.
+                    self.mode = Mode::List;
+                    return Action::None;
                 }
-                if let Some(i) = self.position(target) {
+                if let Mode::Move(c) = &self.mode {
+                    if c.dragging {
+                        // The drag's release fell outside the popup: it never came.
+                        self.mode = Mode::List;
+                        self.keep = None;
+                        self.note("move cancelled");
+                        return Action::None;
+                    }
+                    if context {
+                        self.note("⏎ drop or esc cancel first");
+                        return Action::None;
+                    }
+                }
+                if matches!(self.mode, Mode::Confirm(_)) && !matches!(hit, Some(Hit::Button(_))) {
+                    // Only the question's buttons answer it; anything else is no.
+                    self.mode = Mode::List;
+                    return Action::None;
+                }
+                let editing = match &self.mode {
+                    Mode::Rename(r) => Some((r.target.clone(), "⏎ save or esc cancel first")),
+                    Mode::Create(_) => Some((Target::New(0), "⏎ create or esc cancel first")),
+                    _ => None,
+                };
+                if let Some((target, how)) = editing {
+                    match &hit {
+                        Some(Hit::Button(_)) => {}
+                        Some(Hit::Row(_, t)) if *t == target => return Action::None,
+                        _ => {
+                            self.note(how);
+                            return Action::None;
+                        }
+                    }
+                }
+                let mut was_selected = false;
+                if let Some(Hit::Row(i, t)) = &hit
+                    && let Some(i) = self.locate(t, *i)
+                {
+                    was_selected = i == self.selected;
+                    self.selected = i;
+                    if context {
+                        self.open_menu(Position::new(at.x.saturating_add(1), at.y), view.preview_fits);
+                        // Its release (a right-click's other half) opens nothing.
+                        self.press = Some(Press { hit: None, at, was_selected });
+                        return Action::None;
+                    }
+                }
+                if button == MouseButton::Left {
+                    self.press = Some(Press { hit, at, was_selected });
+                }
+                Action::None
+            }
+            MouseEventKind::Up(_) if matches!(&self.mode, Mode::Move(c) if c.dragging) => {
+                self.press = None;
+                // Released on a row: drop it there; elsewhere: never mind.
+                match hit {
+                    Some(Hit::Row(i, t)) => {
+                        if let Some(i) = self.locate(&t, i) {
+                            self.selected = i;
+                        }
+                        self.drop_here()
+                    }
+                    _ => {
+                        self.mode = Mode::List;
+                        self.keep = None;
+                        self.note("move cancelled");
+                        Action::None
+                    }
+                }
+            }
+            MouseEventKind::Up(_) => {
+                let Some(press) = self.press.take() else { return Action::None };
+                // A press-drag-release onto a menu item picks it.
+                if press.hit.is_none() {
+                    if let Some(Hit::MenuItem(i)) = hit
+                        && at != press.at
+                    {
+                        return self.choose(i);
+                    }
+                    return Action::None;
+                }
+                if press.hit != hit {
+                    return Action::None;
+                }
+                match hit {
+                    Some(Hit::Button(Command::Menu)) => {
+                        self.open_menu(Position::default(), view.preview_fits);
+                        Action::None
+                    }
+                    Some(Hit::Button(command)) => self.run(command),
+                    Some(Hit::MenuItem(i)) => self.choose(i),
+                    Some(Hit::Toggle(target)) => {
+                        if let Some(i) = self.position(&target) {
+                            self.selected = i;
+                            self.expand(None);
+                        }
+                        Action::None
+                    }
+                    Some(Hit::Row(_, target)) => {
+                        let double = self.last_click.take().is_some_and(|(t, when)| t == target && now.duration_since(when) <= DOUBLE_CLICK);
+                        if (view.compact && press.was_selected) || (!view.compact && double) {
+                            return self.run(Command::Open);
+                        }
+                        self.last_click = Some((target, now));
+                        Action::None
+                    }
+                    None => Action::None,
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta = if ev.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+                match &mut self.mode {
+                    Mode::Menu(menu) => {
+                        let n = menu.items.len() as isize;
+                        menu.selected = (menu.selected as isize + delta).rem_euclid(n) as usize;
+                    }
+                    Mode::List | Mode::Move(_) => self.move_by(delta, false),
+                    Mode::Rename(_) | Mode::Confirm(_) | Mode::Create(_) => {}
+                }
+                Action::None
+            }
+            MouseEventKind::Drag(MouseButton::Left) => self.drag(hit, at, view),
+            _ => Action::None,
+        }
+    }
+
+    /// The left button moved while held (only reported with drag tracking
+    /// on). Leaving the pressed window or pane's row picks it up; then the
+    /// selection follows the pointer, and at the list's top or bottom edge
+    /// the list scrolls a row per movement (no movement, no scrolling).
+    fn drag(&mut self, hit: Option<Hit>, at: Position, view: &View) -> Action {
+        if let (Mode::List, Some(press)) = (&self.mode, &self.press) {
+            let Some(Hit::Row(_, from)) = &press.hit else { return Action::None };
+            let moved = !matches!(&hit, Some(Hit::Row(_, t)) if t == from);
+            if !moved || self.tab != Tab::Sessions || !matches!(from, Target::Window { .. } | Target::Pane { .. }) {
+                return Action::None;
+            }
+            self.pick_up(true);
+        }
+        if !matches!(&self.mode, Mode::Move(c) if c.dragging) {
+            return Action::None;
+        }
+        match hit {
+            Some(Hit::Row(i, t)) => {
+                if let Some(i) = self.locate(&t, i) {
                     self.selected = i;
                 }
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                if let Some(i) = view.row_at(at).and_then(|t| self.position(t)) {
-                    self.selected = i;
-                    self.expand(None);
+            _ => {
+                let top = view.rows.first().map(|(r, ..)| r.y);
+                let bottom = view.rows.last().map(|(r, ..)| r.bottom());
+                if top.is_some_and(|y| at.y < y) {
+                    self.move_by(-1, false);
+                } else if bottom.is_some_and(|y| at.y >= y) {
+                    self.move_by(1, false);
                 }
             }
-            _ => {}
         }
         Action::None
+    }
+
+    /// Run the open menu's item I.
+    fn choose(&mut self, i: usize) -> Action {
+        let Mode::Menu(menu) = &self.mode else { return Action::None };
+        match menu.items.get(i) {
+            Some(item) => self.run(item.command),
+            None => Action::None,
+        }
     }
 }
 
@@ -497,13 +1704,13 @@ mod tests {
     use crate::model::fixture;
     use crate::theme::Theme;
     use crate::ui::{self, Preview};
-    use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
     use ratatui::style::Modifier;
     use ratatui::text::Text;
-    use ratatui::Terminal;
 
-    /// An app opened from window WINDOW of session $1, describe.sh present.
+    /// An app opened from window WINDOW of session $1, with a suggest command.
     fn new(snap: Snapshot, tab: Tab, window: &str) -> App {
         App::new(snap, tab, "$1".into(), window.into(), String::new(), false, true)
     }
@@ -511,10 +1718,10 @@ mod tests {
     /// Agents in two folders: header, card, card, header, card, card.
     fn agents_app() -> App {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||||/a",
-            "$1|s|@2|2|w|0|%3|0|1|zsh|working|0|claude|three||||/b",
-            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||||/b",
+            "$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh||working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|%3|0|1|zsh||working|0|claude|three||||/b",
+            "$1|s|@2|2|w|0|%4|1|0|zsh||working|0|claude|four||||/b",
         ]);
         let mut app = new(snap, Tab::Agents, "@1");
         app.group = Group::Folder;
@@ -524,10 +1731,10 @@ mod tests {
 
     fn sessions_app(window: &str) -> App {
         let snap = fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/h/a",
-            "$1|work|@1|1|edit|1|%2|1|0|zsh||||||||/h/a",
-            "$1|work|@2|2|logs|0|%3|0|1|tail||||||||/h/b",
-            "$2|play|@3|1|game|1|%4|0|1|zsh|asking|0|codex|deploy||||/h/c",
+            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/h/a",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh|||||||||/h/a",
+            "$1|work|@2|2|logs|0|%3|0|1|tail|||||||||/h/b",
+            "$2|play|@3|1|game|1|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
         ]);
         new(snap, Tab::Sessions, window)
     }
@@ -536,8 +1743,27 @@ mod tests {
         KeyEvent { code, modifiers, kind: KeyEventKind::Press, state: KeyEventState::NONE }
     }
 
+    fn ctrl(app: &mut App, c: char) -> Action {
+        app.on_key(key(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn type_(app: &mut App, text: &str) {
+        text.chars().for_each(|c| drop(app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE))));
+    }
+
+    fn mouse(app: &mut App, view: &View, kind: MouseEventKind, at: (u16, u16), now: Instant) -> Action {
+        app.on_mouse(MouseEvent { kind, column: at.0, row: at.1, modifiers: KeyModifiers::NONE }, view, now)
+    }
+
+    /// A press and release at AT, at NOW: the release's action.
+    fn click_at(app: &mut App, view: &View, button: MouseButton, at: (u16, u16), now: Instant) -> Action {
+        let down = mouse(app, view, MouseEventKind::Down(button), at, now);
+        assert!(matches!(down, Action::None), "a press does nothing yet: {down:?}");
+        mouse(app, view, MouseEventKind::Up(button), at, now)
+    }
+
     fn click(app: &mut App, view: &View, button: MouseButton, at: (u16, u16)) -> Action {
-        app.on_mouse(MouseEvent { kind: MouseEventKind::Down(button), column: at.0, row: at.1, modifiers: KeyModifiers::NONE }, view)
+        click_at(app, view, button, at, Instant::now())
     }
 
     fn draw(app: &App, view: &mut View, width: u16, height: u16) -> Terminal<TestBackend> {
@@ -567,6 +1793,21 @@ mod tests {
             RowKind::Pane { command, .. } => command.clone(),
             RowKind::Session { name, .. } => name.clone(),
             RowKind::Header { .. } => "header".into(),
+            RowKind::New => "new".into(),
+        }
+    }
+
+    fn field(app: &App) -> Option<&str> {
+        match &app.mode {
+            Mode::Rename(r) => Some(r.field.text()),
+            _ => None,
+        }
+    }
+
+    fn renaming(app: &App) -> Option<&Rename> {
+        match &app.mode {
+            Mode::Rename(r) => Some(r),
+            _ => None,
         }
     }
 
@@ -574,9 +1815,7 @@ mod tests {
     fn opens_on_the_current_window_and_selects_the_best_match() {
         let mut app = sessions_app("@2");
         assert_eq!(selected_title(&app), "logs");
-        for c in "codex".chars() {
-            app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE));
-        }
+        type_(&mut app, "codex");
         assert_eq!(selected_title(&app), "game", "the window whose agent matches");
     }
 
@@ -606,17 +1845,17 @@ mod tests {
         let mut app = agents_app();
         app.selected = 4; // "three"
         app.set_snapshot(fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|claude|two||||/a",
-            "$1|s|@2|2|w|0|%4|1|0|zsh|working|0|claude|four||||/b",
+            "$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh||working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|%4|1|0|zsh||working|0|claude|four||||/b",
         ]));
         assert_eq!(selected_title(&app), "four");
     }
 
     #[test]
     fn the_selection_follows_an_agent_into_another_group() {
-        let line = |state: &str| format!("$1|s|@1|1|w|1|%2|1|0|zsh|{state}|0|claude|two||||/a");
-        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|one||||/a", &line(state)]);
+        let line = |state: &str| format!("$1|s|@1|1|w|1|%2|1|0|zsh||{state}|0|claude|two||||/a");
+        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|one||||/a", &line(state)]);
         let mut app = new(snap("working"), Tab::Agents, "@1");
         app.move_by(1, false);
         assert_eq!(selected_title(&app), "two");
@@ -628,22 +1867,22 @@ mod tests {
     #[test]
     fn switching_tabs_keeps_the_selection_or_falls_back_to_the_current_window() {
         let mut app = agents_app();
-        app.press(Button::Tab(Tab::Sessions));
+        app.run(Command::Tab(Tab::Sessions));
         assert_eq!(app.selected_target(), Some(&Target::Window { session: "$1".into(), window: "@1".into() }), "panes are not listed");
         app.move_by(2, false);
         app.expand(Some(true));
         app.move_by(2, false);
         let pane = Target::Pane { session: "$1".into(), window: "@2".into(), pane: "%4".into() };
         assert_eq!(app.selected_target(), Some(&pane));
-        app.press(Button::Tab(Tab::Agents));
+        app.run(Command::Tab(Tab::Agents));
         assert_eq!(selected_title(&app), "four");
-        app.press(Button::Tab(Tab::Sessions));
+        app.run(Command::Tab(Tab::Sessions));
         assert_eq!(app.selected_target(), Some(&pane), "back on the listed pane");
     }
 
     #[test]
     fn a_window_linked_twice_keeps_its_selected_row() {
-        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||||||||/a", "$1|s|@1|2|w|0|%1|0|1|zsh||||||||/a"]), Tab::Sessions, "@1");
+        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|||||||||/a", "$1|s|@1|2|w|0|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
         assert_eq!(app.selected, 1);
         app.selected = 2;
         app.refresh();
@@ -675,14 +1914,44 @@ mod tests {
     }
 
     #[test]
-    fn tapping_selects_and_tapping_the_selection_opens() {
+    fn a_double_click_opens_and_a_single_one_selects() {
         let mut app = agents_app();
         let mut view = View::new();
         let term = draw(&app, &mut view, 120, 20);
-        assert!(matches!(click(&mut app, &view, MouseButton::Left, find(&term, "two")), Action::None));
+        let t0 = Instant::now();
+        let at = find(&term, "two");
+        assert!(matches!(click_at(&mut app, &view, MouseButton::Left, at, t0), Action::None));
         assert_eq!(selected_title(&app), "two");
-        let open = click(&mut app, &view, MouseButton::Left, find(&term, "two"));
-        assert!(matches!(open, Action::Activate(Target::Pane { pane, .. }) if pane == "%2"));
+        // Already selected, a slow second click still doesn't open.
+        assert!(matches!(click_at(&mut app, &view, MouseButton::Left, at, t0 + Duration::from_secs(2)), Action::None));
+        let open = click_at(&mut app, &view, MouseButton::Left, at, t0 + Duration::from_millis(2300));
+        assert!(matches!(&open, Action::Activate(Target::Pane { pane, .. }) if pane == "%2"), "{open:?}");
+    }
+
+    #[test]
+    fn opening_waits_for_the_release_on_the_same_row() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 20);
+        let (two, three) = (find(&term, "two"), find(&term, "three"));
+        let t0 = Instant::now();
+        click_at(&mut app, &view, MouseButton::Left, two, t0);
+        assert!(matches!(mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), two, t0), Action::None), "the press never opens");
+        assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), three, t0), Action::None), "released elsewhere");
+        assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), two, t0), Action::None), "a release without a press");
+    }
+
+    #[test]
+    fn on_a_phone_a_tap_on_the_selected_row_opens() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 46, 20);
+        assert!(view.compact);
+        let at = find(&term, "two");
+        let t0 = Instant::now();
+        assert!(matches!(click_at(&mut app, &view, MouseButton::Left, at, t0), Action::None));
+        let open = click_at(&mut app, &view, MouseButton::Left, at, t0 + Duration::from_secs(3));
+        assert!(matches!(open, Action::Activate(_)));
     }
 
     #[test]
@@ -698,7 +1967,8 @@ mod tests {
         assert_eq!(app.selected, before, "headers are not selectable");
         click(&mut app, &view, MouseButton::Right, (x, y - 1));
         assert_eq!(app.selected, before, "not even by right-click");
-        click(&mut app, &view, MouseButton::Left, (x + 60, y));
+        assert!(matches!(app.mode, Mode::List), "and no menu");
+        click(&mut app, &view, MouseButton::Left, (x + 70, y));
         assert_eq!(app.selected, before, "the preview is not the list");
         click(&mut app, &view, MouseButton::Left, (x, y + 1));
         assert_eq!(app.selected, before, "the cut-off card ends with the list");
@@ -713,9 +1983,33 @@ mod tests {
         let term = draw(&app, &mut view, 120, 30);
         let at = find(&term, "four");
         // A key that empties the list, then a click on where a row was.
-        app.on_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+        type_(&mut app, "z");
         assert!(app.rows.is_empty());
         assert!(matches!(click(&mut app, &view, MouseButton::Left, at), Action::None));
+    }
+
+    #[test]
+    fn a_click_on_a_window_linked_twice_picks_the_copy_clicked() {
+        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|||||||||/a", "$1|s|@1|2|w|0|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 20);
+        let (_, y) = find(&term, "2   w");
+        click(&mut app, &view, MouseButton::Left, (6, y));
+        assert_eq!(app.selected, 2, "{:#?}", screen(&term));
+    }
+
+    #[test]
+    fn the_triangle_toggles_a_windows_panes() {
+        let mut app = sessions_app("@1");
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 20);
+        assert_eq!(app.rows.len(), 5);
+        let open = click(&mut app, &view, MouseButton::Left, find(&term, "▸"));
+        assert!(matches!(open, Action::None), "the triangle doesn't open the window");
+        assert_eq!(app.rows.len(), 7, "it lists the panes");
+        let term = draw(&app, &mut view, 120, 20);
+        click(&mut app, &view, MouseButton::Left, find(&term, "▾"));
+        assert_eq!(app.rows.len(), 5);
     }
 
     #[test]
@@ -726,10 +2020,32 @@ mod tests {
         click(&mut app, &view, MouseButton::Left, find(&term, "agents"));
         assert_eq!(app.tab, Tab::Agents);
         let term = draw(&app, &mut view, 46, 20);
-        assert!(screen(&term).iter().any(|l| l.contains("open   sessions   group   edit   close")));
-        click(&mut app, &view, MouseButton::Left, find(&term, "group"));
-        assert!(app.group == Group::Session);
+        let lines = screen(&term);
+        assert!(lines.iter().any(|l| l.contains("open   sessions   rename   ⋯") && l.ends_with("close │")), "{lines:#?}");
+        click(&mut app, &view, MouseButton::Left, find(&term, "rename"));
+        assert!(renaming(&app).is_some());
+        app.run(Command::Cancel);
+        let term = draw(&app, &mut view, 46, 20);
         assert!(matches!(click(&mut app, &view, MouseButton::Left, find(&term, "close")), Action::Quit));
+    }
+
+    #[test]
+    fn the_footer_keeps_close_and_folds_the_rest_into_a_menu() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let lines = screen(&draw(&app, &mut view, 38, 20));
+        let footer = &lines[lines.len() - 2];
+        assert!(footer.contains("open") && footer.contains("rename") && footer.contains("⋯") && footer.ends_with("close │"), "{lines:#?}");
+        assert!(!footer.contains("sessions"), "the tab switch folds first: {lines:#?}");
+        let term = draw(&app, &mut view, 38, 20);
+        click(&mut app, &view, MouseButton::Left, find(&term, "⋯"));
+        let Mode::Menu(menu) = &app.mode else { panic!("no menu: {:?}", app.mode) };
+        assert!(menu.items.iter().any(|i| i.command == Command::Group), "{:?}", menu.items);
+        // At 80-101 columns the preview can't show: no hint for it.
+        app.run(Command::Cancel);
+        let lines = screen(&draw(&app, &mut view, 90, 20));
+        assert!(!view.preview_fits);
+        assert!(!lines.iter().any(|l| l.contains("preview")), "{lines:#?}");
     }
 
     #[test]
@@ -741,64 +2057,239 @@ mod tests {
         let at = lines.iter().position(|l| l.contains("edit")).unwrap();
         assert!(lines[at + 1].contains("/h/a"), "the folder under the window: {lines:#?}");
         assert!(!lines.iter().any(|l| l.contains("windows")), "no window counts");
-        app.press(Button::Tab(Tab::Agents));
+        app.run(Command::Tab(Tab::Agents));
         let lines = screen(&draw(&app, &mut view, 46, 20));
         let at = lines.iter().position(|l| l.contains("deploy")).unwrap();
-        assert!(lines[at + 1].contains("play · <1m"), "{lines:#?}");
+        assert!(lines[at + 1].contains("play"), "{lines:#?}");
         assert!(!lines[at + 1].contains("codex"), "no kind on a phone");
     }
 
     #[test]
-    fn no_describing_without_the_script() {
+    fn renaming_an_agent() {
         let mut app = agents_app();
-        app.can_describe = false;
-        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert!(app.edit.as_ref().is_none(), "ctrl-e must not open an editor that can't save");
-    }
-
-    #[test]
-    fn describing_an_agent() {
-        let mut app = agents_app();
-        let type_ = |app: &mut App, text: &str| text.chars().for_each(|c| drop(app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE))));
-        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert_eq!(app.edit.as_ref().map(|e| e.text.as_str()), Some("one"), "starts from the current title");
-        // An untouched automatic description is not pinned as an override.
+        ctrl(&mut app, 'r');
+        assert_eq!(field(&app), Some("one"), "starts from the current title");
+        // An untouched automatic title is not set as the user's.
         assert!(matches!(app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)), Action::None));
-        assert!(app.edit.as_ref().is_none());
-        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(field(&app).is_none());
+        ctrl(&mut app, 'r');
         type_(&mut app, " more");
         let save = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(save, Action::Run(Op::Describe { pane, text }) if pane == "%1" && text == "one more"));
-        assert_eq!(app.query, "", "typing went to the description, not the filter");
-        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        let generate = app.on_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert!(matches!(generate, Action::Run(Op::Generate { pane }) if pane == "%1"));
-        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let Action::Run(job) = save else { panic!("{save:?}") };
+        assert_eq!(job.op, Op::SetTitle { pane: "%1".into(), title: Some("one more".into()) });
+        assert_eq!(job.undo, Some(Op::SetTitle { pane: "%1".into(), title: None }), "undo goes back to automatic");
+        assert_eq!(app.query.text(), "", "typing went to the title, not the filter");
+        app.ran(job, Ok(None));
+        assert_eq!(app.status, Some(Status::Done("renamed   ^z undo".into())));
+        ctrl(&mut app, 'r');
         assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::None));
-        assert!(app.edit.as_ref().is_none(), "esc cancels the edit, not the popup");
+        assert!(field(&app).is_none(), "esc cancels the rename, not the popup");
     }
 
     #[test]
-    fn a_generating_description_shows_on_its_card() {
-        let rows = [["$1", "s", "@1", "1", "w", "1", "%1", "0", "1", "zsh", "working", "0", "claude", "task", "", "", "", "/a"].map(String::from).to_vec()];
-        let snap = crate::model::parse(&rows, |_| crate::model::Described { text: None, generating: true });
-        let app = new(snap, Tab::Agents, "@1");
+    fn clearing_a_set_title_goes_back_to_automatic_and_undo_restores_it() {
+        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|auto|mine|||/a"]);
+        let mut app = new(snap, Tab::Agents, "@1");
+        ctrl(&mut app, 'r');
+        assert_eq!(renaming(&app).map(|r| r.placeholder.as_str()), Some("auto"));
+        ctrl(&mut app, 'u');
+        let Action::Run(job) = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)) else { panic!() };
+        assert_eq!(job.op, Op::SetTitle { pane: "%1".into(), title: None });
+        app.ran(job, Ok(None));
+        let Action::Run(undo) = ctrl(&mut app, 'z') else { panic!() };
+        assert_eq!(undo.op, Op::SetTitle { pane: "%1".into(), title: Some("mine".into()) });
+        app.ran(undo, Ok(None));
+        assert_eq!(app.status, Some(Status::Done("undone: back to the automatic title".into())));
+        assert!(matches!(ctrl(&mut app, 'z'), Action::None));
+        assert_eq!(app.status, Some(Status::Note("nothing to undo".into())));
+        // A failed change says why and can't be undone.
+        ctrl(&mut app, 'r');
+        type_(&mut app, "!");
+        let Action::Run(job) = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)) else { panic!() };
+        app.ran(job, Err("can't find pane: %1".into()));
+        assert_eq!(app.status, Some(Status::Failed("can't find pane: %1".into())));
+        assert!(app.undo.is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_title_is_not_saved_over_a_newer_one() {
+        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|auto|mine|||/a"]);
+        let mut app = new(snap, Tab::Agents, "@1");
+        ctrl(&mut app, 'r');
+        assert!(matches!(app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)), Action::None));
+    }
+
+    #[test]
+    fn a_renamed_card_stays_listed_under_the_filter() {
+        let mut app = agents_app();
+        type_(&mut app, "three");
+        assert_eq!(app.rows.len(), 2, "header and card");
+        ctrl(&mut app, 'r');
+        ctrl(&mut app, 'u');
+        type_(&mut app, "renamed");
+        let Action::Run(job) = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)) else { panic!() };
+        app.ran(job, Ok(None));
+        app.set_snapshot(fixture(&[
+            "$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|one||||/a",
+            "$1|s|@2|2|w|0|%3|0|1|zsh||working|0|claude|three|renamed|||/b",
+        ]));
+        assert_eq!(selected_title(&app), "renamed", "it doesn't match \"three\" any more, but stays");
+        type_(&mut app, "x");
+        assert!(app.rows.is_empty(), "until the query changes");
+    }
+
+    #[test]
+    fn ctrl_r_again_fills_the_field_with_a_suggestion() {
+        let mut app = agents_app();
+        ctrl(&mut app, 'r');
+        assert!(matches!(ctrl(&mut app, 'r'), Action::Suggest { pane, id: 1 } if pane == "%1"));
+        assert!(matches!(ctrl(&mut app, 'r'), Action::None), "one suggestion at a time");
+        assert_eq!(app.suggesting(), Some(1));
         let lines = screen(&draw(&app, &mut View::new(), 120, 12));
-        assert!(lines.iter().any(|l| l.contains("task  ✦ generating…")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("✎ one") && l.contains("✦ suggesting…")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("⏎ save   ^r suggest   ^u clear") && l.ends_with("esc cancel │")), "{lines:#?}");
+        app.suggested(1, Ok("Fix the cart page".into()));
+        assert_eq!(field(&app), Some("Fix the cart page"));
+        assert_eq!(app.suggesting(), None);
+        // It is the field's text, to keep, change or drop.
+        type_(&mut app, "s");
+        let Action::Run(job) = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)) else { panic!() };
+        assert_eq!(job.op, Op::SetTitle { pane: "%1".into(), title: Some("Fix the cart pages".into()) });
+    }
+
+    #[test]
+    fn a_suggestion_does_not_overwrite_what_came_after_it() {
+        let mut app = agents_app();
+        // Typing while it generates keeps the typing, and stops waiting.
+        ctrl(&mut app, 'r');
+        ctrl(&mut app, 'r');
+        type_(&mut app, "!");
+        assert_eq!(app.suggesting(), None, "the loop stops the suggest command");
+        app.suggested(1, Ok("late".into()));
+        assert_eq!(field(&app), Some("one!"));
+        // Keys that change nothing keep waiting.
+        assert!(matches!(ctrl(&mut app, 'r'), Action::Suggest { id: 2, .. }));
+        app.on_key(key(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.suggesting(), Some(2), "Delete at the end changes nothing");
+        // An answer for a rename that was cancelled, reaching a new one.
+        app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.suggesting(), None);
+        ctrl(&mut app, 'r');
+        app.suggested(2, Ok("stale".into()));
+        assert_eq!(field(&app), Some("one"));
+        // A failure says why, by the field, and offers a retry.
+        assert!(matches!(ctrl(&mut app, 'r'), Action::Suggest { id: 3, .. }));
+        app.suggested(3, Err("pi timed out after 30s".into()));
+        assert_eq!(field(&app), Some("one"));
+        assert_eq!(renaming(&app).and_then(|r| r.error.as_deref()), Some("pi timed out after 30s"));
+        let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+        assert!(lines.iter().any(|l| l.contains("✗ pi timed out after 30s")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("^r retry")), "{lines:#?}");
+    }
+
+    #[test]
+    fn no_suggestions_without_a_suggest_command() {
+        let mut app = agents_app();
+        app.can_suggest = false;
+        ctrl(&mut app, 'r');
+        let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+        assert!(!lines.iter().any(|l| l.contains("suggest")), "not offered: {lines:#?}");
+        assert!(matches!(ctrl(&mut app, 'r'), Action::None));
+        assert!(matches!(&app.status, Some(Status::Note(n)) if n.contains("@agent-suggest-command")), "but says why when asked");
+    }
+
+    #[test]
+    fn renaming_ends_when_the_agent_exits() {
+        let mut app = agents_app();
+        ctrl(&mut app, 'r');
+        app.set_snapshot(fixture(&["$1|s|@1|1|w|1|%2|1|0|zsh||working|0|claude|two||||/a"]));
+        assert!(field(&app).is_none());
+        assert_eq!(app.status, Some(Status::Failed("that agent has exited".into())));
+    }
+
+    #[test]
+    fn the_title_is_edited_on_its_card() {
+        let mut app = agents_app();
+        type_(&mut app, "on");
+        ctrl(&mut app, 'r');
+        let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+        assert!(lines.iter().any(|l| l.contains("› on") && l.contains("renaming")), "the filter stays in view: {lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("▌ ✎ one")), "{lines:#?}");
+        ctrl(&mut app, 'u');
+        let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+        assert!(lines.iter().any(|l| l.contains("✎ ▏one") && l.contains("automatic")), "the automatic title as a placeholder: {lines:#?}");
+    }
+
+    #[test]
+    fn the_mouse_renames_too() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 30);
+        click(&mut app, &view, MouseButton::Right, find(&term, "three"));
+        let Mode::Menu(_) = &app.mode else { panic!("right-click opens the card's menu") };
+        let term = draw(&app, &mut view, 120, 30);
+        let action = click(&mut app, &view, MouseButton::Left, find(&term, "suggest a title"));
+        assert!(matches!(&action, Action::Suggest { pane, .. } if pane == "%3"), "{action:?}");
+        assert_eq!(renaming(&app).map(|r| &r.what), Some(&Renaming::Agent { pane: "%3".into() }));
+        // Clicking another card while renaming says how to finish.
+        let term = draw(&app, &mut view, 120, 30);
+        click(&mut app, &view, MouseButton::Left, find(&term, "one"));
+        assert!(renaming(&app).is_some());
+        assert_eq!(app.status, Some(Status::Note("⏎ save or esc cancel first".into())));
+        let term = draw(&app, &mut view, 120, 30);
+        click(&mut app, &view, MouseButton::Left, find(&term, "cancel"));
+        assert!(renaming(&app).is_none());
+    }
+
+    #[test]
+    fn a_menu_is_picked_by_key_by_click_or_by_dragging_onto_an_item() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 30);
+        let at = find(&term, "two");
+        // Right press, then its release where it was pressed: nothing.
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Right), at, Instant::now());
+        let term = draw(&app, &mut view, 120, 30);
+        assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Right), at, Instant::now()), Action::None), "its own release picks nothing");
+        assert!(matches!(app.mode, Mode::Menu(_)));
+        // Right press, drag, release on "rename".
+        let item = find(&term, "rename");
+        app.mode = Mode::List;
+        draw(&app, &mut view, 120, 30);
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Right), at, Instant::now());
+        draw(&app, &mut view, 120, 30);
+        mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Right), item, Instant::now());
+        assert_eq!(renaming(&app).map(|r| &r.what), Some(&Renaming::Agent { pane: "%2".into() }));
+        app.run(Command::Cancel);
+        // Keys: ↓ ↓ then ⏎; any other key closes it and acts.
+        app.run(Command::Menu);
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(renaming(&app).is_some(), "the second item, rename");
+        app.run(Command::Cancel);
+        app.run(Command::Menu);
+        type_(&mut app, "t");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.query.text(), "t");
+        // A click outside closes it.
+        app.run(Command::Menu);
+        draw(&app, &mut view, 120, 30);
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), (110, 25), Instant::now());
+        assert!(matches!(app.mode, Mode::List));
     }
 
     #[test]
     fn a_stale_state_is_marked_unconfirmed() {
-        let app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|working|0|claude|task|0|1||/a"]), Tab::Agents, "@1");
+        let app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
         let lines = screen(&draw(&app, &mut View::new(), 120, 12));
-        assert!(lines.iter().any(|l| l.contains("working? ")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("working?")), "{lines:#?}");
     }
 
     #[test]
     fn pasted_newlines_do_not_open() {
         let mut app = agents_app();
         app.paste("tw\no\n");
-        assert_eq!(app.query, "two");
+        assert_eq!(app.query.text(), "two");
         assert_eq!(selected_title(&app), "two");
     }
 
@@ -813,17 +2304,34 @@ mod tests {
     }
 
     #[test]
-    fn alt_letters_are_not_typed() {
+    fn status_shows_on_the_bottom_edge_and_keeps_the_footer() {
+        let mut app = agents_app();
+        app.status = Some(Status::Failed("tmux said no".into()));
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 20);
+        let lines = screen(&term);
+        assert!(lines.last().unwrap().contains("✗ tmux said no"), "{lines:#?}");
+        assert!(matches!(click(&mut app, &view, MouseButton::Left, find(&term, "close")), Action::Quit), "a tap still works");
+    }
+
+    #[test]
+    fn alt_letters_are_not_typed_and_ctrl_h_deletes() {
         let mut app = agents_app();
         app.on_key(key(KeyCode::Char('x'), KeyModifiers::ALT));
-        assert_eq!(app.query, "");
+        assert_eq!(app.query.text(), "");
         app.on_key(key(KeyCode::Char('T'), KeyModifiers::SHIFT));
-        assert_eq!(app.query, "T");
+        assert_eq!(app.query.text(), "T");
+        app.on_key(key(KeyCode::Home, KeyModifiers::NONE));
+        type_(&mut app, "x");
+        assert_eq!(app.query.text(), "Tx", "the query is typed at its end");
+        ctrl(&mut app, 'h');
+        ctrl(&mut app, 'h');
+        assert_eq!(app.query.text(), "", "^h is Backspace");
     }
 
     #[test]
     fn left_collapses_and_right_expands() {
-        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|nvim||||||||/a", "$1|s|@1|1|w|1|%2|1|0|zsh||||||||/a"]);
+        let snap = fixture(&["$1|s|@1|1|w|1|%1|0|1|nvim|||||||||/a", "$1|s|@1|1|w|1|%2|1|0|zsh|||||||||/a"]);
         let mut app = new(snap, Tab::Sessions, "@1");
         assert_eq!(app.rows.len(), 2);
         app.on_key(key(KeyCode::Left, KeyModifiers::NONE));
@@ -835,5 +2343,331 @@ mod tests {
         app.on_key(key(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(app.rows.len(), 2);
         assert!(matches!(app.rows[app.selected].kind, RowKind::Window { .. }), "back on the window");
+    }
+
+    #[test]
+    fn a_window_the_filter_opened_can_be_closed() {
+        let mut app = sessions_app("@1");
+        type_(&mut app, "zsh");
+        let panes = |app: &App| app.rows.iter().filter(|r| matches!(r.kind, RowKind::Pane { .. })).count();
+        assert_eq!(panes(&app), 1, "the matching pane explains the window");
+        app.selected = app.rows.iter().position(|r| matches!(r.kind, RowKind::Window { name: ref n, .. } if n == "edit")).unwrap();
+        app.on_key(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(panes(&app), 0, "closed");
+        app.on_key(key(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(panes(&app), 2, "open: every pane");
+    }
+
+    fn select(app: &mut App, target: Target) {
+        app.selected = app.position(&target).unwrap_or_else(|| panic!("{target:?} not listed"));
+    }
+
+    fn window(session: &str, window: &str) -> Target {
+        Target::Window { session: session.into(), window: window.into() }
+    }
+
+    fn pane(session: &str, window: &str, pane: &str) -> Target {
+        Target::Pane { session: session.into(), window: window.into(), pane: pane.into() }
+    }
+
+    fn job(action: Action) -> Job {
+        match action {
+            Action::Run(job) => job,
+            other => panic!("not a job: {other:?}"),
+        }
+    }
+
+    fn enter(app: &mut App) -> Action {
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn sessions_and_windows_are_renamed_in_place() {
+        let mut app = sessions_app("@1");
+        select(&mut app, Target::Session { session: "$1".into() });
+        ctrl(&mut app, 'r');
+        assert_eq!(field(&app), Some("work"));
+        // tmux refuses these; the field stays open and says why.
+        ctrl(&mut app, 'u');
+        type_(&mut app, "play");
+        assert!(matches!(enter(&mut app), Action::None));
+        assert_eq!(renaming(&app).and_then(|r| r.error.as_deref()), Some("a session called play exists"));
+        ctrl(&mut app, 'u');
+        type_(&mut app, "a.b");
+        enter(&mut app);
+        assert_eq!(renaming(&app).and_then(|r| r.error.as_deref()), Some("session names can't have . or :"));
+        ctrl(&mut app, 'u');
+        type_(&mut app, "office");
+        assert_eq!(renaming(&app).and_then(|r| r.error.as_deref()), None, "typing clears the reason");
+        let j = job(enter(&mut app));
+        assert_eq!(j.op, Op::RenameSession { session: "$1".into(), name: "office".into() });
+        assert_eq!(j.undo, Some(Op::RenameSession { session: "$1".into(), name: "work".into() }));
+        // A window's empty name hands naming back to tmux.
+        select(&mut app, window("$1", "@2"));
+        ctrl(&mut app, 'r');
+        ctrl(&mut app, 'u');
+        let j = job(enter(&mut app));
+        assert_eq!(j.op, Op::RenameWindow { window: "@2".into(), name: String::new() });
+        assert_eq!(j.done, "named after what runs");
+    }
+
+    #[test]
+    fn kills_ask_first_and_say_what_runs_there() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$2", "@3"));
+        ctrl(&mut app, 'x');
+        let Mode::Confirm(c) = &app.mode else { panic!("{:?}", app.mode) };
+        assert_eq!(c.question, "kill window play:1 game? 1 pane · codex waiting");
+        let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+        assert!(lines.iter().any(|l| l.contains("✗ kill window play:1 game?") && l.contains("can't be undone")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("⏎ kill") && l.ends_with("esc cancel │")), "{lines:#?}");
+        // Anything but yes is no.
+        type_(&mut app, "y");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.query.text(), "", "the no doesn't type");
+        app.on_key(key(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(matches!(app.on_key(key(KeyCode::Delete, KeyModifiers::NONE)), Action::None), "a held Delete doesn't answer");
+        app.on_key(key(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(job(ctrl(&mut app, 'x')).op, Op::Kill(window("$2", "@3")), "^x twice kills");
+        let mut app = new(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
+        select(&mut app, Target::Session { session: "$1".into() });
+        ctrl(&mut app, 'x');
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.status, Some(Status::Note("that is the only session: kill the server instead".into())));
+    }
+
+    #[test]
+    fn shift_arrows_swap_neighbours_and_cross_at_the_ends() {
+        let shift = |app: &mut App, code| app.on_key(key(code, KeyModifiers::SHIFT));
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@1"));
+        let j = job(shift(&mut app, KeyCode::Down));
+        let swap = Op::SwapWindows { session: "$1".into(), a: "@1".into(), b: "@2".into() };
+        assert_eq!((j.op, j.undo), (swap.clone(), Some(swap)));
+        assert!(matches!(shift(&mut app, KeyCode::Up), Action::None), "the first window of the first session");
+        assert_eq!(app.status, Some(Status::Note("already the first window".into())));
+        // The last window of work goes first into play.
+        select(&mut app, window("$1", "@2"));
+        let j = job(shift(&mut app, KeyCode::Down));
+        assert_eq!(j.op, Op::MoveWindow { from: "$1".into(), window: "@2".into(), into: "$2".into(), to: "@3".into(), before: true });
+        assert_eq!(j.undo, Some(Op::MoveWindow { from: "$2".into(), window: "@2".into(), into: "$1".into(), to: "@1".into(), before: false }));
+        // play's only window leaving closes play: ask.
+        select(&mut app, window("$2", "@3"));
+        assert!(matches!(shift(&mut app, KeyCode::Up), Action::None));
+        let Mode::Confirm(c) = &app.mode else { panic!() };
+        assert_eq!(c.question, "move window game to work? play closes: it is its only window");
+        assert_eq!(job(enter(&mut app)).op, Op::MoveWindow { from: "$2".into(), window: "@3".into(), into: "$1".into(), to: "@2".into(), before: false });
+        // Panes swap inside their window, then join the next one.
+        app.expanded.insert(window("$1", "@1"));
+        app.refresh();
+        select(&mut app, pane("$1", "@1", "%1"));
+        assert_eq!(job(shift(&mut app, KeyCode::Down)).op, Op::SwapPanes("%1".into(), "%2".into()));
+        select(&mut app, pane("$1", "@1", "%2"));
+        let j = job(shift(&mut app, KeyCode::Down));
+        assert_eq!(j.op, Op::JoinPane { pane: "%2".into(), to: "%3".into(), before: true });
+        assert_eq!(j.undo, Some(Op::JoinPane { pane: "%2".into(), to: "%1".into(), before: false }));
+        // Not on the agents tab, where cards are sorted by state.
+        app.run(Command::Tab(Tab::Agents));
+        assert!(matches!(shift(&mut app, KeyCode::Down), Action::None));
+    }
+
+    #[test]
+    fn ctrl_t_carries_to_where_enter_drops() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@2"));
+        ctrl(&mut app, 't');
+        assert!(matches!(app.mode, Mode::Move(_)));
+        // Find the spot by filtering: the carried row stays listed.
+        type_(&mut app, "game");
+        assert!(app.position(&window("$1", "@2")).is_some(), "what is carried stays listed");
+        select(&mut app, window("$2", "@3"));
+        let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+        assert!(lines.iter().any(|l| l.contains("game") && l.contains("⏎ after this window")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("⇅ moving window work:2 logs")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("⇅") && l.contains("logs")), "the carried row is marked: {lines:#?}");
+        let j = job(enter(&mut app));
+        assert_eq!(j.op, Op::MoveWindow { from: "$1".into(), window: "@2".into(), into: "$2".into(), to: "@3".into(), before: false });
+        assert!(matches!(app.mode, Mode::List));
+        // On a session: first in it. Already there: nothing to do.
+        app.query.set("");
+        app.requery();
+        select(&mut app, window("$1", "@2"));
+        ctrl(&mut app, 't');
+        select(&mut app, Target::Session { session: "$2".into() });
+        assert_eq!(job(enter(&mut app)).op, Op::MoveWindow { from: "$1".into(), window: "@2".into(), into: "$2".into(), to: "@3".into(), before: true });
+        select(&mut app, window("$1", "@2"));
+        ctrl(&mut app, 't');
+        select(&mut app, window("$1", "@1"));
+        assert!(matches!(enter(&mut app), Action::None));
+        assert_eq!(app.status, Some(Status::Note("already there".into())));
+        // Esc puts it down again.
+        ctrl(&mut app, 't');
+        app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List), "esc cancels the move, not the popup");
+    }
+
+    #[test]
+    fn panes_drop_into_windows_beside_panes_or_on_their_own() {
+        let mut app = sessions_app("@1");
+        app.expanded.insert(window("$1", "@1"));
+        app.refresh();
+        let carry = |app: &mut App, to: Target| {
+            select(app, pane("$1", "@1", "%2"));
+            ctrl(app, 't');
+            select(app, to);
+            job(enter(app)).op
+        };
+        assert_eq!(carry(&mut app, window("$1", "@2")), Op::JoinPane { pane: "%2".into(), to: "%3".into(), before: false });
+        assert_eq!(carry(&mut app, pane("$1", "@1", "%1")), Op::SwapPanes("%2".into(), "%1".into()));
+        assert_eq!(carry(&mut app, Target::Session { session: "$2".into() }), Op::BreakPane { pane: "%2".into(), session: "$2".into() });
+    }
+
+    #[test]
+    fn dragging_a_row_moves_it() {
+        let mut app = sessions_app("@1");
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 20);
+        let (logs, game) = (find(&term, "logs"), find(&term, "game"));
+        let now = Instant::now();
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), logs, now);
+        mouse(&mut app, &view, MouseEventKind::Drag(MouseButton::Left), logs, now);
+        assert!(matches!(app.mode, Mode::List), "no move until the pointer leaves the row");
+        mouse(&mut app, &view, MouseEventKind::Drag(MouseButton::Left), game, now);
+        assert!(matches!(app.mode, Mode::Move(_)));
+        let j = job(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), game, now));
+        assert_eq!(j.op, Op::MoveWindow { from: "$1".into(), window: "@2".into(), into: "$2".into(), to: "@3".into(), before: false });
+        // Released off the list: never mind.
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), logs, now);
+        mouse(&mut app, &view, MouseEventKind::Drag(MouseButton::Left), game, now);
+        mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), (110, 18), now);
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.status, Some(Status::Note("move cancelled".into())));
+        // Released outside the popup (no release comes): the next click only
+        // ends the drag; it doesn't drop.
+        mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), logs, now);
+        mouse(&mut app, &view, MouseEventKind::Drag(MouseButton::Left), game, now);
+        assert!(matches!(click(&mut app, &view, MouseButton::Left, game), Action::None));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn a_moved_window_stays_selected_where_it_lands() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@2"));
+        let j = job(app.on_key(key(KeyCode::Down, KeyModifiers::SHIFT)));
+        assert_eq!(app.ran(j, Ok(None)), None);
+        app.set_snapshot(fixture(&[
+            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/h/a",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh|||||||||/h/a",
+            "$2|play|@2|1|logs|0|%3|0|1|tail|||||||||/h/b",
+            "$2|play|@3|2|game|1|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
+        ]));
+        assert_eq!(app.selected_target(), Some(&window("$2", "@2")));
+        // A pane that becomes a window of its own is selected as that window.
+        let mut app = sessions_app("@1");
+        app.follow = Some("%4".into());
+        app.set_snapshot(fixture(&["$2|play|@3|1|game|1|%4|0|1|zsh||asking|0|codex|deploy||||/h/c"]));
+        assert_eq!(app.selected_target(), Some(&window("$2", "@3")));
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@2"));
+        let j = job(app.on_key(key(KeyCode::Down, KeyModifiers::SHIFT)));
+        app.ran(j, Ok(None));
+        app.set_snapshot(fixture(&[
+            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/h/a",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh|||||||||/h/a",
+            "$2|play|@2|1|logs|0|%3|0|1|tail|||||||||/h/b",
+            "$2|play|@3|2|game|1|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
+        ]));
+        // And ^z puts it back, following it again.
+        let undo = job(ctrl(&mut app, 'z'));
+        assert_eq!(undo.op, Op::MoveWindow { from: "$2".into(), window: "@2".into(), into: "$1".into(), to: "@1".into(), before: false });
+        assert_eq!(undo.follow.as_deref(), Some("@2"));
+    }
+
+    #[test]
+    fn ctrl_s_names_a_new_window_where_it_will_appear() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@1"));
+        ctrl(&mut app, 's');
+        let Mode::Create(_) = &app.mode else { panic!("{:?}", app.mode) };
+        // Right after "edit", before "logs", and selected.
+        let names: Vec<String> = app.rows.iter().map(|r| match &r.kind {
+            RowKind::Window { name, .. } => name.clone(),
+            RowKind::New => "+".into(),
+            _ => "·".into(),
+        }).collect();
+        assert_eq!(names, ["·", "edit", "+", "logs", "·", "game"]);
+        assert_eq!(app.selected_target(), Some(&Target::New(0)));
+        let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+        assert!(lines.iter().any(|l| l.contains("├─ + ▏window name (empty: named after what runs)  /h/a")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("+ new window")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("⏎ create   ^s session   ^u clear") && l.ends_with("esc cancel │")), "{lines:#?}");
+        // Moving and filtering wait: keys name it.
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
+        type_(&mut app, "notes");
+        assert_eq!(app.query.text(), "");
+        let j = job(enter(&mut app));
+        assert_eq!(j.op, Op::NewWindow { session: "$1".into(), after: "@1".into(), name: "notes".into(), dir: "/h/a".into() });
+        assert!(j.open, "and goes there");
+        assert!(matches!(app.mode, Mode::List));
+        assert!(app.position(&Target::New(0)).is_none(), "the row goes with the mode");
+        // On a session row: last in it. No name: tmux names it.
+        select(&mut app, Target::Session { session: "$1".into() });
+        ctrl(&mut app, 's');
+        assert_eq!(job(enter(&mut app)).op, Op::NewWindow { session: "$1".into(), after: "@2".into(), name: String::new(), dir: "/h/a".into() });
+        // Esc: nothing made.
+        ctrl(&mut app, 's');
+        assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::None));
+        assert!(matches!(app.mode, Mode::List) && app.position(&Target::New(0)).is_none());
+    }
+
+    #[test]
+    fn ctrl_s_again_names_a_new_session_and_refuses_what_tmux_would() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$2", "@3"));
+        ctrl(&mut app, 's');
+        type_(&mut app, "x");
+        ctrl(&mut app, 's');
+        assert!(matches!(app.rows.last().map(|r| &r.kind), Some(RowKind::New)), "at the end");
+        assert!(matches!(&app.mode, Mode::Create(c) if matches!(c.new, New::Session { .. }) && c.field.text() == "x"), "the name stays");
+        // And back again.
+        ctrl(&mut app, 's');
+        assert!(matches!(&app.mode, Mode::Create(c) if matches!(c.new, New::Window { .. })));
+        ctrl(&mut app, 's');
+        ctrl(&mut app, 'u');
+        assert!(matches!(enter(&mut app), Action::None));
+        let error = |app: &App| match &app.mode {
+            Mode::Create(c) => c.error.clone(),
+            _ => None,
+        };
+        assert_eq!(error(&app).as_deref(), Some("a session needs a name"));
+        type_(&mut app, "play");
+        assert_eq!(error(&app), None, "typing clears the reason");
+        enter(&mut app);
+        assert_eq!(error(&app).as_deref(), Some("a session called play exists"));
+        let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+        assert!(lines.iter().any(|l| l.contains("+ play▏  /h/c") && l.contains("✗ a session called play exists")), "{lines:#?}");
+        ctrl(&mut app, 'u');
+        type_(&mut app, "blog");
+        let j = job(enter(&mut app));
+        assert_eq!(j.op, Op::NewSession { name: "blog".into(), dir: "/h/c".into() }, "in the selected row's folder");
+        assert!(j.open);
+        // From an agent card: the sessions tab, after the agent's window.
+        app.run(Command::Tab(Tab::Agents));
+        ctrl(&mut app, 's');
+        assert_eq!(app.tab, Tab::Sessions);
+        assert!(matches!(&app.mode, Mode::Create(Create { new: New::Window { after, .. }, .. }) if after == "@3"));
+    }
+
+    #[test]
+    fn a_title_is_not_undone_onto_an_exited_agent() {
+        let mut app = agents_app();
+        ctrl(&mut app, 'r');
+        type_(&mut app, "!");
+        let j = job(enter(&mut app));
+        app.ran(j, Ok(None));
+        app.set_snapshot(fixture(&["$1|s|@1|1|w|1|%1|0|1|zsh|||||||||/a"]));
+        assert!(matches!(ctrl(&mut app, 'z'), Action::None));
+        assert_eq!(app.status, Some(Status::Note("that agent has exited".into())));
     }
 }

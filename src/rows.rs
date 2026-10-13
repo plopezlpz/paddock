@@ -59,8 +59,19 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, meta: String, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    Agent { state: State, stale: bool, title: String, generating: bool, session: String, meta: String, age: String },
+    Agent { state: State, stale: bool, title: String, session: String, meta: String, age: String },
     Header { label: String, count: usize },
+    /// The "+ new" row being named (App's create mode says what it is).
+    New,
+}
+
+/// What the "+ new" row being named creates (^a, ^s).
+#[derive(Clone, Debug, PartialEq)]
+pub enum New {
+    /// A window after window AFTER of SESSION, in DIR.
+    Window { session: String, after: String, dir: String },
+    /// A session in DIR.
+    Session { dir: String },
 }
 
 impl Row {
@@ -123,9 +134,9 @@ pub fn short_path(path: &str, home: &str) -> String {
     }
 }
 
-/// Compact time since EPOCH: <1m, 5m, 3h, 2d.
+/// Compact time since EPOCH: <1m, 5m, 3h, 2d; nothing when unknown.
 pub fn age(since: Option<u64>, now: u64) -> String {
-    let Some(at) = since else { return "<1m".into() };
+    let Some(at) = since else { return String::new() };
     let minutes = now.saturating_sub(at) / 60;
     match minutes {
         0 => "<1m".into(),
@@ -140,43 +151,61 @@ pub fn pane_title(snap: &Snapshot, id: &str) -> String {
     snap.pane(id).map(|(s, w, p)| format!("{}:{}.{} · {}", s.name, w.index, p.index, p.label())).unwrap_or_default()
 }
 
-/// Session › window tree. A window shows its panes when EXPANDED or, while
+/// What the tree shows besides the snapshot and the filter.
+pub struct Tree<'a> {
+    /// Windows whose panes are listed.
+    pub expanded: &'a HashSet<Target>,
+    /// Windows the filter would open (matching panes) but the user closed.
+    pub collapsed: &'a HashSet<Target>,
+    /// Listed whatever the filter says: the row just renamed or moved, so it
+    /// doesn't vanish under the user's eyes.
+    pub keep: Option<&'a Target>,
+    /// The session paddock was opened from.
+    pub current: &'a str,
+    pub home: &'a str,
+}
+
+/// Session › window tree. A window shows its panes when expanded or, while
 /// filtering, the panes that match when the window itself does not, to
 /// show why it is listed: a session's name matches its windows without
 /// listing every pane.
-pub fn sessions(snap: &Snapshot, filter: &mut Filter, expanded: &HashSet<Target>, current: &str, home: &str) -> Vec<Row> {
+pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
     let filtering = filter.active();
+    let kept = |t: &Target| tree.keep == Some(t);
     let mut out = Vec::new();
     for s in &snap.sessions {
-        let mut block = Vec::new();
-        for (wi, w) in s.windows.iter().enumerate() {
-            let last = wi + 1 == s.windows.len();
+        // (window row, its pane rows), before the tree lines are known.
+        let mut windows: Vec<(Row, Vec<Row>)> = Vec::new();
+        for w in &s.windows {
+            let target = Target::Window { session: s.id.clone(), window: w.id.clone() };
             let active = w.active_pane();
-            let path = active.map(|p| short_path(&p.path, home)).unwrap_or_default();
+            let path = active.map(|p| short_path(&p.path, tree.home)).unwrap_or_default();
             let text = format!("{} {} {} {}", s.name, w.index, w.name, path);
             let score = filter.score(&text);
+            let pane_target = |p: &crate::model::Pane| Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
             // A pane matches with its window's text, so every term (and
             // negation) applies to the whole line.
             let pane_scores: Vec<Option<u32>> = if filtering && score.is_none() {
                 w.panes
                     .iter()
-                    .map(|p| filter.score(&format!("{text} {} {} {}", p.label(), p.command, short_path(&p.path, home))))
+                    .map(|p| filter.score(&format!("{text} {} {} {}", p.label(), p.command, short_path(&p.path, tree.home))))
                     .collect()
             } else {
                 vec![None; w.panes.len()]
             };
-            if filtering && score.is_none() && pane_scores.iter().all(Option::is_none) {
+            let pane_kept: Vec<bool> = w.panes.iter().map(|p| kept(&pane_target(p))).collect();
+            if filtering && score.is_none() && !kept(&target) && pane_scores.iter().zip(&pane_kept).all(|(s, k)| s.is_none() && !k) {
                 continue;
             }
-            let target = Target::Window { session: s.id.clone(), window: w.id.clone() };
             let many = w.panes.len() > 1;
-            let open = many && expanded.contains(&target);
-            let listed = open || pane_scores.iter().any(Option::is_some);
+            let open = many && tree.expanded.contains(&target);
+            let explains = pane_scores.iter().zip(&pane_kept).any(|(s, k)| s.is_some() || *k);
+            let listed = open || (explains && !tree.collapsed.contains(&target));
             let mut meta = path;
             if many {
                 meta = format!("{meta} · {} panes", w.panes.len());
             }
-            block.push(Row {
+            let row = Row {
                 target: Some(target),
                 kind: RowKind::Window {
                     index: w.index.clone(),
@@ -184,48 +213,87 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, expanded: &HashSet<Target>
                     meta,
                     state: w.state(),
                     active: w.active,
-                    last,
+                    last: false,
                     expanded: many.then_some(listed),
                 },
                 preview: active.map(|p| p.id.clone()),
                 // A single pane's match is the window's.
                 score: if many { score } else { score.or(pane_scores[0]) },
-            });
-            if !many {
-                continue;
-            }
-            for (pi, (p, pscore)) in w.panes.iter().zip(pane_scores).enumerate() {
-                if !open && pscore.is_none() {
-                    continue;
+            };
+            let mut panes = Vec::new();
+            if many && listed {
+                for ((p, pscore), keep) in w.panes.iter().zip(pane_scores).zip(pane_kept) {
+                    if !open && pscore.is_none() && !keep {
+                        continue;
+                    }
+                    panes.push(Row {
+                        target: Some(pane_target(p)),
+                        kind: RowKind::Pane {
+                            index: p.index.clone(),
+                            command: p.label().to_string(),
+                            state: p.agent.as_ref().map(|a| a.state),
+                            last: false,
+                            parent_last: false,
+                        },
+                        preview: Some(p.id.clone()),
+                        // Unfiltered, every row matches.
+                        score: pscore.or((!filtering).then_some(0)),
+                    });
                 }
-                block.push(Row {
-                    target: Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() }),
-                    kind: RowKind::Pane {
-                        index: p.index.clone(),
-                        command: p.label().to_string(),
-                        state: p.agent.as_ref().map(|a| a.state),
-                        last: pi + 1 == w.panes.len(),
-                        parent_last: last,
-                    },
-                    preview: Some(p.id.clone()),
-                    // Unfiltered, every row matches.
-                    score: pscore.or((!filtering).then_some(0)),
-                });
             }
+            windows.push((row, panes));
         }
+        let session = Target::Session { session: s.id.clone() };
         let score = filter.score(&s.name);
-        if filtering && block.is_empty() && score.is_none() {
+        if filtering && windows.is_empty() && score.is_none() && !kept(&session) {
             continue;
         }
         out.push(Row {
-            target: Some(Target::Session { session: s.id.clone() }),
-            kind: RowKind::Session { name: s.name.clone(), windows: s.windows.len(), current: s.id == current },
+            target: Some(session),
+            kind: RowKind::Session { name: s.name.clone(), windows: s.windows.len(), current: s.id == tree.current },
             preview: s.active_window().and_then(|w| w.active_pane()).map(|p| p.id.clone()),
             score,
         });
-        out.extend(block);
+        // Tree lines follow what is listed, not every window and pane.
+        let n = windows.len();
+        for (i, (mut row, mut panes)) in windows.into_iter().enumerate() {
+            let window_last = i + 1 == n;
+            if let RowKind::Window { last, .. } = &mut row.kind {
+                *last = window_last;
+            }
+            let m = panes.len();
+            for (j, pane) in panes.iter_mut().enumerate() {
+                if let RowKind::Pane { last, parent_last, .. } = &mut pane.kind {
+                    *last = j + 1 == m;
+                    *parent_last = window_last;
+                }
+            }
+            out.push(row);
+            out.extend(panes);
+        }
     }
     out
+}
+
+/// Put the "+ new" row for NEW where the window or session will appear:
+/// after the window it follows (and its listed panes), else at the end of
+/// that session's rows; a session at the very end.
+pub fn place_new(rows: &mut Vec<Row>, new: &New) {
+    let at = match new {
+        New::Window { session, after, .. } => {
+            let window = Target::Window { session: session.clone(), window: after.clone() };
+            let in_session = |r: &Row| match &r.target {
+                Some(Target::Session { session: s } | Target::Window { session: s, .. } | Target::Pane { session: s, .. }) => s == session,
+                _ => false,
+            };
+            match rows.iter().position(|r| r.target.as_ref() == Some(&window)) {
+                Some(i) => i + 1 + rows[i + 1..].iter().take_while(|r| matches!(r.kind, RowKind::Pane { .. })).count(),
+                None => rows.iter().rposition(in_session).map_or(rows.len(), |i| i + 1),
+            }
+        }
+        New::Session { .. } => rows.len(),
+    };
+    rows.insert(at, Row { target: Some(Target::New(0)), kind: RowKind::New, preview: None, score: None });
 }
 
 /// Groups in this order; one kind per build.
@@ -239,15 +307,18 @@ enum GroupKey {
 
 /// One card per agent pane, grouped under headers (none for Group::Flat);
 /// inside a group the most urgent state comes first.
-pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, home: &str, now: u64) -> Vec<Row> {
+/// KEEP is listed whatever the filter says (see `Tree::keep`).
+pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64) -> Vec<Row> {
     let mut items: Vec<(GroupKey, String, State, Row)> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
+        let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
         let folder = p.path.rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or(&p.path);
         let kind = p.label();
-        let Some(score) = filter.score(&format!("{} {} {} {} {}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" })) else {
+        let score = filter.score(&format!("{} {} {} {} {}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" }));
+        if score.is_none() && keep != Some(&target) {
             continue;
-        };
+        }
         let (key, label) = match group {
             Group::Status => (GroupKey::Status(Reverse(a.state)), a.state.label().to_string()),
             Group::Session => (GroupKey::Name(s.name.clone()), s.name.clone()),
@@ -255,18 +326,17 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, home: &str, no
             Group::Flat => (GroupKey::All, String::new()),
         };
         let row = Row {
-            target: Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() }),
+            target: Some(target),
             kind: RowKind::Agent {
                 state: a.state,
                 stale: a.stale,
                 title: a.title.clone(),
-                generating: a.generating,
                 session: s.name.clone(),
                 meta: format!("{} › {folder} · {kind} · {}:{}", s.name, w.index, p.index),
                 age: age(a.since, now),
             },
             preview: Some(p.id.clone()),
-            score: Some(score),
+            score,
         };
         items.push((key, label, a.state, row));
     }
@@ -294,12 +364,12 @@ mod tests {
 
     fn snap() -> Snapshot {
         fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/h/a/src",
-            "$1|work|@1|1|edit|1|%2|1|0|zsh|working|0|claude|fix parser||||/h/a/src",
-            "$1|work|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||||/h/b/src",
-            "$2|play|@3|1|game|1|%4|0|1|zsh||||||||/h/c",
+            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/h/a/src",
+            "$1|work|@1|1|edit|1|%2|1|0|zsh||working|0|claude|fix parser||||/h/a/src",
+            "$1|work|@2|2|logs|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
+            "$2|play|@3|1|game|1|%4|0|1|zsh|||||||||/h/c",
             // @2 linked into play too.
-            "$2|play|@2|2|logs|0|%3|0|1|tail|asking|0|codex|deploy||||/h/b/src",
+            "$2|play|@2|2|logs|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
         ])
     }
 
@@ -317,12 +387,18 @@ mod tests {
                 RowKind::Pane { command, .. } => format!("    {command}"),
                 RowKind::Agent { title, .. } => format!("  {title}"),
                 RowKind::Header { label, count } => format!("{label} ({count})"),
+                RowKind::New => "new".into(),
             })
             .collect()
     }
 
+    fn tree<'a>(expanded: &'a HashSet<Target>, collapsed: &'a HashSet<Target>, keep: Option<&'a Target>) -> Tree<'a> {
+        Tree { expanded, collapsed, keep, current: "$1", home: "/h" }
+    }
+
     fn sessions_for(q: &str) -> Vec<String> {
-        names(&sessions(&snap(), &mut filter(q), &HashSet::new(), "$1", "/h"))
+        let none = HashSet::new();
+        names(&sessions(&snap(), &mut filter(q), &tree(&none, &none, None)))
     }
 
     #[test]
@@ -346,31 +422,37 @@ mod tests {
     #[test]
     fn expanded_windows_list_every_pane() {
         let expanded = HashSet::from([Target::Window { session: "$1".into(), window: "@1".into() }]);
-        let rows = sessions(&snap(), &mut filter(""), &expanded, "$1", "/h");
+        let rows = sessions(&snap(), &mut filter(""), &tree(&expanded, &HashSet::new(), None));
         assert_eq!(names(&rows)[..4], ["work", "  edit", "    nvim", "    claude"]);
     }
 
     #[test]
     fn agents_group_by_full_folder_and_count_linked_panes_once() {
-        let rows = agents(&snap(), &mut filter(""), Group::Folder, "/h", 0);
+        let rows = agents(&snap(), &mut filter(""), Group::Folder, None, "/h", 0);
         assert_eq!(names(&rows), ["~/a/src (1)", "  fix parser", "~/b/src (1)", "  deploy"]);
-        let rows = agents(&snap(), &mut filter(""), Group::Status, "/h", 0);
+        let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0);
         assert_eq!(names(&rows), ["waiting (1)", "  deploy", "working (1)", "  fix parser"]);
         assert_eq!(snap().counts(), [0, 0, 1, 1]);
     }
 
     #[test]
     fn a_window_listing_matching_panes_is_drawn_open() {
-        let rows = sessions(&snap(), &mut filter("claude"), &HashSet::new(), "$1", "/h");
+        let none = HashSet::new();
+        let rows = sessions(&snap(), &mut filter("claude"), &tree(&none, &none, None));
         assert!(matches!(rows[1].kind, RowKind::Window { expanded: Some(true), .. }));
-        let rows = sessions(&snap(), &mut filter(""), &HashSet::new(), "$1", "/h");
+        let rows = sessions(&snap(), &mut filter(""), &tree(&none, &none, None));
+        assert!(matches!(rows[1].kind, RowKind::Window { expanded: Some(false), .. }));
+        // Closed by the user, it stays listed (it matches) without its panes.
+        let collapsed = HashSet::from([Target::Window { session: "$1".into(), window: "@1".into() }]);
+        let rows = sessions(&snap(), &mut filter("claude"), &tree(&none, &collapsed, None));
+        assert_eq!(names(&rows), ["work", "  edit"]);
         assert!(matches!(rows[1].kind, RowKind::Window { expanded: Some(false), .. }));
     }
 
     #[test]
     fn unfiltered_every_row_counts_as_a_match() {
         let expanded = HashSet::from([Target::Window { session: "$1".into(), window: "@1".into() }]);
-        let rows = sessions(&snap(), &mut filter(""), &expanded, "$1", "/h");
+        let rows = sessions(&snap(), &mut filter(""), &tree(&expanded, &HashSet::new(), None));
         assert!(rows.iter().all(|r| r.score.is_some()));
     }
 
@@ -378,7 +460,37 @@ mod tests {
     fn ages() {
         let m = |minutes: u64| age(Some(0), minutes * 60);
         assert_eq!([m(0), m(59), m(60), m(1439), m(1440)], ["<1m", "59m", "1h", "23h", "1d"]);
-        assert_eq!(age(None, 100), "<1m");
+        assert_eq!(age(None, 100), "", "unknown, not just now");
+    }
+
+    #[test]
+    fn tree_lines_follow_the_listed_rows() {
+        let none = HashSet::new();
+        let last = |rows: &[Row]| -> Vec<(String, bool)> {
+            rows.iter()
+                .filter_map(|r| match &r.kind {
+                    RowKind::Window { name, last, .. } => Some((name.clone(), *last)),
+                    RowKind::Pane { command, last, .. } => Some((format!("  {command}"), *last)),
+                    _ => None,
+                })
+                .collect()
+        };
+        // "edit" is work's last listed window, though "logs" follows it in tmux.
+        let rows = sessions(&snap(), &mut filter("edit"), &tree(&none, &none, None));
+        assert_eq!(last(&rows), [("edit".to_string(), true)]);
+        let rows = sessions(&snap(), &mut filter("claude"), &tree(&none, &none, None));
+        assert_eq!(last(&rows), [("edit".to_string(), true), ("  claude".to_string(), true)]);
+    }
+
+    #[test]
+    fn a_kept_row_survives_the_filter() {
+        let none = HashSet::new();
+        let pane = Target::Pane { session: "$1".into(), window: "@1".into(), pane: "%2".into() };
+        let rows = agents(&snap(), &mut filter("zzz"), Group::Flat, Some(&pane), "/h", 0);
+        assert_eq!(names(&rows), ["  fix parser"]);
+        assert!(rows[0].score.is_none(), "kept, not a match");
+        let rows = sessions(&snap(), &mut filter("zzz"), &tree(&none, &none, Some(&pane)));
+        assert_eq!(names(&rows), ["work", "  edit", "    claude"]);
     }
 
     #[test]
