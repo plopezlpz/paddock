@@ -27,8 +27,13 @@ agents_key=$(tmux show-option -gqv @paddock-agents-key)
 if [ -z "$key$agents_key" ]; then
   tmux display-message "paddock: set @paddock-key before loading paddock.tmux"
 fi
-# On reload, drop the keys bound last time (the options may have changed).
-for old in $(tmux show-option -gqv @paddock-bound-keys); do tmux unbind "$old" 2>/dev/null || true; done
+# On reload, drop the keys bound last time (the options may have changed),
+# unless the config has since bound one to something else.
+for old in $(tmux show-option -gqv @paddock-bound-keys); do
+  case $(tmux list-keys -N -T prefix -- "$old" 2>/dev/null) in
+    *paddock*) tmux unbind -- "$old" ;;
+  esac
+done
 tmux set-option -gq @paddock-bound-keys "$key $agents_key"
 
 # arg VALUE: VALUE as one single-quoted tmux argument.
@@ -55,9 +60,9 @@ popup="$popup -e PADDOCK_CLIENT=#{q:client_name} -e PADDOCK_SESSION=#{q:session_
 bind_tab() {
   [ -n "$1" ] || return 0
   if [ -x "$BIN" ]; then
-    tmux bind -N "paddock ${2:-}" "$1" run-shell -C "$popup $bin${2:+ --tab $2}"
+    tmux bind -N "paddock${2:+ $2}" "$1" run-shell -C "$popup $bin${2:+ --tab $2}"
   else
-    tmux bind -N "paddock $2" "$1" display-message "paddock: not built -- run cargo build --release in $CURRENT_DIR, then reload tmux"
+    tmux bind -N "paddock${2:+ $2}" "$1" display-message "paddock: not built -- run cargo build --release in $CURRENT_DIR, then reload tmux"
   fi
 }
 bind_tab "$key"

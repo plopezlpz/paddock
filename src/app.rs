@@ -2308,6 +2308,40 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_title_drops_the_calmest_counts_whole() {
+        let rows: Vec<String> = (1..=12)
+            .map(|i| {
+                let (state, unseen) = [("asking", "0"), ("working", "0"), ("idle", "1"), ("idle", "0")][i % 4];
+                format!("$1|s|@{i}|{i}|w|1|%{i}|0|1|zsh||{state}|{unseen}|claude|t{i}||||/a")
+            })
+            .collect();
+        let app = new(fixture(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>()), Tab::Agents, "@1");
+        let top = |w| screen(&draw(&app, &mut View::new(), w, 12))[0].clone();
+        assert_eq!(top(80).matches(['●', '○']).count(), 4, "{}", top(80));
+        for w in 30..44 {
+            let line = top(w);
+            assert!(line.contains("sessions  agents"), "{line}");
+            // Each count follows its dot.
+            let words: Vec<&str> = line.trim_matches(|c| "╭╮─ ".contains(c)).split_whitespace().collect();
+            for (i, word) in words.iter().enumerate() {
+                if word.chars().all(|c| c.is_ascii_digit()) {
+                    assert!(matches!(words.get(i.wrapping_sub(1)), Some(&"●" | &"○")), "width {w}: {line}");
+                }
+            }
+        }
+        assert!(top(38).contains("● 3"), "the most urgent stay: {}", top(38));
+    }
+
+    #[test]
+    fn tabs_round_trip_through_their_labels() {
+        for tab in [Tab::Sessions, Tab::Agents] {
+            assert_eq!(Tab::parse(tab.label()), Some(tab));
+        }
+        assert_eq!(Tab::parse("Agents"), None);
+        assert_eq!(Tab::parse(""), None);
+    }
+
+    #[test]
     fn status_shows_on_the_bottom_edge_and_keeps_the_footer() {
         let mut app = agents_app();
         app.status = Some(Status::Failed("tmux said no".into()));
