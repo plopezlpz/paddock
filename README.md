@@ -46,17 +46,41 @@ clone has no build, paddock uses a `paddock` binary from `PATH` or
 
 | Key | Action |
 |---|---|
-| type | fuzzy filter (`'exact`, `^prefix`, `suffix$`, `!not`) |
-| `↑` `↓`, `ctrl-p` `ctrl-n`, PageUp/PageDown | move |
+| type | fuzzy filter (`'exact`, `^prefix`, `suffix$`, `!not`); `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |
+| `↑` `↓`, `ctrl-p` `ctrl-n` (`ctrl-k` `ctrl-j`), PageUp/PageDown | move |
 | `Enter` | jump there (a zoomed window stays zoomed) |
 | `Tab` | switch tabs |
-| `→` / `←` | expand or collapse a window's panes |
+| `→` / `←` | show or hide a window's panes |
+| `ctrl-r` | rename the selected session, window or agent, in place |
+| `shift-↑` `shift-↓` | move the selected window or pane past its neighbour (at the ends, into the next session or window) |
+| `ctrl-t` | move the selected window or pane: pick a spot (arrows or the filter), `Enter` drops it there |
+| `ctrl-x`, `Delete` | kill the selected session, window or pane, after saying what runs there (`Enter` or `ctrl-x` again) |
+| `ctrl-s` | new window after the selected one (last in a selected session), in its folder; `ctrl-s` again: a new session instead |
+| `ctrl-z` | undo the last rename or move |
 | `ctrl-g` | change the agents' grouping |
 | `ctrl-o` | toggle the preview |
-| `Esc` | close |
+| `Esc`, `ctrl-c` | back out: close a menu, cancel a rename, move, new name or question, else close |
 
-Mouse and touch work too: tap to select, tap again to open. Tabs and footer
-hints are buttons.
+Renaming edits the name in place, with `←` `→`, `Home` `End` (`ctrl-a`
+`ctrl-e`), `ctrl-w` and `ctrl-u`. `Enter` saves. An empty window name hands
+naming back to tmux, and an empty agent title goes back to the automatic one;
+for an agent, `ctrl-r` again fills in a suggested title when the producer
+offers suggestions (see below), to keep, edit or drop.
+
+Dropped on a session, a window goes first in it; on a window, after it. A
+pane dropped on a window joins it, on a pane splits beside it (or swaps, in
+its own window), and on a session becomes a window of its own. Moving a
+session's last window out closes the session, so paddock asks first.
+
+A new window or session is named on its own row, where it will appear in
+the tree. `Enter` creates it and goes there; a window left unnamed is named
+after what runs, like tmux's own.
+
+Mouse and touch: click to select, double-click to open (on a phone, tap the
+selected row). Click ▸ to show a window's panes. Drag a window or pane to
+move it. Right-click (or ctrl-click) opens the row's menu of everything you
+can do with it. Tabs and footer hints are buttons; when the footer runs out
+of room, ⋯ opens the menu.
 
 ## Options
 
@@ -77,28 +101,38 @@ by hooking into each agent. Without a producer, paddock is a session switcher
 with a live preview.
 
 Any producer can feed paddock by setting these options on the agent's pane
-(one agent per pane):
+(one agent per pane, one producer per tmux server):
 
 | Pane option | Value |
 |---|---|
 | `@agent-state` | `working`, `asking` or `idle` |
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
-| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown as `working?`) |
+| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`) |
 | `@agent-kind` | the agent's name, e.g. `claude` |
-| `@agent-description` | what the agent is working on |
+| `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
 
 Only `@agent-state` is required. A producer:
 
-- **unsets** them all when the agent exits. A pane without `@agent-state` has
-  no agent.
+- **unsets** them all when the agent exits, along with `@agent-description`
+  (below). A pane without `@agent-state` has no agent.
 - **clears** `@agent-unseen` when the pane gets focus, from a `pane-focus-in`
-  hook. Jumping there from paddock fires it.
+  hook. Jumping there from paddock fires it. tmux sends focus events only
+  with `focus-events on` (its default is off).
 
 A pane whose `@agent-state` paddock doesn't know is shown without an agent.
-agent-status.tmux's `@agent-auto-description` is read when
-`@agent-description` is unset, and its description overrides
-(`@agent-descriptions-dir`, `@agent-revision`) when it sets them.
+
+An agent's title is its `@agent-description`, the title you gave it, else
+`@agent-auto-description`, else the pane title the agent set (without status
+glyphs such as `✳`; tmux's default, the host name, is not a title).
+Renaming sets `@agent-description` on the pane; clearing it unsets it.
+
+For suggested titles, a producer sets the global `@agent-suggest-command` to
+a shell command. paddock runs it with the pane id appended, in its own
+process group, and stops it when you cancel, type over it, or after 30
+seconds. It prints the title on stdout, or fails with the reason as the last
+line of stderr. agent-status.tmux's is `describe.sh suggest`, which asks pi
+from the agent's conversation.
 
 ## The `_paddock` session
 

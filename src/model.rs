@@ -1,6 +1,6 @@
-//! A snapshot of every session, window and pane, with agent-status.tmux's
-//! per-pane agent options, from a single `list-panes -a`; and the targets
-//! commands act on.
+//! A snapshot of every session, window and pane, with the agent options a
+//! producer (such as agent-status.tmux) sets on panes, from a single
+//! `list-panes -a`; and the targets commands act on.
 
 use crate::tmux::{quote, Control, SESSION};
 
@@ -40,13 +40,14 @@ impl State {
 pub struct Agent {
     pub state: State,
     pub kind: String,
-    /// The override, else @agent-description, else agent-status.tmux's
-    /// @agent-auto-description.
+    /// What the card shows: the user's title, else the automatic one.
     pub title: String,
-    /// Whether the title is an override (not the automatic one).
-    pub overridden: bool,
-    /// A generated description is on its way.
-    pub generating: bool,
+    /// The automatic title, which clearing the user's goes back to: the
+    /// producer's @agent-auto-description, else the pane title the agent
+    /// set (terminal title escape).
+    pub auto: String,
+    /// Whether the user set the title (@agent-description).
+    pub renamed: bool,
     pub since: Option<u64>,
     /// The producer hasn't confirmed this state recently.
     pub stale: bool,
@@ -79,12 +80,14 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
 }
 
-/// A session, window or pane, by tmux ids (`$1`, `@2`, `%3`).
+/// A session, window or pane, by tmux ids (`$1`, `@2`, `%3`); or the
+/// filter's Nth "+ new …" row, which names nothing on the server yet.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Target {
     Session { session: String },
     Window { session: String, window: String },
     Pane { session: String, window: String, pane: String },
+    New(usize),
 }
 
 impl Target {
@@ -95,88 +98,59 @@ impl Target {
             Target::Session { session } => session.clone(),
             Target::Window { session, window } => format!("{session}:{window}"),
             Target::Pane { session, window, pane } => format!("{session}:{window}.{pane}"),
+            Target::New(_) => String::new(),
         })
     }
 }
 
-/// `list-panes -a` fields.
-const FIELDS: &[&str] = &[
-    "session_id",
-    "session_name",
-    "window_id",
-    "window_index",
-    "window_name",
-    "window_active",
+/// The `list-panes -a` fields, by level. The refresh subscription (main.rs)
+/// watches the same ones.
+pub const SESSION_FIELDS: &[&str] = &["session_id", "session_name"];
+pub const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "window_active"];
+pub const PANE_FIELDS: &[&str] = &[
     "pane_id",
     "pane_index",
     "pane_active",
     "pane_current_command",
+    "pane_title",
     "@agent-state",
     "@agent-unseen",
     "@agent-kind",
     "@agent-auto-description",
+    "@agent-description",
     "@agent-state-at",
     "@agent-stale",
-    "@agent-description",
+    // Last: a test fixture's last field may hold its separator.
     "pane_current_path",
 ];
 
-/// agent-status.tmux's description overrides: files keyed by server start
-/// time and pane number, a `.generating-` marker while pi writes one, and
-/// its describe.sh, which sets them. No @agent-descriptions-dir, no
-/// overrides.
-pub struct Descriptions {
-    dir: String,
-    start: String,
-    scripts: String,
+pub fn fields() -> Vec<&'static str> {
+    [SESSION_FIELDS, WINDOW_FIELDS, PANE_FIELDS].concat()
 }
 
-/// A pane's description override, if any, and whether one is generating.
-#[derive(Default)]
-pub struct Described {
-    pub text: Option<String>,
-    pub generating: bool,
+pub fn snapshot(tmux: &mut Control, host: &str) -> Result<Snapshot, String> {
+    let rows = tmux.fields("list-panes -a -F", &fields())?;
+    Ok(parse(&rows, host))
 }
 
-impl Descriptions {
-    pub fn load(tmux: &mut Control, window: &str) -> Descriptions {
-        let mut row = tmux.row(window, &["@agent-descriptions-dir", "start_time", "@agent-scripts-dir"]).into_iter();
-        let mut next = || row.next().unwrap_or_default();
-        Descriptions { dir: next(), start: next(), scripts: next() }
+/// A pane title as an agent title: none when it is tmux's default (the
+/// host name), without the status glyphs agents put in front (✳, spinners).
+fn title_of(pane_title: &str, host: &str) -> String {
+    let short = host.split('.').next().unwrap_or(host);
+    let t = pane_title.trim();
+    if t.is_empty() || t == host || t == short {
+        return String::new();
     }
-
-    fn get(&self, pane: &str) -> Described {
-        if self.dir.is_empty() {
-            return Described::default();
-        }
-        let key = format!("{}-{}", self.start, pane.trim_start_matches('%'));
-        let text = std::fs::read_to_string(format!("{}/{key}", self.dir))
-            .ok()
-            .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
-            .filter(|l| !l.is_empty());
-        let generating = std::path::Path::new(&format!("{}/.generating-{key}", self.dir)).exists();
-        Described { text, generating }
-    }
-
-    /// agent-status.tmux's describe.sh, if the plugin advertises it.
-    pub fn script(&self) -> Option<std::path::PathBuf> {
-        let path = std::path::Path::new(&self.scripts).join("describe.sh");
-        (!self.scripts.is_empty() && path.is_file()).then_some(path)
-    }
+    t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_string()
 }
 
-pub fn snapshot(tmux: &mut Control, descriptions: &Descriptions) -> Result<Snapshot, String> {
-    let rows = tmux.fields("list-panes -a -F", FIELDS)?;
-    Ok(parse(&rows, |pane| descriptions.get(pane)))
-}
-
-/// Build the tree from `list-panes -a` rows (FIELDS, in session and window
-/// order), without paddock's own session. DESCRIBE gives a pane's
-/// description override.
-pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snapshot {
+/// Build the tree from `list-panes -a` rows (`fields()`, in session and
+/// window order), without paddock's own session. HOST is the server's host
+/// name, tmux's default pane title.
+pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
     let mut sessions: Vec<Session> = Vec::new();
     for row in rows {
-        let [sid, sname, wid, windex, wname, wactive, pid, pindex, pactive, command, state, unseen, kind, auto_desc, at, stale, desc, path] =
+        let [sid, sname, wid, windex, wname, wactive, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] =
             row.as_slice()
         else {
             continue;
@@ -199,13 +173,14 @@ pub fn parse(rows: &[Vec<String>], describe: impl Fn(&str) -> Described) -> Snap
             });
         }
         let agent = State::parse(state, unseen).map(|state| {
-            let described = describe(pid);
+            let auto = if auto.trim().is_empty() { title_of(pane_title, host) } else { auto.trim().to_string() };
+            let desc = desc.trim();
             Agent {
                 state,
                 kind: kind.clone(),
-                overridden: described.text.is_some(),
-                title: described.text.unwrap_or_else(|| if desc.is_empty() { auto_desc } else { desc }.clone()),
-                generating: described.generating,
+                title: if desc.is_empty() { auto.clone() } else { desc.to_string() },
+                auto,
+                renamed: !desc.is_empty(),
                 since: at.parse().ok(),
                 stale: stale == "1",
             }
@@ -272,11 +247,12 @@ impl Snapshot {
     }
 }
 
-/// A snapshot from `|`-separated FIELDS lines.
+/// A snapshot from `|`-separated `fields()` lines (host "host").
 #[cfg(test)]
 pub fn fixture(lines: &[&str]) -> Snapshot {
-    let rows: Vec<Vec<String>> = lines.iter().map(|l| l.splitn(FIELDS.len(), '|').map(String::from).collect()).collect();
-    parse(&rows, |_| Described::default())
+    let n = fields().len();
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| l.splitn(n, '|').map(String::from).collect()).collect();
+    parse(&rows, "host")
 }
 
 #[cfg(test)]
@@ -285,39 +261,37 @@ mod tests {
 
     #[test]
     fn parses_the_tree() {
-        let rows: Vec<Vec<String>> = [
-            "$1|work|@1|1|edit|1|%1|0|1|nvim||||||||/w",
-            "$1|work|@1|1|edit|1|%2|1|0|claude|working|0|claude|fix it|100|||/w",
+        let snap = fixture(&[
+            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/w",
+            "$1|work|@1|1|edit|1|%2|1|0|claude||working|0|claude|fix it||100||/w",
             // The same window linked at a second index.
-            "$1|work|@1|2|edit|0|%1|0|1|nvim||||||||/w",
-            "$1|work|@2|3|logs|0|%3|0|1|tail|idle|1||||||/w|with|bars",
-            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat||||||||/",
+            "$1|work|@1|2|edit|0|%1|0|1|nvim|||||||||/w",
+            "$1|work|@2|3|logs|0|%3|0|1|tail||idle|1||auto|mine|||/w|with|bars",
+            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat|||||||||/",
             "broken|line",
-        ]
-        .iter()
-        .map(|l| l.splitn(FIELDS.len(), '|').map(String::from).collect())
-        .collect();
-        let snap = parse(&rows, |p| Described { text: (p == "%3").then(|| "override".to_string()), generating: p == "%3" });
+        ]);
         assert_eq!(snap.sessions.len(), 1, "paddock's own session is left out");
         let w = &snap.sessions[0].windows;
         assert_eq!(w.iter().map(|w| (w.id.as_str(), w.index.as_str())).collect::<Vec<_>>(), [("@1", "1"), ("@1", "2"), ("@2", "3")]);
         assert_eq!(w[0].panes.len(), 2);
         let agent = w[0].panes[1].agent.as_ref().unwrap();
-        assert_eq!((agent.state, agent.title.as_str(), agent.since), (State::Working, "fix it", Some(100)));
+        assert_eq!((agent.state, agent.title.as_str(), agent.since, agent.renamed), (State::Working, "fix it", Some(100), false));
         let agent = w[2].panes[0].agent.as_ref().unwrap();
-        assert_eq!((agent.state, agent.title.as_str(), agent.overridden, agent.generating), (State::Finished, "override", true, true));
+        assert_eq!((agent.state, agent.title.as_str(), agent.auto.as_str(), agent.renamed), (State::Finished, "mine", "auto", true));
         assert_eq!(w[2].panes[0].path, "/w|with|bars", "the last field keeps separators");
         assert!(w[0].panes[0].agent.is_none());
     }
 
     #[test]
-    fn description_and_stale() {
+    fn titles_fall_back_to_the_pane_title() {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|working|0|pi|auto|100|1|set|/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|working|0|pi|auto|100|||/a",
+            "$1|s|@1|1|w|1|%1|0|1|zsh|✳ Fix the parser|working|0|claude||||1|/a",
+            "$1|s|@1|1|w|1|%2|1|0|zsh|host|working|0|pi|||||/a",
+            "$1|s|@1|1|w|1|%3|2|0|zsh|⠋ x|working|0|pi|first prompt||||/a",
         ]);
         let agents: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| (a.title.as_str(), a.stale)).collect();
-        assert_eq!(agents, [("set", true), ("auto", false)], "@agent-description wins over @agent-auto-description");
+        assert_eq!(agents, [("Fix the parser", true), ("", false), ("first prompt", false)], "status glyphs dropped; the host name is no title");
+        assert_eq!(title_of("pmac", "pmac.local"), "", "the short host name too");
     }
 
     #[test]

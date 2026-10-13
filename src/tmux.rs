@@ -92,6 +92,11 @@ impl Control {
         Ok(Control { child, stdin, replies, dead: false })
     }
 
+    /// Whether a command timed out: the connection is no longer usable.
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
     /// Run one tmux command (tmux command syntax, so quote formats: `#`
     /// starts a comment) and return its output lines.
     pub fn cmd(&mut self, line: &str) -> Result<Vec<String>, String> {

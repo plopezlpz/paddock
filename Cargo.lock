@@ -788,8 +788,10 @@ name = "paddock"
 version = "0.1.0"
 dependencies = [
  "ansi-to-tui",
+ "libc",
  "nucleo-matcher",
  "ratatui",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
