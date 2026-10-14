@@ -771,7 +771,7 @@ impl App {
             return Action::None;
         }
         if !self.can_suggest {
-            self.status = Some(Status::Note("no title suggestions: the agent producer sets none (@agent-suggest-command)".into()));
+            self.status = Some(Status::Note("no title suggestions: nothing sets @agent-suggest-command".into()));
             return Action::None;
         }
         self.suggestions += 1;

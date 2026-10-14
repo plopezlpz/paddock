@@ -1,5 +1,5 @@
 //! A snapshot of every session, window and pane, with the agent options a
-//! producer (such as agent-status.tmux) sets on panes, from a single
+//! tool (such as agent-status.tmux) sets on panes, from a single
 //! `list-panes -a`; and the targets commands act on.
 
 use crate::tmux::{quote, Control, SESSION};
@@ -43,13 +43,13 @@ pub struct Agent {
     /// What the card shows: the user's title, else the automatic one.
     pub title: String,
     /// The automatic title, which clearing the user's goes back to: the
-    /// producer's @agent-auto-description, else the pane title the agent
+    /// the tool's @agent-auto-description, else the pane title the agent
     /// set (terminal title escape).
     pub auto: String,
     /// Whether the user set the title (@agent-description).
     pub renamed: bool,
     pub since: Option<u64>,
-    /// The producer hasn't confirmed this state recently.
+    /// Nothing has confirmed this state recently.
     pub stale: bool,
 }
 
