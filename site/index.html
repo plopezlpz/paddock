@@ -59,14 +59,11 @@
   <div class="tabpanel is-active" role="tabpanel" id="panel-tpm" aria-labelledby="tab-tpm">
     <p class="panel-label">TPM</p>
     <p class="note step-n"><b>1</b> Add this to your tmux config:</p>
-    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-tpm" aria-label="Copy the TPM config">copy</button></div><pre tabindex="0"><code id="code-tpm">set -g @paddock-key 'a'                        <span class="cm"># prefix a opens paddock</span>
-set -g @plugin 'plopezlpz/paddock'
+    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-tpm" aria-label="Copy the TPM config">copy</button></div><pre tabindex="0"><code id="code-tpm">set -g @plugin 'plopezlpz/paddock'
 set -g @plugin 'plopezlpz/agent-status.tmux'   <span class="cm"># agent state</span>
 set -g @agent-icon-in-status on                <span class="cm"># its dot in front of each window name</span></code></pre></div>
-    <p class="note step-n"><b>2</b> Press <code>prefix I</code> to install the plugins, then <code>prefix a</code>: it offers to download paddock's binary from the GitHub release (checksum verified). Press <code>prefix a</code> again to open paddock.</p>
-    <p class="note step-n"><b>3</b> Hook up your agents, once, then restart them. It lists the supported agents it finds and asks first:</p>
-    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-tpm-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-tpm-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install</code></pre></div>
-    <p class="note">To update, press <code>prefix U</code>; the key then offers paddock's new version. No Rust needed.</p>
+    <p class="note step-n"><b>2</b> Press <code>prefix I</code> to install the plugins, then <code>prefix a</code>. It offers to download paddock's binary from the GitHub release (checksum verified), then lists the agents it finds and offers to hook them up. Restart those agents, and press <code>prefix a</code> again to open paddock.</p>
+    <p class="note"><code>prefix a</code> is the default key, unless your config already binds it; <code>@paddock-key</code> picks another. To update, press <code>prefix U</code>; the key then offers paddock's new version. No Rust needed.</p>
   </div>
   <div class="tabpanel" role="tabpanel" id="panel-brew" aria-labelledby="tab-brew">
     <p class="panel-label">Homebrew</p>

@@ -143,24 +143,19 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 1. Add this to your tmux config:
 
    ```tmux
-   set -g @paddock-key 'a'                        # prefix a opens paddock
    set -g @plugin 'plopezlpz/paddock'
    set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state
    set -g @agent-icon-in-status on                # its dot in front of each window name
    ```
 
-2. Press `prefix I` to install the plugins, then `prefix a`: it offers to
-   download paddock's binary from the GitHub release (checksum verified). Press
-   `prefix a` again to open paddock.
-3. Hook up your agents, once, then restart them:
+2. Press `prefix I` to install the plugins, then `prefix a`. It offers to
+   download paddock's binary from the GitHub release (checksum verified), then
+   lists the agents it finds (Claude Code, pi, OpenCode, …) and offers to hook
+   them up. Restart those agents, and press `prefix a` again to open paddock.
 
-   ```sh
-   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install
-   ```
-
-   It lists the supported agents it finds (Claude Code, pi, OpenCode, …) and
-   asks before hooking them up.
-
+`prefix a` is the default key, unless your config already binds it; set
+`@paddock-key` to choose another. Hooked up a new agent later? Run
+`bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install`.
 To update, press `prefix U`; the key then offers paddock's new version. TPM
 may keep plugins in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
 Outside tmux, `bash ~/.tmux/plugins/paddock/scripts/install.sh` downloads the
@@ -270,7 +265,7 @@ of room, ⋯ opens the menu.
 
 | Option | Default | |
 |---|---|---|
-| `@paddock-key`, `@paddock-agents-key` | unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
+| `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%` | may be a format, e.g. `#{?#{e\|<:#{client_width},140},100%,80%}` |
 | `@paddock-popup-style` | `bg=terminal,fg=terminal` | popup background and text |

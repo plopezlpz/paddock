@@ -329,7 +329,7 @@ async function behaviour(browser, url, label, { grantClipboard, blockStorage }) 
 
   // copy
   const tpmText = await page.textContent('#code-tpm');
-  check(/@paddock-key 'a'/.test(tpmText) && /prefix a opens paddock/.test(tpmText), L('the install snippet uses key a'), tpmText);
+  check(/@plugin 'plopezlpz\/paddock'/.test(tpmText) && !/@paddock-key/.test(tpmText) && /prefix a<\/code> is the default key/.test(await page.innerHTML('#panel-tpm')), L('the TPM snippet relies on the default key a'), tpmText);
   await page.click('[data-copy=code-tpm]');
   await page.waitForTimeout(150);
   const btnText = (await page.textContent('[data-copy=code-tpm]')).trim();
