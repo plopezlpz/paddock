@@ -148,3 +148,25 @@ jobs:
       - uses: actions/checkout@v5
       - name: Update the Homebrew tap
         run: bash scripts/update-tap.sh "$TAG"
+
+  # Last: move master to the released commit (fast-forward only), so TPM, which
+  # follows master, only ever sees a version whose release exists. Runs even if
+  # the tap update failed: the release itself is out. A push made with the
+  # workflow token starts no workflows, so Pages is started by hand.
+  master:
+    needs: [release, tap]
+    if: ${{ !cancelled() && needs.release.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Fast-forward master to the release
+        run: bash scripts/advance-master.sh "$GITHUB_SHA"
+      - name: Redeploy the site
+        run: gh workflow run pages.yml --ref master

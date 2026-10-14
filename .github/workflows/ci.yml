@@ -60,3 +60,5 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Plugin
         run: cargo build && tmux -V && bash tests/paddock-tmux.sh
+      - name: Release scripts
+        run: bash tests/release-scripts.sh
