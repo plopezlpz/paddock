@@ -14,14 +14,6 @@ Keep your tmux.conf, your prefix and keybindings, your plugins and sessions.
 paddock is one popup on top of them.
 </p>
 
-<p align="center">
-A fast tmux popup for jumping between sessions, windows and panes, and for
-keeping an eye on the AI coding agents running in them (Claude Code, Codex,
-pi, …): which one is working, which is waiting for you, which has finished.
-</p>
-
-<p align="center">Your tmux, your config, ssh and your phone. No new app or terminal to move to.</p>
-
 <p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a></p>
 
 <details open>
@@ -32,6 +24,10 @@ pi, …): which one is working, which is waiting for you, which has finished.
 <sub>Recorded from paddock 0.1.0 in a scratch tmux server; the sessions and agent output are staged.</sub>
 
 </details>
+
+A fast tmux popup for jumping between sessions, windows and panes, and for
+keeping an eye on the AI coding agents running in them (Claude Code, pi,
+OpenCode, …): which one is working, which is waiting for you, which has finished.
 
 > **Status: beta.** It's used daily on macOS. Linux should work. Expect
 > changes.
@@ -122,6 +118,10 @@ notification.
 Under 80 columns paddock switches to a compact two-line layout with tappable
 words (see [Use](#use)).
 
+<p align="center">
+  <img src="docs/brand/frame-phone.svg" alt="paddock's agents tab on a 40-column phone screen: the compact layout, with the agents grouped by state and a card waiting for you." width="300">
+</p>
+
 ### Your colours
 
 Colours follow `@paddock-color-*`, else your tmux theme and `@agent-color-*`,
@@ -207,10 +207,6 @@ does not reach a running tmux server):
 - **Preview**: the selected pane, live, when the popup is at least 102
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
-
-<p align="center">
-  <img src="docs/brand/frame-phone.svg" alt="paddock's agents tab on a 40-column phone screen: the compact layout, with the agents grouped by state and a card waiting for you." width="300">
-</p>
 
 | Key | Action |
 |---|---|
