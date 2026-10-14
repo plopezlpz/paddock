@@ -5,9 +5,8 @@
   </picture>
 </h1>
 
-<p align="center"><b>Keep an eye on your agents without leaving tmux.</b></p>
-
-<p align="center"><b>Stay in tmux. Add a control panel for your agents.</b></p>
+<p align="center"><b>Stay in tmux. Add a control panel for your agents.</b><br>
+Keep an eye on your agents without leaving tmux.</p>
 
 <p align="center">
 Keep your tmux.conf, your prefix and keybindings, your plugins and sessions.
@@ -63,9 +62,10 @@ to it, with no new server, terminal or config to move to.
 
 ### A dot beside each window that has an agent
 
-Your status bar stays as it is; agent-status.tmux adds one dot to each window
-that has an agent, for working, finished or asking you something, and paddock
-shows the same state.
+agent-status.tmux puts a dot in front of each window that has an agent (one
+addition to your `window-status-format`), coloured for working, finished or
+asking you something, and paddock shows the same state.
+See [Install](#install).
 
 <img src="docs/brand/status.svg" alt="paddock's status dot: a dot appears beside each tmux window that has an agent and turns blue when the agent has finished." width="100%">
 
@@ -95,7 +95,8 @@ so you can read what an agent is doing, or asking, before you jump to it.
 ### Rename an agent, with a suggested title
 
 `ctrl-r` renames the selected agent in place; press it again and paddock fills
-in a suggested title when agent-status.tmux offers one, to keep, edit or drop.
+in a suggested title when agent-status.tmux offers one (it asks pi, so pi must
+be installed), to keep, edit or drop.
 `Enter` saves it, `ctrl-z` undoes it.
 
 ### Sessions, windows and panes from the popup
@@ -109,7 +110,7 @@ work too; tabs and footer hints are buttons.
 
 A red dot in the status bar means an agent is waiting for you, and in paddock
 it is the first card. agent-status.tmux can also raise a clickable desktop
-notification.
+notification (with alerter, terminal-notifier or notify-send installed).
 
 <img src="docs/brand/notify.svg" alt="While you work in one session, the dot of another window turns red when its agent asks for an answer and blue when another agent finishes; paddock's agents tab lists who is waiting and who is done." width="100%">
 
@@ -133,46 +134,80 @@ changes.
 ## Install
 
 You need tmux 3.8 or later (`tmux -V`); distribution packages are usually
-older. Prebuilt binaries cover macOS and Linux, arm64 and x86_64. For agent state
-add the companion plugin [agent-status.tmux](#agent-state) too: the TPM snippet
-below includes it, and with Homebrew you add it as in
-[its README](https://github.com/plopezlpz/agent-status.tmux).
+older, and Homebrew has it on macOS and Linux (`brew install tmux`). Agent state
+also needs jq. paddock's binaries are prebuilt for macOS and Linux, arm64 and
+x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 
-### TPM
+### With TPM
 
-With [TPM](https://github.com/tmux-plugins/tpm), in `~/.tmux.conf` (set the
-options before the plugin loads):
+1. Add this to your tmux config:
 
-```tmux
-set -g @paddock-key 'a'          # prefix a opens paddock
-set -g @plugin 'plopezlpz/paddock'
-set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state: dots, notifications
-```
+   ```tmux
+   set -g @paddock-key 'a'                        # prefix a opens paddock
+   set -g @plugin 'plopezlpz/paddock'
+   set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state
+   # the agent state dot in front of each window name
+   setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
+   setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
+   ```
 
-Press `prefix I`, then the key. It offers to download the matching binary
-from the GitHub release (checksum verified); press the key again. No Rust
-needed. After `prefix U`, the key offers the new version. Outside tmux, run
-`bash ~/.tmux/plugins/paddock/scripts/install.sh` (TPM may use
-`~/.config/tmux/plugins/` instead).
+2. Press `prefix I` to install the plugins, then `prefix a`: it offers to
+   download paddock's binary from the GitHub release (checksum verified). Press
+   `prefix a` again to open paddock.
+3. Hook up each agent you use, once, then restart it:
 
-### Homebrew
+   ```sh
+   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
+   # the same for pi, omp, opencode, kilo, kimi or mastracode
+   ```
 
-```sh
-brew install plopezlpz/tap/paddock
-```
+To update, press `prefix U`; the key then offers paddock's new version. TPM
+may keep plugins in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
+Outside tmux, `bash ~/.tmux/plugins/paddock/scripts/install.sh` downloads the
+binary.
 
-```tmux
-set -g @paddock-key 'a'
-run-shell 'paddock init'
-```
+### With Homebrew
 
-If tmux's `PATH` lacks Homebrew's, write out the full path,
-`$(brew --prefix)/bin/paddock`: `/opt/homebrew/bin/paddock` (Apple silicon),
-`/usr/local/bin/paddock` (Intel Mac), `/home/linuxbrew/.linuxbrew/bin/paddock`
-(Linux).
+1. Install paddock and agent-status.tmux:
 
-After `brew upgrade`, reload tmux; until then the key says its bindings are
-for another version.
+   ```sh
+   brew install plopezlpz/tap/paddock
+   git clone https://github.com/plopezlpz/agent-status.tmux ~/.tmux/plugins/agent-status.tmux
+   ```
+
+2. Add this to your tmux config, then reload it with
+   `tmux source-file ~/.tmux.conf`:
+
+   ```tmux
+   set -g @paddock-key 'a'                        # prefix a opens paddock
+   run-shell 'paddock init'
+   run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'
+   # the agent state dot in front of each window name
+   setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
+   setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
+   ```
+
+3. Hook up each agent you use, once, then restart it:
+
+   ```sh
+   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
+   # the same for pi, omp, opencode, kilo, kimi or mastracode
+   ```
+
+If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
+out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
+`/usr/local/bin/paddock` (Intel Mac) or `/home/linuxbrew/.linuxbrew/bin/paddock`
+(Linux). To update, `brew upgrade` and reload tmux (until then the key says its
+bindings are for another version), and `git -C ~/.tmux/plugins/agent-status.tmux pull`.
+
+### Notes
+
+- Already have your own window status formats? Instead of the two `setw` lines,
+  put `#{?@agent-icon,#{@agent-icon} ,}` at the front of yours.
+- Desktop notifications need alerter, terminal-notifier or notify-send;
+  suggested titles need [pi](https://pi.dev). See
+  [agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) for its
+  options and supported agents.
 
 ### From a clone
 

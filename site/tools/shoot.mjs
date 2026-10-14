@@ -316,7 +316,7 @@ async function behaviour(browser, url, label, { grantClipboard, blockStorage }) 
   await page.click('#tab-brew');
   check((await sel('tab-brew')) === 'true' && (await sel('tab-tpm')) === 'false', L('clicking Homebrew selects it'));
   check((await page.isVisible('#panel-brew')) && !(await page.isVisible('#panel-tpm')), L('only the Homebrew panel shows'));
-  check((await page.textContent('#code-brew-sh')) === 'brew install plopezlpz/tap/paddock', L('Homebrew snippet verbatim'));
+  check((await page.textContent('#code-brew-sh')).startsWith('brew install plopezlpz/tap/paddock\ngit clone https://github.com/plopezlpz/agent-status.tmux'), L('Homebrew snippet verbatim'));
   await page.focus('#tab-brew');
   await page.keyboard.press('ArrowRight');
   check((await sel('tab-tpm')) === 'true' && (await page.evaluate(() => document.activeElement.id)) === 'tab-tpm', L('ArrowRight wraps to TPM and focuses it'));
