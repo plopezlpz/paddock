@@ -14,7 +14,7 @@ Keep your tmux.conf, your prefix and keybindings, your plugins and sessions.
 paddock is one popup on top of them.
 </p>
 
-<p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a></p>
+<p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a> · <a href="https://plopezlpz.github.io/paddock/">Website</a></p>
 
 <details open>
 <summary><b>Demo</b></summary>
