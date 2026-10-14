@@ -15,11 +15,15 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/paddock-tmux-test.XXXXXX")
 TMP=$(cd "$TMP" && pwd) # TMPDIR's trailing / would differ from the paths the plugin computes
 IN=paddock-test-in-$$
 OUT=paddock-test-out-$$
+# The test servers' sockets go in a private dir: tmux 3.8 leaves socket files
+# behind on exit. Under /tmp, as socket paths are limited to 104 bytes on macOS.
+TMUX_TMPDIR=$(mktemp -d /tmp/paddock-tmux-sock.XXXXXX)
+export TMUX_TMPDIR
 cleanup() {
   chmod -R u+w "$TMP" 2>/dev/null # an interrupt inside the unwritable-dir check
   tmux -L "$OUT" kill-server 2>/dev/null
   tmux -L "$IN" kill-server 2>/dev/null
-  rm -rf "$TMP"
+  rm -rf "$TMP" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 unset TMUX
