@@ -174,9 +174,8 @@ binary.
    `tmux source-file ~/.tmux.conf`:
 
    ```tmux
-   set -g @paddock-key 'a'                        # prefix a opens paddock
    set -g @agent-icon-in-status on                # agent state dot in front of each window name
-   run-shell 'paddock init'
+   run-shell 'paddock init'                       # prefix a opens paddock
    run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'
    ```
 

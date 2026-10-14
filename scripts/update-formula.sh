@@ -80,9 +80,9 @@ class Paddock < Formula
 
   def caveats
     <<~EOS
-      paddock needs tmux 3.8 or later (tmux -V). Add to ~/.tmux.conf:
+      paddock needs tmux 3.8 or later (tmux -V). Add to ~/.tmux.conf
+      (prefix a then opens paddock; @paddock-key picks another key):
 
-        set -g @paddock-key 'a'
         run-shell '#{HOMEBREW_PREFIX}/bin/paddock init'
 
       Reload tmux (tmux source-file ~/.tmux.conf) after installing and after

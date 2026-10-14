@@ -71,9 +71,8 @@ set -g @agent-icon-in-status on                <span class="cm"># its dot in fro
     <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-brew-sh" aria-label="Copy the Homebrew install commands">copy</button></div><pre tabindex="0"><code id="code-brew-sh">brew install plopezlpz/tap/paddock
 git clone https://github.com/plopezlpz/agent-status.tmux ~/.tmux/plugins/agent-status.tmux</code></pre></div>
     <p class="note step-n"><b>2</b> Add this to your tmux config, then reload it with <code>tmux source-file ~/.tmux.conf</code>:</p>
-    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-brew-tmux" aria-label="Copy the Homebrew tmux config">copy</button></div><pre tabindex="0"><code id="code-brew-tmux">set -g @paddock-key 'a'                        <span class="cm"># prefix a opens paddock</span>
-set -g @agent-icon-in-status on                <span class="cm"># agent state dot in front of each window name</span>
-run-shell 'paddock init'
+    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-brew-tmux" aria-label="Copy the Homebrew tmux config">copy</button></div><pre tabindex="0"><code id="code-brew-tmux">set -g @agent-icon-in-status on                <span class="cm"># agent state dot in front of each window name</span>
+run-shell 'paddock init'                       <span class="cm"># prefix a opens paddock</span>
 run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'</code></pre></div>
     <p class="note step-n"><b>3</b> Hook up your agents, once, then restart them. It lists the supported agents it finds and asks first:</p>
     <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-brew-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-brew-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install</code></pre></div>
