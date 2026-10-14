@@ -48,7 +48,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Build
@@ -77,8 +77,14 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The full test suite (ci.yml) for the tagged commit: nothing is published unless it passes.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
-    needs: build
+    needs: [build, ci]
     # A dispatch never publishes, even on a tag.
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
@@ -92,6 +98,10 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
     steps:
+      - name: The tag still names this commit
+        run: |
+          [ "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$GITHUB_SHA" ] ||
+            { echo "::error::$TAG no longer points at $GITHUB_SHA; push a new tag instead of moving one"; exit 1; }
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -124,45 +134,61 @@ jobs:
           for id in $(draft_ids); do
             gh api -X DELETE "repos/$GH_REPO/releases/$id"
           done
-          gh release create "$TAG" --draft --verify-tag --title "paddock ${TAG#v}" --generate-notes dist/*
+          # A pre-release (vX.Y.Z-rc1) is marked as one and never becomes "Latest";
+          # otherwise GitHub picks Latest by version, so a backport doesn't take it.
+          pre='' latest=legacy
+          case "$TAG" in *-*) pre=1 latest=false ;; esac
+          gh release create "$TAG" --draft ${pre:+--prerelease} --verify-tag --title "paddock ${TAG#v}" --generate-notes dist/*
           ids=$(draft_ids)
           if [ "$(printf '%s\n' "$ids" | grep -c .)" -ne 1 ]; then
             echo "::error::expected exactly one draft for $TAG, found: $ids"
             exit 1
           fi
-          gh api -X PATCH "repos/$GH_REPO/releases/$ids" -F draft=false
+          gh api -X PATCH "repos/$GH_REPO/releases/$ids" -F draft=false -f make_latest="$latest"
 
   # After the release is published: put its checksums into the Homebrew tap.
-  # Skipped (with a warning) while the HOMEBREW_TAP_DEPLOY_KEY secret is unset, and for pre-releases.
+  # update-tap.sh leaves the tap alone for a pre-release, and for a version older
+  # than the tap's; it fails if the HOMEBREW_TAP_DEPLOY_KEY secret is missing.
   tap:
     needs: release
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
       TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v5
       - name: Update the Homebrew tap
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: bash scripts/update-tap.sh "$TAG"
 
   # Last: move master to the released commit (fast-forward only), so TPM, which
   # follows master, only ever sees a version whose release exists. Runs even if
-  # the tap update failed: the release itself is out. A push made with the
-  # workflow token starts no workflows, so Pages is started by hand.
+  # the tap update failed: the release itself is out. Never for a pre-release:
+  # TPM users would be moved onto it. The workflow token cannot push commits that
+  # change .github/workflows, so those must reach master before the tag (RELEASING.md).
+  # Its push starts no workflows either, so Pages is started by hand.
   master:
     needs: [release, tap]
-    if: ${{ !cancelled() && needs.release.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' }}
+    if: ${{ !cancelled() && needs.release.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
       actions: write
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
     steps:
+      - name: The tag still names this commit
+        run: |
+          [ "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$GITHUB_SHA" ] ||
+            { echo "::error::$TAG no longer points at $GITHUB_SHA; push a new tag instead of moving one"; exit 1; }
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
