@@ -131,3 +131,20 @@ jobs:
             exit 1
           fi
           gh api -X PATCH "repos/$GH_REPO/releases/$ids" -F draft=false
+
+  # After the release is published: put its checksums into the Homebrew tap.
+  # Skipped (with a warning) while the HOMEBREW_TAP_DEPLOY_KEY secret is unset, and for pre-releases.
+  tap:
+    needs: release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Update the Homebrew tap
+        run: bash scripts/update-tap.sh "$TAG"
