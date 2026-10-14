@@ -19,7 +19,7 @@ paddock is one popup on top of them.
 <details open>
 <summary><b>Demo</b></summary>
 
-<img src="docs/brand/demo.svg" alt="paddock in tmux: agents change state in the status bar, prefix C opens the popup, a filter narrows the sessions, Tab shows the agents grouped by state, Enter jumps to the agent that is waiting." width="100%">
+<img src="docs/brand/demo.svg" alt="paddock in tmux: agents change state in the status bar, prefix a opens the popup, a filter narrows the sessions, Tab shows the agents grouped by state, Enter jumps to the agent that is waiting." width="100%">
 
 <sub>Recorded from paddock 0.1.0 in a scratch tmux server; the sessions and agent output are staged.</sub>
 
@@ -71,7 +71,7 @@ shows the same state.
 
 ### Open paddock, jump to the agent that needs you
 
-`prefix C` opens a popup over whatever you were doing. `Tab` shows every agent,
+`prefix a` opens a popup over whatever you were doing. `Tab` shows every agent,
 the one that needs you first, and `Enter` jumps to its pane. Start typing to
 filter sessions, windows and agents with a fuzzy filter (`'exact`, `^prefix`,
 `suffix$`, `!not`). That is the demo above.
@@ -144,7 +144,7 @@ With [TPM](https://github.com/tmux-plugins/tpm), in `~/.tmux.conf` (set the
 options before the plugin loads):
 
 ```tmux
-set -g @paddock-key 'C'          # prefix C opens paddock (replaces customize-mode)
+set -g @paddock-key 'a'          # prefix a opens paddock
 set -g @plugin 'plopezlpz/paddock'
 set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state: dots, notifications
 ```
@@ -162,7 +162,7 @@ brew install plopezlpz/tap/paddock
 ```
 
 ```tmux
-set -g @paddock-key 'C'
+set -g @paddock-key 'a'
 run-shell 'paddock init'
 ```
 
@@ -183,7 +183,7 @@ cargo install --git https://github.com/plopezlpz/paddock
 ```
 
 ```tmux
-set -g @paddock-key 'C'
+set -g @paddock-key 'a'
 run-shell '~/.cargo/bin/paddock init'
 ```
 
