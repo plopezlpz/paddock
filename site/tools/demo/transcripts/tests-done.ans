@@ -1,0 +1,8 @@
+# Appended when the agent finishes: replaces the status line above the cursor.
+\e[1A\e[2K\r\e[32m●\e[0m \e[1mBash\e[0m(go test -count=50 -run TestCheckout)
+\e[2m  ⎿ ok  internal/http  6.204s\e[0m
+
+\e[32m✓\e[0m Done. The test waited on a timer; it now
+  waits on the handler's channel. 50 runs pass.
+
+\e[1m>\e[0m 

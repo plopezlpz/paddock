@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paddock brand sheet</title>
+<style>
+  /* double-brace placeholders are replaced by rasterize.mjs (inline SVG or file URL) */
+  :root { --paper:#f5f5f0; --ink:#141714; --muted:#5a635d; --line:#d9dbd2; --green:#a2a970; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 ui-monospace, Menlo, monospace; background: #fff; color: var(--ink); width: 1100px; }
+  .panel { padding: 22px 28px; }
+  .paper { background: var(--paper); color: var(--ink); --green:#a2a970; }
+  .dark  { background: #0f1211; color: #e9eeea; --green:#a2a970; --muted:#97a39b; }
+  .mono  { --green: currentColor; }
+  .mono circle { fill: currentColor !important; }
+  h2 { font: 11px ui-monospace, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; font-weight: 400; }
+  .row { display: flex; align-items: flex-end; gap: 28px; margin-bottom: 20px; }
+  .row > div { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+  .row small { color: var(--muted); font-size: 10px; }
+  .row svg { display: block; width: 100%; height: auto; }
+  .row img { display: block; }
+  .s16{width:16px}.s24{width:24px}.s32{width:32px}.s64{width:64px}.s128{width:128px}
+  .l120{width:120px}.l360{width:360px}
+  .cols { display: grid; grid-template-columns: 1fr 1fr; }
+  .tabs { display:flex; gap:2px; padding:6px 8px 0; margin-bottom: 14px; align-items:flex-end; font: 12px system-ui, sans-serif; }
+  .tabs.t-light { background:#dcdcd4; }
+  .tabs.t-dark  { background:#1b1f1d; color:#c9d1cc; }
+  .tab { display:flex; gap:7px; align-items:center; padding:7px 12px; width:180px; border-radius:8px 8px 0 0; opacity:.75; }
+  .tab.on { opacity:1; }
+  .t-light .tab.on { background:var(--paper); color:var(--ink); }
+  .t-dark .tab.on  { background:#0f1211; color:#e9eeea; }
+  .tab i { width:16px; height:16px; background:#8888; border-radius:3px; display:block; flex:none; }
+  .tab svg, .tab img { width:16px; height:16px; flex:none; display:block; }
+  .tab span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .icons { display:flex; gap:20px; align-items:flex-end; }
+  .icons img { display:block; }
+  .term { font: 13px/1.5 ui-monospace, Menlo, monospace; display:flex; align-items:center; gap:10px; }
+</style>
+</head>
+<body>
+
+<section class="panel paper">
+  <h2>Mark on paper &middot; 16 / 24 / 32 / 64 / 128 px</h2>
+  <div class="row">
+    <div><span class="s16">{{mark}}</span><small>16</small></div>
+    <div><span class="s24">{{mark}}</span><small>24</small></div>
+    <div><span class="s32">{{mark}}</span><small>32</small></div>
+    <div><span class="s64">{{mark}}</span><small>64</small></div>
+    <div><span class="s128">{{mark}}</span><small>128</small></div>
+    <div><img class="s16" src="{{favicon.svg}}" alt=""><small>favicon.svg 16</small></div>
+    <div><img class="s32" src="{{favicon.svg}}" alt=""><small>favicon.svg 32</small></div>
+    <div><img class="s64" src="{{favicon.svg}}" alt=""><small>favicon.svg 64</small></div>
+  </div>
+  <h2>Lockup &middot; 120 / 360 px</h2>
+  <div class="row">
+    <div><img class="l120" src="{{logo-light.svg}}" alt=""><small>120</small></div>
+    <div><img class="l360" src="{{logo-light.svg}}" alt=""><small>360</small></div>
+    <div><span class="l120">{{logo}}</span><small>logo.svg (currentColor) 120</small></div>
+  </div>
+</section>
+
+<section class="panel dark">
+  <h2>Mark on dark</h2>
+  <div class="row">
+    <div><span class="s16">{{mark}}</span><small>16</small></div>
+    <div><span class="s24">{{mark}}</span><small>24</small></div>
+    <div><span class="s32">{{mark}}</span><small>32</small></div>
+    <div><span class="s64">{{mark}}</span><small>64</small></div>
+    <div><span class="s128">{{mark}}</span><small>128</small></div>
+    <div><img class="s16" src="{{favicon-dark.svg}}" alt=""><small>favicon.svg 16 (dark scheme)</small></div>
+    <div><img class="s32" src="{{favicon-dark.svg}}" alt=""><small>favicon.svg 32 (dark scheme)</small></div>
+  </div>
+  <h2>Lockup</h2>
+  <div class="row">
+    <div><img class="l120" src="{{logo-dark.svg}}" alt=""><small>120</small></div>
+    <div><img class="l360" src="{{logo-dark.svg}}" alt=""><small>360</small></div>
+    <div><span class="l120">{{logo}}</span><small>logo.svg (currentColor) 120</small></div>
+  </div>
+</section>
+
+<section class="panel paper">
+  <h2>Terminal tab bar &middot; 16 px favicon next to the title</h2>
+  <div class="tabs t-light">
+    <div class="tab"><i></i><span>~/code/infra</span></div>
+    <div class="tab on"><img src="{{favicon-32.png}}" alt=""><span>paddock</span></div>
+    <div class="tab"><i></i><span>vim README.md</span></div>
+  </div>
+  <div class="tabs t-dark">
+    <div class="tab"><i></i><span>~/code/infra</span></div>
+    <div class="tab on"><img src="{{favicon-32.png}}" alt=""><span>paddock</span></div>
+    <div class="tab"><i></i><span>vim README.md</span></div>
+  </div>
+  <div class="tabs t-dark">
+    <div class="tab"><i></i><span>~/code/infra</span></div>
+    <div class="tab on"><span style="display:block;width:16px;height:16px;flex:none;color:#e4e4e4;--green:#a2a970">{{mark}}</span><span>paddock (bare mark)</span></div>
+    <div class="tab"><i></i><span>vim README.md</span></div>
+  </div>
+  <h2>PNG icons (actual pixels)</h2>
+  <div class="icons">
+    <div><img src="{{favicon-32.png}}" width="32" height="32" alt=""></div>
+    <div><img src="{{favicon-32.png}}" width="128" height="128" alt="" style="image-rendering:pixelated"></div>
+    <div><img src="{{apple-touch-icon.png}}" width="90" height="90" alt=""></div>
+    <div><img src="{{apple-touch-icon.png}}" width="180" height="180" alt=""></div>
+  </div>
+</section>
+
+<section class="panel paper mono" style="border-top:1px solid var(--line)">
+  <h2>Monochrome (dot in ink) on paper</h2>
+  <div class="row">
+    <div><span class="s16">{{mark}}</span></div>
+    <div><span class="s24">{{mark}}</span></div>
+    <div><span class="s32">{{mark}}</span></div>
+    <div><span class="s64">{{mark}}</span></div>
+    <div><span class="l120">{{logo}}</span></div>
+    <div><span class="l360">{{logo}}</span></div>
+  </div>
+</section>
+<section class="panel dark mono">
+  <h2>Monochrome on dark</h2>
+  <div class="row">
+    <div><span class="s16">{{mark}}</span></div>
+    <div><span class="s24">{{mark}}</span></div>
+    <div><span class="s32">{{mark}}</span></div>
+    <div><span class="s64">{{mark}}</span></div>
+    <div><span class="l120">{{logo}}</span></div>
+    <div><span class="l360">{{logo}}</span></div>
+  </div>
+</section>
+</body>
+</html>

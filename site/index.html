@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>paddock: stay in tmux, add a control panel for your agents</title>
+<meta name="description" content="A fast tmux popup for jumping between sessions, windows and panes, that also shows which AI coding agent is working, which is waiting for you and which has finished.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#181818">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
+<script>document.documentElement.className += ' js';</script>
+<link rel="stylesheet" href="assets/css/player.css">
+<link rel="stylesheet" href="assets/css/site.css">
+<script defer src="assets/frames/status.js"></script>
+<script defer src="assets/frames/tour.js"></script>
+<script defer src="assets/frames/phone.js"></script>
+<script defer src="assets/frames/feat-preview.js"></script>
+<script defer src="assets/frames/feat-rename.js"></script>
+<script defer src="assets/frames/feat-manage.js"></script>
+<script defer src="assets/frames/feat-group.js"></script>
+<script defer src="assets/frames/feat-notify.js"></script>
+<script defer src="assets/js/player.js"></script>
+<script defer src="assets/js/site.js"></script>
+</head>
+<body id="top" class="page">
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="lockup" viewBox="0 0 158.06 34"><g><g transform="scale(1.0625)"><path d="M4.5 15.5V22.5A5 5 0 0 0 9.5 27.5H22.5A5 5 0 0 0 27.5 22.5V9.5A5 5 0 0 0 22.5 4.5H14.5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linejoin="round"/><circle cx="16" cy="16" r="4.5" style="fill:var(--green,#a2a970)"/></g><path transform="translate(44 0)" d="M1.8 10V31M1.8 17a5.2 5.2 0 1 0 10.4 0a5.2 5.2 0 1 0 -10.4 0M18.4 17a5.2 5.2 0 1 0 10.4 0a5.2 5.2 0 1 0 -10.4 0M28.8 10V24M35.8 17a5.2 5.2 0 1 0 10.4 0a5.2 5.2 0 1 0 -10.4 0M46.2 3V24M53.2 17a5.2 5.2 0 1 0 10.4 0a5.2 5.2 0 1 0 -10.4 0M63.6 3V24M70.6 17a5.2 5.2 0 1 0 10.4 0a5.2 5.2 0 1 0 -10.4 0M96.38 13.66A5.2 5.2 0 1 0 96.38 20.34M102.68 3V24" fill="none" stroke="currentColor" stroke-width="3.6"/><path transform="translate(44 0)" d="M104.04 21.58L114.06 10L109.3 10L101.32 19.22ZM105.98 15.4L109.72 24L113.64 24L109.28 13.96Z" fill="currentColor"/></g></symbol>
+  <symbol id="mark" viewBox="0 0 32 32"><path d="M4.5 15.5V22.5A5 5 0 0 0 9.5 27.5H22.5A5 5 0 0 0 27.5 22.5V9.5A5 5 0 0 0 22.5 4.5H14.5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linejoin="round"/><circle cx="16" cy="16" r="4.5" style="fill:var(--green,#a2a970)"/></symbol>
+  <symbol id="gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+</svg>
+
+  <div class="strip"><p>Requires tmux 3.8+. Status: beta. Used daily on macOS; Linux should work. <a href="https://github.com/plopezlpz/paddock"><span aria-hidden="true">★</span> Star <span class="sr-only">paddock </span>on GitHub</a></p></div>
+  <header class="nav"><div class="navin">
+    <div class="brandrow"><a class="brand" href="#top" aria-label="paddock, back to top"><svg class="lockup" viewBox="0 0 158.06 34" role="img" aria-label="paddock"><use href="#lockup"/></svg></a><span class="beta" title="paddock is in beta">beta</span></div>
+    <nav aria-label="Sections"><a href="#features">features</a><a href="#install">install</a><a href="#agents">agents</a></nav>
+    <a class="ghl" href="https://github.com/plopezlpz/paddock"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><use href="#gh"/></svg><span>github</span></a>
+  </div></header>
+
+  <main id="main" tabindex="-1">
+  <section class="hero">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><use href="#mark"/></svg>
+    <p class="tag">Keep an eye on your agents without leaving tmux.</p>
+    <h1><span>Stay in tmux.</span> <span>Add a control panel for your agents.</span></h1>
+    <p class="lead">Keep your tmux.conf, your prefix and keybindings, your plugins and sessions. paddock is one popup on top of them.</p>
+    <div class="inst" id="install">
+  <div class="tabs" role="tablist" aria-label="Install method">
+    <button class="tab" role="tab" id="tab-tpm" type="button" aria-controls="panel-tpm" aria-selected="true">TPM</button>
+    <button class="tab" role="tab" id="tab-brew" type="button" aria-controls="panel-brew" aria-selected="false" tabindex="-1">Homebrew</button>
+    <button class="tab" role="tab" id="tab-cargo" type="button" aria-controls="panel-cargo" aria-selected="false" tabindex="-1">cargo</button>
+  </div>
+  <div class="tabpanel is-active" role="tabpanel" id="panel-tpm" aria-labelledby="tab-tpm">
+    <p class="panel-label">TPM</p>
+    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-tpm" aria-label="Copy the TPM config">copy</button></div><pre tabindex="0"><code id="code-tpm">set -g @paddock-key 'a'          <span class="cm"># prefix a opens paddock</span>
+set -g @plugin 'plopezlpz/paddock'
+set -g @plugin 'plopezlpz/agent-status.tmux'   <span class="cm"># agent state: dots, notifications</span></code></pre></div>
+    <p class="note">Press <code>prefix I</code>, then the key. It offers to download the matching binary from the GitHub release (checksum verified); press the key again. No Rust needed. Then <a href="#agents">hook up your agents</a>.</p>
+  </div>
+  <div class="tabpanel" role="tabpanel" id="panel-brew" aria-labelledby="tab-brew">
+    <p class="panel-label">Homebrew</p>
+    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-brew-sh" aria-label="Copy the Homebrew install command">copy</button></div><pre tabindex="0"><code id="code-brew-sh">brew install plopezlpz/tap/paddock</code></pre></div>
+    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-brew-tmux" aria-label="Copy the Homebrew tmux config">copy</button></div><pre tabindex="0"><code id="code-brew-tmux">set -g @paddock-key 'a'
+run-shell 'paddock init'</code></pre></div>
+    <p class="note">If tmux's <code>PATH</code> lacks Homebrew's, write out the full path: <code>/opt/homebrew/bin/paddock</code> (Apple silicon), <code>/usr/local/bin/paddock</code> (Intel Mac) or <code>/home/linuxbrew/.linuxbrew/bin/paddock</code> (Linux). After <code>brew upgrade</code>, reload tmux. For agent state, add <a href="#agents">agent-status.tmux</a> too.</p>
+  </div>
+  <div class="tabpanel" role="tabpanel" id="panel-cargo" aria-labelledby="tab-cargo">
+    <p class="panel-label">cargo</p>
+    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-cargo-sh" aria-label="Copy the cargo install command">copy</button></div><pre tabindex="0"><code id="code-cargo-sh">cargo install --git https://github.com/plopezlpz/paddock</code></pre></div>
+    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-cargo-tmux" aria-label="Copy the cargo tmux config">copy</button></div><pre tabindex="0"><code id="code-cargo-tmux">set -g @paddock-key 'a'
+run-shell '~/.cargo/bin/paddock init'</code></pre></div>
+    <p class="note">Needs Rust 1.88+. Reload tmux after <code>cargo install</code>. For agent state, add <a href="#agents">agent-status.tmux</a> too.</p>
+  </div>
+</div>
+  </section>
+
+  <section class="scrolly" id="features" aria-labelledby="what-h">
+    <div class="sc-head">
+      <h2 id="what-h">What it does.</h2>
+      <p class="dsop">A fast tmux popup for jumping between sessions, windows and panes, that also shows which AI coding agent is working, which is waiting for you and which has finished.</p>
+    </div>
+    <p class="sr-only" id="step-live" aria-live="polite"></p>
+    <div class="sc-grid">
+      <div class="sc-col"><div class="sc-stage" id="stage" role="group" aria-label="Recorded demo of paddock, changing with the step you are reading"></div></div>
+      <ol class="steps" id="steps">
+      <li class="step" id="step-status" data-rec="status" data-dot data-fb-rec="tour" data-fb-ch="work">
+        <div class="step-txt"><h3>Your tmux, unchanged, plus an agent state dot</h3><p>Your status bar stays as it is. <a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a> adds one dot to each window: orange while an agent works, blue when it has finished, red when it is asking you something.</p><p class="sub-note">It works through agent hooks. Claude Code, pi, OpenCode and other agents with hooks report working, asking and finished; agent-status.tmux colours the window's dot, and paddock shows the same state.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/status-poster.svg" alt="paddock beside a tmux window running an agent: the status bar has a dot beside the window name, blue because the agent has finished."></noscript></div>
+      </li>
+      <li class="step" id="step-open" data-rec="tour" data-ch="open" data-ch-to="jump">
+        <div class="step-txt"><h3>Open paddock to manage agents and tmux</h3><p><kbd>prefix</kbd> <kbd>a</kbd> opens a popup over whatever you were doing. <kbd>Tab</kbd> shows every agent, with the one that needs you first, and <kbd>Enter</kbd> jumps to the pane that is asking. Start typing to filter sessions, windows and agents.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/tour-poster.svg" alt="paddock open over a tmux window, on the agents tab: one agent waiting for you, two working, one finished, with a live preview of the selected pane."></noscript></div>
+      </li>
+      <li class="step" id="step-group" data-rec="feat-group">
+        <div class="step-txt"><h3>Group agents by status, session or folder</h3><p><kbd>ctrl-g</kbd> changes how the agents tab is grouped. Grouped by folder, agents working in the same project, one per worktree, sit together.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/feat-group-poster.svg" alt="paddock's agents tab grouped by status: waiting, working, finished and idle, one card per agent."></noscript></div>
+      </li>
+      <li class="step" id="step-preview" data-rec="feat-preview">
+        <div class="step-txt"><h3>Skim agents without jumping to them</h3><p>The selected pane, live, beside the list. Move down the list and the preview follows, so you can read what an agent is doing, or asking, before you jump to it.</p><p class="sub-note">Shown when the popup is at least 102 columns wide. <kbd>ctrl-o</kbd> toggles it.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/feat-preview-poster.svg" alt="paddock's agents tab with the selected agent's pane shown live beside the list."></noscript></div>
+      </li>
+      <li class="step" id="step-rename" data-rec="feat-rename">
+        <div class="step-txt"><h3>Rename an agent's description automatically</h3><p><kbd>ctrl-r</kbd> renames the selected agent in place. Press <kbd>ctrl-r</kbd> again and paddock fills in a suggested title; <kbd>Enter</kbd> saves it.</p><p class="sub-note">agent-status.tmux asks an agent for the suggestion.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/feat-rename-poster.svg" alt="paddock renaming an agent in place, with a suggested title filled in."></noscript></div>
+      </li>
+      <li class="step" id="step-manage" data-rec="feat-manage">
+        <div class="step-txt"><h3>Sessions, windows and panes from the popup</h3><p>New, rename, move, kill and undo, without leaving the popup. Drag with the mouse, or right-click for a menu.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/feat-manage-poster.svg" alt="paddock moving a tmux window from the popup, with the session, window and pane tree beside it."></noscript></div>
+      </li>
+      <li class="step" id="step-notify" data-rec="feat-notify">
+        <div class="step-txt"><h3>Know when an agent needs you</h3><p>A red dot in the status bar means an agent is waiting for you; open paddock and it is the first card. agent-status.tmux can also raise a clickable desktop notification.</p></div>
+                <aside class="notif" aria-label="Illustration of two agent-status.tmux desktop notifications"><span class="lab">agent-status.tmux notification</span>
+          <div class="nc" data-for="asking"><div class="nc-top"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 3.2c-2.6 0-4.3 1.9-4.3 4.5v2.6c0 .8-.4 1.5-1 2.1l-.7.7h12l-.7-.7c-.6-.6-1-1.3-1-2.1V7.7c0-2.6-1.7-4.5-4.3-4.5ZM8.2 15.2a1.9 1.9 0 0 0 3.6 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><b>agent-status.tmux</b><span>now</span></div><p class="nc-t">Agent &bull; asking</p><p class="nc-b">webshop / web</p></div>
+          <div class="nc" data-for="finished"><div class="nc-top"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 3.2c-2.6 0-4.3 1.9-4.3 4.5v2.6c0 .8-.4 1.5-1 2.1l-.7.7h12l-.7-.7c-.6-.6-1-1.3-1-2.1V7.7c0-2.6-1.7-4.5-4.3-4.5ZM8.2 15.2a1.9 1.9 0 0 0 3.6 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><b>agent-status.tmux</b><span>now</span></div><p class="nc-t">Agent &bull; finished</p><p class="nc-b">webshop / tests</p></div></aside>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/feat-notify-poster.svg" alt="paddock open on the agents tab: one agent waiting for you and one finished."></noscript></div>
+      </li>
+      <li class="step" id="step-phone" data-rec="phone">
+        <div class="step-txt"><h3>On your phone</h3><p>Under 80 columns paddock switches to a compact two-line layout with tappable words. Tap the selected row to open it.</p><p class="sub-note">With <code>@paddock-click</code> on, a click on the session name in the status line opens paddock. It needs <code>set -g mouse on</code>.</p></div>
+        <div class="step-fig" data-slot><noscript><img src="assets/frames/phone-poster.svg" alt="paddock on a phone-sized tmux screen: the agents tab lists one agent waiting for you, two working and one finished."></noscript></div>
+      </li>
+      </ol>
+    </div>
+    <p class="note-end sc-end">Agent state works through <a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a>, paddock's companion plugin, which listens to your agents' hooks. All features and keys are in the <a href="https://github.com/plopezlpz/paddock#readme">README</a>.</p>
+  </section>
+
+  <section class="sec" id="why" aria-labelledby="dso-h">
+    <h2 id="dso-h">Comfortable in tmux? Don't start over.</h2>
+    <p class="dsop"><a href="https://herdr.dev">herdr</a> is an agent runtime: its own server that keeps your agents' terminals alive, with its own TUI, CLI and API. It's a good home if you're starting fresh. But if you already live in tmux, switching means a new session model and new keys, and setting aside the config, plugins and muscle memory you've built up. paddock takes the other route: one popup in the tmux you already run.</p>
+    <div class="spec" id="spec"><div class="spec-cap"><b>table 1</b> herdr and tmux, with what paddock adds in the margin</div>
+<p class="cmp-frame">herdr's own comparison lists tmux with no agent state. paddock adds that, inside the tmux you already run.</p>
+<div class="cmp-scroll"><table class="cmp"><caption class="sr">herdr and tmux compared by capability. Handwritten notes in the margin say what paddock adds on top of tmux.</caption>
+  <colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
+  <thead><tr><th scope="col">Capability</th><th scope="col">herdr</th><th scope="col">tmux</th><th scope="col" class="hd"><span class="sr">What paddock adds</span></th></tr></thead>
+  <tbody><tr><th scope="row">Kind of thing</th><td data-label="herdr">runtime + clients</td><td data-label="tmux">terminal multiplexer</td><td class="mg" data-label="paddock"></td></tr><tr><th scope="row">Work survives its own UI closing</th><td data-label="herdr">yes, the server owns the terminals</td><td data-label="tmux">yes, detach</td><td class="mg" data-label="paddock"></td></tr><tr><th scope="row">Runs inside your existing terminal</th><td data-label="herdr">yes</td><td data-label="tmux">yes</td><td class="mg" data-label="paddock"></td></tr><tr data-note><th scope="row">Semantic agent state</th><td data-label="herdr">blocked · working · done · idle</td><td data-label="tmux"><span role="img" aria-label="none">—</span></td><td class="mg" data-label="paddock"><svg class="arr" viewBox="0 0 178 46" aria-hidden="true" focusable="false"><path class="pen2" pathLength="1" d="M14.6 30 C 42.1 20, 64.8 38, 94.0 27 S 136.1 21, 153.9 25"/><path pathLength="1" d="M13.0 27 C 38.9 14, 61.6 36, 90.7 24 S 132.8 17, 155.5 22"/><path class="head" pathLength="1" d="M144 11 Q 152 14 158 22 Q 151 28 142 34"/></svg><span class="hand">paddock adds asking · working · finished · idle</span></td></tr><tr data-note><th scope="row">Detach, reattach, SSH in</th><td data-label="herdr">yes, any tty</td><td data-label="tmux">yes</td><td class="mg" data-label="paddock"><svg class="arr" viewBox="0 0 178 46" aria-hidden="true" focusable="false"><path class="pen2" pathLength="1" d="M14.6 25 C 35.6 36, 68.0 16, 97.2 26 S 137.7 33, 153.9 26"/><path pathLength="1" d="M11.3 22 C 32.4 34, 64.8 12, 94.0 23 S 136.1 31, 155.5 23"/><path class="head" pathLength="1" d="M144 11 Q 152 14 158 22 Q 151 28 142 34"/></svg><span class="hand">+ a phone layout under 80 columns</span></td></tr><tr data-note><th scope="row">Direct attach to one agent</th><td data-label="herdr">yes</td><td data-label="tmux"><span role="img" aria-label="none">—</span></td><td class="mg" data-label="paddock"><svg class="arr" viewBox="0 0 178 46" aria-hidden="true" focusable="false"><path class="pen2" pathLength="1" d="M13.0 27 C 45.4 24, 61.6 36, 87.5 29 C 110.2 22, 129.6 27, 153.9 25"/><path pathLength="1" d="M14.6 24 C 42.1 19, 58.3 33, 84.2 25 C 106.9 17, 129.6 24, 155.5 21"/><path class="head" pathLength="1" d="M144 11 Q 152 14 158 22 Q 151 28 142 34"/></svg><span class="hand">Enter jumps to its pane</span></td></tr><tr><th scope="row">API agents drive themselves</th><td data-label="herdr">read · send · wait · split · attach</td><td data-label="tmux">terminal scripting</td><td class="mg" data-label="paddock"></td></tr><tr data-note><th scope="row">Worktree and diff review flow</th><td data-label="herdr">pairs with it</td><td data-label="tmux"><span role="img" aria-label="none">—</span></td><td class="mg" data-label="paddock"><svg class="arr" viewBox="0 0 178 46" aria-hidden="true" focusable="false"><path class="pen2" pathLength="1" d="M16.2 23 C 38.9 34, 64.8 19, 90.7 28 S 132.8 31, 153.9 26"/><path pathLength="1" d="M13.0 20 C 35.6 31, 61.6 15, 87.5 24 S 129.6 28, 155.5 22"/><path class="head" pathLength="1" d="M144 11 Q 152 14 158 22 Q 151 28 142 34"/></svg><span class="hand">groups agents by folder, one per worktree</span></td></tr><tr><th scope="row">Clients on the same runtime</th><td data-label="herdr">TUI · CLI · plain SSH, more coming</td><td data-label="tmux">its own client</td><td class="mg" data-label="paddock"></td></tr><tr data-note data-ours><th scope="row">Your config, keys and plugins <span class="ours">added by paddock</span></th><td data-label="herdr">herdr's own</td><td data-label="tmux">yours</td><td class="mg" data-label="paddock"><svg class="arr" viewBox="0 0 178 46" aria-hidden="true" focusable="false"><path class="pen2" pathLength="1" d="M14.6 28 C 42.1 26, 58.3 34, 87.5 26 S 132.8 17, 153.9 25"/><path pathLength="1" d="M13.0 25 C 38.9 21, 55.1 30, 84.2 22 S 129.6 12, 155.5 21"/><path class="head" pathLength="1" d="M144 11 Q 152 14 158 22 Q 151 28 142 34"/></svg><span class="hand">still yours, paddock is one popup</span></td></tr></tbody></table></div>
+<p class="cmp-src">herdr and tmux columns: from <a href="https://herdr.dev/compare">herdr.dev/compare</a> (herdr v0.9.4, checked 14 Oct 2026; its third column covers tmux and zellij). The last row is ours, not from herdr's table. The handwriting is what paddock adds on top of tmux. Rows without a note are unchanged: paddock adds no API yet.</p></div>
+    <h3 class="sub">What stays</h3>
+    <ul class="stays"><li><strong>Your <code>~/.tmux.conf</code></strong><span>Untouched, apart from two lines to load paddock.</span></li><li><strong>Your prefix and keybindings</strong><span>paddock adds one key, which you choose.</span></li><li><strong>Your plugins</strong><span>TPM and everything you run with it.</span></li><li><strong>Your sessions, windows and scripts</strong><span>The tmux you already have.</span></li><li><strong>ssh</strong><span>Wherever tmux runs, paddock does.</span></li><li><strong>Your phone</strong><span>A compact two-line layout under 80 columns.</span></li></ul>
+    <p class="note-end">paddock doesn't start or wrap your agents: they run in your panes as they do today, and agent-status.tmux picks up their state from their hooks.</p>
+  </section>
+
+  <section class="sec" id="agents" aria-labelledby="ag-h">
+    <div class="ag-head"><h2 id="ag-h">One setup for agent state.</h2><p>paddock's companion plugin, agent-status.tmux, listens to your agents' own hooks. Add both and you get the status bar dots, the desktop notifications and paddock's agents tab, with no daemon and no polling.</p></div>
+    <ul class="ag-legend" aria-label="Agent states"><li class="a"><i></i>asking <span>(waiting for you)</span></li><li class="w"><i></i>working</li><li class="f"><i></i>finished <span>(idle, not yet seen)</span></li><li class="n"><i></i>idle</li></ul>
+    <div class="ag-grid">
+      <div class="ag-box">
+        <h3><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a></h3>
+        <p>The agent side of paddock. It hooks into each agent you use and keeps its state on the agent's pane, where the status bar and paddock both read it.</p>
+        <ul class="ag-chips" aria-label="Providers"><li>pi</li><li>OMP (Oh My Pi)</li><li>OpenCode</li><li>Kimi Code</li><li>MastraCode</li><li>Kilo Code (partial: no exit event)</li><li>Claude Code</li></ul>
+        <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-as" aria-label="Copy the agent-status.tmux TPM config">copy</button></div><pre tabindex="0"><code id="code-as">set -g @plugin 'plopezlpz/agent-status.tmux'
+run '~/.tmux/plugins/tpm/tpm'</code></pre></div>
+        <p>Run <code>prefix I</code>, then hook up each agent you use and restart it. Needs tmux 3.8, Bash 3.2 and jq. Agents without lifecycle hooks, such as Codex, are not supported: their state can't be known without polling the pane.</p>
+      </div>
+      <div class="ag-box">
+        <h3>Under the hood</h3>
+        <p>The state lives in plain tmux pane options, so other tools can set them too (one agent per pane, one tool setting them per tmux server). Only <code>@agent-state</code> is required.</p>
+        <table class="ctr"><thead><tr><th scope="col">Pane option</th><th scope="col">Value</th></tr></thead><tbody><tr><th scope="row"><code>@agent-state</code></th><td><code>working</code>, <code>asking</code> or <code>idle</code></td></tr><tr><th scope="row"><code>@agent-unseen</code></th><td><code>1</code> when an idle agent finished a turn you haven't looked at</td></tr><tr><th scope="row"><code>@agent-stale</code></th><td><code>1</code> when the state hasn't been confirmed recently (shown with a <code>?</code>)</td></tr><tr><th scope="row"><code>@agent-kind</code></th><td>the agent's name, e.g. <code>claude</code></td></tr><tr><th scope="row"><code>@agent-auto-description</code></th><td>an automatic title, e.g. the first prompt</td></tr><tr><th scope="row"><code>@agent-state-at</code></th><td>when the state last changed, in Unix seconds</td></tr></tbody></table>
+      </div>
+    </div>
+  </section>
+  </main>
+
+  <footer class="foot"><div class="footin">
+    <div><div class="fbrand"><svg class="" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><use href="#mark"/></svg>paddock</div><p>MIT licensed. Status: beta. Recorded from paddock 0.1.0 in a scratch tmux server; the sessions and agent output in the demos are staged.</p></div>
+    <ul><li><a href="https://github.com/plopezlpz/paddock">paddock on GitHub</a></li><li><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux on GitHub</a></li><li><a href="https://github.com/plopezlpz/paddock#install">Install</a></li></ul>
+  </div></footer>
+<div class="sr-only" id="live" role="status" aria-live="polite"></div>
+</body>
+</html>

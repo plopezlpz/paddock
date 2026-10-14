@@ -1,0 +1,13 @@
+# Staged agent output (opencode, webshop:2.0).
+\e[2J\e[H\e[1m>\e[0m migrate the cart page to the new payment
+  element
+
+I'll swap the card form for the payment
+element and keep the order summary.
+
+\e[32m●\e[0m \e[1mRead\e[0m(web/src/cart/CartPage.tsx)
+\e[2m  ⎿ Read 211 lines\e[0m
+\e[32m●\e[0m \e[1mEdit\e[0m(web/src/cart/CartPage.tsx)
+\e[2m  ⎿ Updated 24 lines\e[0m
+
+\e[33m✻ Checking the payments package…\e[0m

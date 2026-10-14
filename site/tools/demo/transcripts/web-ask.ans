@@ -1,0 +1,7 @@
+# Appended when the agent needs permission: replaces the status line.
+\e[1A\e[2K\r\e[1;31mAllow command?\e[0m
+\e[1m  npm install @webshop/payments\e[0m
+
+\e[32m  › 1. Yes, run it\e[0m
+    2. Yes, and don't ask again for npm install
+    3. No, tell it what to do differently

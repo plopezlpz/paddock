@@ -1,0 +1,287 @@
+/* paddock terminal player. Owns the --t-* terminal palette and the .pd-* chrome.
+   Site tokens (--paper --panel --ink --muted --line --green) belong to site.css; the --pd-* values
+   below are only fallbacks so the player also works on a bare, dark page. site.css overrides the palette (its .page block).
+
+   The terminal is always dark. Final values, with the WCAG contrast of each text colour against --t-bg:
+   bg #0b0e0d fg #d5ddd8 (14.0)
+   0 #1b2220 (background-only)  1 #f2777a 7.1  2 #7fd49a 10.9  3 #f0c674 12.0  4 #7cafe8 8.5  5 #c792ea 8.1
+   6 #6fd3d3 11.0  7 #c5cec9 12.1  8 #7f8e86 5.7  9 #ff9a9c 9.6  10 #a4e8b8 13.7  11 #ffd98e 14.4
+   12 #a3c8f2 11.2  13 #ddb4f5 11.0  14 #9ce6e6 13.7  15 #f2f6f4 17.8
+   Dim text is a colour mix toward the background, never opacity: 66% of the text colour. Default-fg dim
+   is 6.5:1 and every palette colour is about 3:1 or better (the lowest is colour 8 at 3.1). */
+
+:root {
+  --pd-font: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --t-dim: 66%;
+  --t-bg: #0b0e0d; --t-fg: #d5ddd8;
+  --t-0: #1b2220; --t-1: #f2777a; --t-2: #7fd49a; --t-3: #f0c674;
+  --t-4: #7cafe8; --t-5: #c792ea; --t-6: #6fd3d3; --t-7: #c5cec9;
+  --t-8: #7f8e86; --t-9: #ff9a9c; --t-10: #a4e8b8; --t-11: #ffd98e;
+  --t-12: #a3c8f2; --t-13: #ddb4f5; --t-14: #9ce6e6; --t-15: #f2f6f4;
+  --t-accent: #6fd08c;   /* tap rings */
+  /* page chrome fallbacks (controls, captions) for a dark page */
+  --pd-page: #0f1211; --pd-text: #e9eeea; --pd-sub: #97a39b; --pd-rule: #25302b; --pd-panel: #161a18; --pd-green: #6fd08c;
+}
+
+/* ---- figure and window chrome ---- */
+.pd-player {
+  --pd-ink: var(--ink, var(--pd-text));
+  --pd-muted: var(--muted, var(--pd-sub));
+  --pd-line: var(--line, var(--pd-rule));
+  --pd-surface: var(--panel, var(--pd-panel));
+  --pd-accent: var(--green, var(--pd-green));
+  --pd-wline: color-mix(in srgb, var(--t-fg) 20%, var(--t-bg));   /* edge of the always-dark terminal window */
+  --pd-padx: 14px; --pd-pady: 10px;
+  margin: 0; min-width: 0; max-width: 100%;
+  color: var(--pd-ink);
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+}
+.pd-player[data-kind="phone"] { max-width: 380px; margin-inline: auto; --pd-padx: 6px; --pd-pady: 6px; }
+.pd-stage { position: relative; width: 100%; }
+.pd-window {
+  width: max-content; max-width: 100%; margin-inline: auto; box-sizing: border-box;
+  border: 1px solid var(--pd-wline); border-radius: 8px; overflow: hidden;
+  background: var(--t-bg); color: var(--t-fg);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 22px 44px -26px rgb(0 0 0 / 0.55);
+}
+.pd-scaled .pd-window, .pd-scroll .pd-window { max-width: none; margin-inline: 0; transform-origin: 0 0; }
+.pd-scroll .pd-scroller { overflow-x: auto; }
+.pd-scroller:focus-visible { outline: 2px solid var(--pd-accent); outline-offset: 2px; }
+.pd-scaled .pd-stage { overflow: hidden; }
+/* right-edge fade and hint while a desktop demo that does not fit scrolls sideways */
+.pd-stage::after {
+  content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 36px; pointer-events: none; opacity: 0;
+  background: linear-gradient(to right, transparent, var(--paper, var(--pd-page)));
+}
+.pd-more .pd-stage::after { opacity: 1; }
+.pd-scrollhint { display: none; margin-top: 8px; text-align: right; font: 600 12px/1 var(--pd-font); letter-spacing: 0.04em; color: var(--pd-muted); }
+.pd-more .pd-scrollhint { display: block; }
+
+.pd-bar {
+  position: relative; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+  background: color-mix(in srgb, var(--t-fg) 6%, var(--t-bg));
+  border-bottom: 1px solid var(--pd-wline);
+  font: 12px/1 var(--pd-font);
+}
+.pd-bar i { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in srgb, var(--t-fg) 22%, var(--t-bg)); }
+.pd-bar span { position: absolute; left: 50%; transform: translateX(-50%); color: color-mix(in srgb, var(--t-fg) 70%, var(--t-bg)); }
+.pd-player[data-static] .pd-bar { display: none; }
+
+/* phone bezel */
+.pd-player[data-kind="phone"] .pd-window {
+  position: relative; padding: 24px 9px 16px; border: 0; border-radius: 38px;
+  background: #1a1d1c; box-shadow: 0 0 0 1px #3a403d inset, 0 26px 50px -26px rgb(0 0 0 / 0.55);
+}
+.pd-player[data-kind="phone"] .pd-window::before {
+  content: ""; position: absolute; top: 9px; left: 50%; width: 54px; height: 6px; margin-left: -27px;
+  border-radius: 3px; background: #0a0c0b;
+}
+.pd-player[data-kind="phone"] .pd-bar { display: none; }
+.pd-player[data-kind="phone"] .pd-term { border-radius: 22px; overflow: hidden; background: var(--t-bg); }
+
+/* ---- terminal screen ---- */
+.pd-term { position: relative; padding: var(--pd-pady) var(--pd-padx); background: var(--t-bg); }
+.pd-term:focus-visible { outline: 2px solid var(--pd-accent); outline-offset: -3px; }
+.pd-screen {
+  --c: var(--t-fg); --b: var(--t-bg);
+  margin: 0; padding: 0; background: none; border: 0; overflow: hidden;
+  width: calc(var(--pd-cols, 80) * var(--pd-cw, 1ch)); height: calc(var(--pd-rows, 24) * var(--pd-lh, 15px));
+  color: var(--t-fg);
+  font: 400 var(--pd-fs, 12px) / var(--pd-lh, 15px) var(--pd-font);
+  font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; font-kerning: none;
+  letter-spacing: calc(var(--pd-cw, 1ch) - 1ch); white-space: pre; tab-size: 8; user-select: none; -webkit-user-select: none;
+  transition: opacity 0.2s linear;
+}
+.pd-screen.pd-fading { opacity: 0.15; transition-duration: 0.12s; }   /* the loop dip: a quick drop, a slower return */
+/* Every non-ASCII glyph owns exactly one cell, so a fallback font cannot shift the grid. */
+.pd-screen .g { display: inline-block; width: var(--pd-cw, 1ch); vertical-align: top; text-align: center; font-style: normal; overflow: visible; }
+/* Box drawing and the selection bars are drawn as shapes filling the whole cell (one cell wide, one line tall),
+   in the run's text colour, so they join up across rows and columns whatever the font does. Geometry vars
+   (--pd-bw line thickness, --pd-bx/--pd-by line offset, --pd-cx/--pd-cy line centre, --pd-br corner radius,
+   --pd-s = br + bw) are set in px by player.js; the defaults serve the first paint. */
+.pd-player { --pd-bw: 1px; --pd-bx: 3px; --pd-by: 7px; --pd-cx: 3.5px; --pd-cy: 7.5px; --pd-br: 3px; --pd-s: 4px; }
+.pd-screen .sh {
+  height: var(--pd-lh, 15px); text-indent: 0;
+  --f: linear-gradient(currentColor, currentColor);
+  --H: var(--f) 0 var(--pd-by) / 100% var(--pd-bw) no-repeat;
+  --V: var(--f) var(--pd-bx) 0 / var(--pd-bw) 100% no-repeat;
+  --aL: var(--f) 0 var(--pd-by) / calc(var(--pd-bx) + var(--pd-bw)) var(--pd-bw) no-repeat;
+  --aR: var(--f) var(--pd-bx) var(--pd-by) / calc(100% - var(--pd-bx)) var(--pd-bw) no-repeat;
+  --aU: var(--f) var(--pd-bx) 0 / var(--pd-bw) calc(var(--pd-by) + var(--pd-bw)) no-repeat;
+  --aD: var(--f) var(--pd-bx) var(--pd-by) / var(--pd-bw) calc(100% - var(--pd-by)) no-repeat;
+  /* corner arms stop where the arc starts (1px overlap) */
+  --cD: var(--f) var(--pd-bx) calc(var(--pd-cy) + var(--pd-br) - 1px) / var(--pd-bw) 100% no-repeat;
+  --cU: var(--f) var(--pd-bx) 0 / var(--pd-bw) calc(var(--pd-cy) - var(--pd-br) + 1px) no-repeat;
+  --cR: var(--f) calc(var(--pd-cx) + var(--pd-br) - 1px) var(--pd-by) / 100% var(--pd-bw) no-repeat;
+  --cL: var(--f) 0 var(--pd-by) / max(0px, calc(var(--pd-cx) - var(--pd-br) + 1px)) var(--pd-bw) no-repeat;
+  /* quarter arc: a ring (radius br, thickness bw, 0.5px feathered edges) in an s x s box at --ax --ay */
+  --arc: radial-gradient(circle at var(--cxp) var(--cyp),
+      transparent calc(var(--pd-br) - var(--pd-bw) / 2 - 0.25px), currentColor calc(var(--pd-br) - var(--pd-bw) / 2 + 0.25px),
+      currentColor calc(var(--pd-br) + var(--pd-bw) / 2 - 0.25px), transparent calc(var(--pd-br) + var(--pd-bw) / 2 + 0.25px))
+    var(--ax) var(--ay) / var(--pd-s) var(--pd-s) no-repeat;
+}
+.pd-screen .sh-h { background: var(--H); }
+.pd-screen .sh-v { background: var(--V); }
+.pd-screen .sh-vr { background: var(--V), var(--aR); }
+.pd-screen .sh-vl { background: var(--V), var(--aL); }
+.pd-screen .sh-hd { background: var(--H), var(--aD); }
+.pd-screen .sh-hu { background: var(--H), var(--aU); }
+.pd-screen .sh-x { background: var(--H), var(--V); }
+.pd-screen .sh-dr { background: var(--aD), var(--aR); }
+.pd-screen .sh-dl { background: var(--aD), var(--aL); }
+.pd-screen .sh-ur { background: var(--aU), var(--aR); }
+.pd-screen .sh-ul { background: var(--aU), var(--aL); }
+.pd-screen .sh-rdr { --cxp: calc(var(--pd-s) - var(--pd-bw) / 2); --cyp: var(--cxp); --ax: var(--pd-bx); --ay: var(--pd-by); background: var(--arc), var(--cD), var(--cR); }
+.pd-screen .sh-rdl { --cxp: calc(var(--pd-bw) / 2); --cyp: calc(var(--pd-s) - var(--pd-bw) / 2); --ax: calc(var(--pd-bx) + var(--pd-bw) - var(--pd-s)); --ay: var(--pd-by); background: var(--arc), var(--cD), var(--cL); }
+.pd-screen .sh-rur { --cxp: calc(var(--pd-s) - var(--pd-bw) / 2); --cyp: calc(var(--pd-bw) / 2); --ax: var(--pd-bx); --ay: calc(var(--pd-by) + var(--pd-bw) - var(--pd-s)); background: var(--arc), var(--cU), var(--cR); }
+.pd-screen .sh-rul { --cxp: calc(var(--pd-bw) / 2); --cyp: var(--cxp); --ax: calc(var(--pd-bx) + var(--pd-bw) - var(--pd-s)); --ay: calc(var(--pd-by) + var(--pd-bw) - var(--pd-s)); background: var(--arc), var(--cU), var(--cL); }
+.pd-screen .sh-half { background: var(--f) 0 0 / 50% 100% no-repeat; }
+.pd-screen .sh-eighth { background: var(--f) 0 0 / 12.5% 100% no-repeat; }
+.pd-screen .bgr { display: inline-block; vertical-align: top; width: calc(var(--n) * var(--pd-cw, 1ch)); }
+.pd-screen .f0{--c:var(--t-0);color:var(--t-0)}
+.pd-screen .f1{--c:var(--t-1);color:var(--t-1)}
+.pd-screen .f2{--c:var(--t-2);color:var(--t-2)}
+.pd-screen .f3{--c:var(--t-3);color:var(--t-3)}
+.pd-screen .f4{--c:var(--t-4);color:var(--t-4)}
+.pd-screen .f5{--c:var(--t-5);color:var(--t-5)}
+.pd-screen .f6{--c:var(--t-6);color:var(--t-6)}
+.pd-screen .f7{--c:var(--t-7);color:var(--t-7)}
+.pd-screen .f8{--c:var(--t-8);color:var(--t-8)}
+.pd-screen .f9{--c:var(--t-9);color:var(--t-9)}
+.pd-screen .f10{--c:var(--t-10);color:var(--t-10)}
+.pd-screen .f11{--c:var(--t-11);color:var(--t-11)}
+.pd-screen .f12{--c:var(--t-12);color:var(--t-12)}
+.pd-screen .f13{--c:var(--t-13);color:var(--t-13)}
+.pd-screen .f14{--c:var(--t-14);color:var(--t-14)}
+.pd-screen .f15{--c:var(--t-15);color:var(--t-15)}
+.pd-screen .k0{--b:var(--t-0);background:var(--t-0)}
+.pd-screen .k1{--b:var(--t-1);background:var(--t-1)}
+.pd-screen .k2{--b:var(--t-2);background:var(--t-2)}
+.pd-screen .k3{--b:var(--t-3);background:var(--t-3)}
+.pd-screen .k4{--b:var(--t-4);background:var(--t-4)}
+.pd-screen .k5{--b:var(--t-5);background:var(--t-5)}
+.pd-screen .k6{--b:var(--t-6);background:var(--t-6)}
+.pd-screen .k7{--b:var(--t-7);background:var(--t-7)}
+.pd-screen .k8{--b:var(--t-8);background:var(--t-8)}
+.pd-screen .k9{--b:var(--t-9);background:var(--t-9)}
+.pd-screen .k10{--b:var(--t-10);background:var(--t-10)}
+.pd-screen .k11{--b:var(--t-11);background:var(--t-11)}
+.pd-screen .k12{--b:var(--t-12);background:var(--t-12)}
+.pd-screen .k13{--b:var(--t-13);background:var(--t-13)}
+.pd-screen .k14{--b:var(--t-14);background:var(--t-14)}
+.pd-screen .k15{--b:var(--t-15);background:var(--t-15)}
+.pd-screen .ffg { --c: var(--t-fg); color: var(--t-fg); }
+.pd-screen .fbg { --c: var(--t-bg); color: var(--t-bg); }
+.pd-screen .kfg { --b: var(--t-fg); background: var(--t-fg); }
+.pd-screen .kbg { --b: var(--t-bg); background: var(--t-bg); }
+.pd-screen .B { font-weight: 700; }
+.pd-screen .I { font-style: italic; }
+.pd-screen .U, .pd-screen .U .g { text-decoration: underline; }
+.pd-screen .S, .pd-screen .S .g { text-decoration: line-through; }
+.pd-screen .U.S, .pd-screen .U.S .g { text-decoration: underline line-through; }
+/* dim = the text colour mixed toward the cell's own background (never opacity) */
+.pd-screen .D { color: var(--c); color: color-mix(in srgb, var(--c) var(--t-dim), var(--b)); }
+
+/* ---- HUD: key chip and tap rings ---- */
+.pd-hud { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.pd-tapbox { position: absolute; inset: var(--pd-pady) var(--pd-padx); font-size: var(--pd-fs, 12px); line-height: var(--pd-lh, 15px); }
+.pd-tap {
+  position: absolute; box-sizing: border-box; width: 1.8em; height: 1.8em; margin: -0.9em 0 0 -0.9em;
+  left: calc((var(--col) + 0.5) * var(--pd-cw, 1ch)); top: calc(var(--row) * var(--pd-lh, 15px) + var(--pd-lh, 15px) / 2);
+  border: 2px solid var(--t-accent); border-radius: 50%;
+  background: color-mix(in srgb, var(--t-accent) 28%, transparent);
+  animation: pd-tap 0.5s ease-out forwards;
+}
+.pd-tap.pd-static { animation: none; opacity: 0.6; background: none; }
+@keyframes pd-tap {
+  0% { transform: scale(0.4); opacity: 0; }
+  25% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+.pd-keyrow { display: flex; justify-content: flex-end; align-items: center; min-height: 34px; margin-top: 8px; }
+.pd-player[data-kind="phone"] .pd-keyrow { justify-content: center; }
+/* keycast overlay (keys: 'overlay'): keycaps over the terminal's bottom-right corner, sized from the terminal font */
+.pd-kc {
+  position: absolute; right: calc(var(--pd-padx) + 0.6em); bottom: var(--pd-kc-bottom, calc(var(--pd-pady) + var(--pd-lh, 15px) * 2.5));
+  display: flex; align-items: flex-end; gap: 0.7em; max-width: calc(100% - 2 * var(--pd-padx)); font-size: calc(var(--pd-fs, 12px) * 1.8);
+  opacity: 0; transition: opacity 0.25s ease; pointer-events: none;
+}
+.pd-kc.on { opacity: 1; transition-duration: 0.12s; }
+.pd-kc-g { display: inline-flex; gap: 0.3em; transform-origin: 100% 100%; transition: opacity 0.2s ease, transform 0.2s ease; animation: pd-kc-in 0.12s ease-out; }
+.pd-kc-g.typed kbd { min-width: 4ch; text-align: center; }
+.pd-kc-g i { align-self: center; margin-left: 0.15em; font: 500 0.72em/1 var(--pd-font); font-style: normal; color: #e4e4e4; opacity: 0.85; }
+.pd-kc-g.pulse { animation: pd-kc-pulse 0.22s ease-out; }
+.pd-kc-g[data-age="1"] { opacity: 0.7; transform: scale(0.94); }
+.pd-kc-g[data-age="2"] { opacity: 0.42; transform: scale(0.88); }
+.pd-kc-g.out { opacity: 0; transform: scale(0.8); }
+.pd-kc kbd {
+  display: inline-block; padding: 0.42em 0.7em 0.5em; border: 1px solid #484848; border-radius: 4px; background: rgb(24 24 24 / 0.85); color: #e4e4e4;
+  font: 500 1em/1 var(--pd-font); white-space: nowrap; box-shadow: 0 0.2em 0.6em -0.15em rgb(0 0 0 / 0.6), inset 0 -0.14em 0 rgb(255 255 255 / 0.07);
+}
+@keyframes pd-kc-pulse { 0% { transform: scale(1.14); } 100% { transform: none; } }
+@keyframes pd-kc-in { from { opacity: 0; transform: translateY(0.35em); } to { opacity: 1; transform: none; } }
+.pd-key {
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px;
+  font: 600 12px/1 var(--pd-font);
+  background: var(--t-bg); color: var(--t-fg); border: 1px solid var(--pd-wline); opacity: 0; transition: opacity 0.15s;
+  box-shadow: 0 6px 16px -8px rgb(0 0 0 / 0.5);
+}
+.pd-key.on { opacity: 1; }
+.pd-key kbd {
+  font: inherit; padding: 3px 6px; border-radius: 4px;
+  background: color-mix(in srgb, var(--t-fg) 14%, var(--t-bg));
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--t-fg) 32%, var(--t-bg));
+}
+
+/* ---- controls ---- */
+.pd-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.pd-progress { flex: 1 0 100%; height: 2px; border-radius: 1px; background: var(--pd-line); overflow: hidden; }
+.pd-progress i { display: block; width: 0; height: 100%; background: var(--pd-accent); }
+.pd-btns, .pd-chapters { display: flex; flex-wrap: wrap; gap: 8px; }
+.pd-btn {
+  appearance: none; -webkit-appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.5em;
+  min-width: 40px; min-height: 40px; padding: 0 12px; margin: 0;
+  border: 1px solid var(--pd-line); border-radius: 2px; background: var(--pd-surface); color: var(--pd-ink);
+  font: 500 13px/1.2 var(--pd-font); cursor: pointer;
+}
+.pd-btn:hover:not(:disabled) { border-color: var(--pd-accent); }
+.pd-btn:focus-visible { outline: 2px solid var(--pd-accent); outline-offset: 2px; }
+.pd-btn:disabled { opacity: 0.4; cursor: default; }
+.pd-btn svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+.pd-play .i-pause, .pd-play[aria-pressed="true"] .i-play { display: none; }
+.pd-play[aria-pressed="true"] .i-pause { display: block; }
+.pd-chap .n { color: var(--pd-muted); }
+.pd-chap[aria-current="step"] { border-color: var(--pd-accent); color: var(--pd-accent); box-shadow: inset 0 -2px 0 var(--pd-accent); }
+.pd-chap[aria-current="step"] .n { color: inherit; }
+.pd-cap { margin: 12px 0 0; font: 13px/1.5 var(--pd-font); letter-spacing: 0.01em; color: var(--pd-muted); min-height: 1.5em; }
+.pd-cap-t { display: inline-block; transition: opacity 0.18s ease, transform 0.18s ease; }
+.pd-cap-t.pd-cap-out { opacity: 0; transform: translateY(3px); transition-duration: 0.12s; }
+@media (prefers-reduced-motion: reduce) { .pd-cap-t, .pd-cap-t.pd-cap-out { transition: none; transform: none; } }
+.pd-player[data-kind="phone"] .pd-controls, .pd-player[data-kind="phone"] .pd-chapters { justify-content: center; }
+.pd-player[data-kind="phone"] .pd-cap { text-align: center; }
+.pd-player[data-static] .pd-controls, .pd-player[data-static] .pd-keyrow { display: none; }
+
+/* a desktop demo scaled onto a narrow screen plays as it is; a button (or a tap) opens it enlarged, scrolling inside a full-screen view */
+.pd-zoom, .pd-zoom-close { display: none; align-items: center; gap: 8px; min-width: 44px; min-height: 44px; padding: 0 14px; flex: none; margin: 0; border: 1px solid #484848; border-radius: 6px;
+  background: rgb(24 24 24 / 0.88); color: #e4e4e4; font: 600 13px/1 var(--pd-font); cursor: pointer; box-shadow: 0 8px 20px -10px rgb(0 0 0 / 0.7); }
+.pd-zoom svg, .pd-zoom-close svg { width: 16px; height: 16px; flex: none; }
+.pd-zoom:focus-visible, .pd-zoom-close:focus-visible { outline: 2px solid var(--pd-accent); outline-offset: 2px; }
+.pd-small .pd-stage { cursor: zoom-in; }
+.pd-small .pd-zoom { display: inline-flex; justify-content: center; margin-left: auto; padding: 0; box-shadow: none; background: none; border-color: var(--pd-line); color: var(--pd-ink); }
+.pd-player.pd-zoomed .pd-zoom { display: none; }
+.pd-player.pd-zoomed .pd-stage { position: fixed; inset: 0; z-index: 1000; width: auto; overflow: auto; padding: 64px 12px 28px; background: var(--t-bg); overscroll-behavior: contain; cursor: auto; }
+.pd-player.pd-zoomed .pd-scroller { overflow: visible; }
+.pd-player.pd-zoomed .pd-window { max-width: none; margin-inline: 0; transform: none; }
+.pd-player.pd-zoomed .pd-stage::after { display: none; }
+.pd-player.pd-zoomed .pd-zoom-close { display: inline-flex; position: fixed; top: 10px; right: 10px; z-index: 1001; }
+.pd-noscroll { overflow: hidden; }
+
+/* reduced motion: chapter posters, step controls, no timers or fades */
+.pd-rm .pd-play, .pd-rm .pd-progress { display: none; }
+.pd-failed .pd-stage, .pd-failed .pd-controls, .pd-failed .pd-keyrow { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pd-screen, .pd-key, .pd-kc, .pd-kc-g { transition: none; animation: none; }
+  .pd-tap { animation: none; opacity: 0.6; background: none; }
+}
+
+.pd-measure { position: absolute; left: -9999px; top: 0; visibility: hidden; white-space: pre; font: 100px/1 var(--pd-font); font-variant-ligatures: none; letter-spacing: 0; }

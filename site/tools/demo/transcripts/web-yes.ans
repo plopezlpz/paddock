@@ -1,0 +1,6 @@
+# Appended after the answer: the menu (6 lines above the cursor) collapses.
+\e[6A\e[J\e[32m  ✓\e[0m Yes, run it
+\e[32m●\e[0m \e[1mBash\e[0m(npm install @webshop/payments)
+\e[2m  ⎿ added 1 package in 2s\e[0m
+
+\e[33m✻ Updating the cart page…\e[0m

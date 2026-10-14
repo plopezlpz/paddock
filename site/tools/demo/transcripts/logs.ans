@@ -1,0 +1,6 @@
+# A plain log window (infra:2.0), no agent.
+\e[2J\e[H\e[2m09:38:02\e[0m \e[32minfo\e[0m  plan started env=staging
+\e[2m09:38:04\e[0m \e[32minfo\e[0m  refreshing state (41 resources)
+\e[2m09:38:09\e[0m \e[33mwarn\e[0m  module.vpc: deprecated argument
+\e[2m09:38:11\e[0m \e[32minfo\e[0m  plan finished: 4 to change
+\e[2m09:39:40\e[0m \e[32minfo\e[0m  state lock released

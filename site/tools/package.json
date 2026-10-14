@@ -1,0 +1,15 @@
+{
+  "name": "paddock-site-tools",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "record": "node record.mjs all feat --conf demo/themes/gruber.conf",
+    "svg": "node build-svg.mjs",
+    "shoot": "node shoot.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.60.0"
+  }
+}

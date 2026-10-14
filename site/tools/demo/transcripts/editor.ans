@@ -1,0 +1,34 @@
+# The editor pane next to the agent (webshop:1.1, 52 columns).
+\e[2J\e[H\e[7m ratelimit.go \e[0m\e[2m checkout.go  router.go\e[0m
+
+\e[2m 1\e[0m \e[35mpackage\e[0m http
+\e[2m 2\e[0m
+\e[2m 3\e[0m \e[35mimport\e[0m (
+\e[2m 4\e[0m     \e[32m"net/http"\e[0m
+\e[2m 5\e[0m     \e[32m"sync"\e[0m
+\e[2m 6\e[0m     \e[32m"time"\e[0m
+\e[2m 7\e[0m )
+\e[2m 8\e[0m
+\e[2m 9\e[0m \e[90m// Limiter is a token bucket per customer.\e[0m
+\e[2m10\e[0m \e[35mtype\e[0m Limiter \e[35mstruct\e[0m {
+\e[2m11\e[0m     mu     sync.Mutex
+\e[2m12\e[0m     rate   \e[35mfloat64\e[0m \e[90m// tokens per second\e[0m
+\e[2m13\e[0m     burst  \e[35mfloat64\e[0m
+\e[2m14\e[0m     bucket \e[35mmap\e[0m[\e[35mstring\e[0m]*bucket
+\e[2m15\e[0m }
+\e[2m16\e[0m
+\e[2m17\e[0m \e[35mfunc\e[0m \e[34mNew\e[0m(perMinute \e[35mint\e[0m) *Limiter {
+\e[2m18\e[0m     \e[35mreturn\e[0m &Limiter{
+\e[2m19\e[0m         rate:   \e[35mfloat64\e[0m(perMinute) / 60,
+\e[2m20\e[0m         burst:  \e[35mfloat64\e[0m(perMinute),
+\e[2m21\e[0m         bucket: \e[34mmake\e[0m(\e[35mmap\e[0m[\e[35mstring\e[0m]*bucket),
+\e[2m22\e[0m     }
+\e[2m23\e[0m }
+\e[2m24\e[0m
+\e[2m25\e[0m \e[35mfunc\e[0m (l *Limiter) \e[34mAllow\e[0m(id \e[35mstring\e[0m) \e[35mbool\e[0m {
+\e[2m26\e[0m     l.mu.\e[34mLock\e[0m()
+\e[2m27\e[0m     \e[35mdefer\e[0m l.mu.\e[34mUnlock\e[0m()
+\e[2m28\e[0m     b := l.\e[34mfill\e[0m(id, time.\e[34mNow\e[0m())
+\e[2m29\e[0m     \e[35mreturn\e[0m b.\e[34mtake\e[0m()
+\e[2m30\e[0m }
+\e[35;1H\e[7m ratelimit.go [+]                             30:1 \e[0m\e[H

@@ -1,0 +1,7 @@
+# A second docs-session agent working in another folder (opencode, docs:2.0).
+\e[2J\e[H\e[1m>\e[0m document the payment element props
+
+\e[32m●\e[0m \e[1mRead\e[0m(web/src/cart/PaymentElement.tsx)
+\e[2m  ⎿ Read 74 lines\e[0m
+
+\e[33m✻ Drafting the props table…\e[0m

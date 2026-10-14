@@ -1,0 +1,17 @@
+# Staged agent output (claude, webshop:1.0). Lines starting with "# " are comments, \e is ESC (phone variant: lines under 40 columns).
+\e[2J\e[H\e[1m>\e[0m add rate limiting to the checkout
+  API, 20 req/min per customer
+
+I'll put a token bucket in front of the
+checkout handlers:
+
+  1. key the limiter on the customer id
+  2. answer 429 with Retry-After
+  3. cover burst and refill in tests
+
+\e[32m●\e[0m \e[1mRead\e[0m(internal/http/checkout.go)
+\e[2m  ⎿ Read 142 lines\e[0m
+\e[32m●\e[0m \e[1mRead\e[0m(internal/http/router.go)
+\e[2m  ⎿ Read 87 lines\e[0m
+
+\e[33m✻ Writing the limiter…\e[0m
