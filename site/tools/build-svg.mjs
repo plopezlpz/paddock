@@ -1,10 +1,10 @@
 // Animated SVG demo, static phone frame, feature clips and posters from the recorded frames.
-//   node tools/build-svg.mjs                  write everything
-//   node tools/build-svg.mjs --pace 30        tour loop length in seconds (default 30), or --pace off for the recorded holds
-//   node tools/build-svg.mjs --paddock <repo> the paddock repo the README images go to (default: this
+//   node build-svg.mjs                  write everything
+//   node build-svg.mjs --pace 30        tour loop length in seconds (default 30), or --pace off for the recorded holds
+//   node build-svg.mjs --paddock <repo> the paddock repo the README images go to (default: this
 //                                             folder's parent, or PADDOCK_REPO)
-//   node tools/build-svg.mjs --only readme    only the README images (docs/brand); --only posters: only the site posters
-//   node tools/build-svg.mjs --theme <css>    terminal palette overlay on assets/css/player.css (default assets/css/site.css, the Gruber theme
+//   node build-svg.mjs --only readme    only the README images (docs/brand); --only posters: only the site posters
+//   node build-svg.mjs --theme <css>    terminal palette overlay on assets/css/player.css (default assets/css/site.css, the Gruber theme
 //                                             the recordings are made in, if it exists; "none" for player.css alone)
 // The terminal is always dark, so there is one file per image: it looks the same on a light and a dark page.
 import fs from 'node:fs';

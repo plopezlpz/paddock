@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Records real paddock frames: node tools/record.mjs tour|phone|status|all|feat-<name>|feat [--keep] [--paddock <repo>]
+// Records real paddock frames (run from site/tools): node record.mjs tour|phone|status|all|feat-<name>|feat [--keep] [--paddock <repo>]
 // Needs tmux 3.8+ and a paddock checkout; builds the release binary first.
 
 import crypto from 'node:crypto';

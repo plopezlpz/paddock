@@ -5,8 +5,9 @@ windows and panes that also shows which AI coding agents are working, waiting or
 
 It is a static site: one `index.html`, two stylesheets and two small scripts. The demos are real paddock frames,
 recorded from the actual program in a scratch tmux server and replayed by a small player. Nothing is built at deploy
-time and nothing is deployed from here. The folder is meant to live in the paddock repository as `site/`; the tools
-below find the paddock checkout one directory up (see "Where paddock is").
+time. It lives in the paddock repository as `site/`. A push to master that touches `index.html` or `assets/` publishes
+them, copied as they are, to https://plopezlpz.github.io/paddock/ (`.github/workflows/pages.yml`, which runs this
+folder's unit tests first). The tools below find the paddock checkout one directory up (see "Where paddock is").
 
 ## View it
 

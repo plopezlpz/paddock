@@ -11,5 +11,8 @@ TPM follows master, so master must never carry a version whose release doesn't e
 5. Update the Homebrew tap: `scripts/update-formula.sh X.Y.Z` (prints the
    formula; the hashes come from the release), then commit it to the tap.
 
+If the UI changed, re-record the demos before the release: `cd site/tools && npm run record && node build-svg.mjs`,
+then commit `site/assets/frames` and `docs/brand`. (Re-record sparingly: every run adds blobs to every TPM clone.)
+
 Any change to the popup's flags or env is a version bump, released (steps 2-4)
 before master carries it.
