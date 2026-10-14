@@ -85,7 +85,9 @@ class Paddock < Formula
         set -g @paddock-key 'a'
         run-shell '#{HOMEBREW_PREFIX}/bin/paddock init'
 
-      Reload tmux after installing and after every upgrade.
+      Reload tmux (tmux source-file ~/.tmux.conf) after installing and after
+      every upgrade. For agent state, add agent-status.tmux as in:
+      https://github.com/plopezlpz/paddock#with-homebrew
     EOS
   end
 

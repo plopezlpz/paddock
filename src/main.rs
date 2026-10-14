@@ -88,7 +88,7 @@ fn context() -> Result<Context, String> {
 const USAGE: &str = "usage: paddock [--tab sessions|agents] | paddock init | paddock --version";
 
 /// For `paddock init`: a binary installed without the plugin checkout
-/// (Homebrew, cargo) still binds the keys, by running this script itself.
+/// (Homebrew) still binds the keys, by running this script itself.
 const PLUGIN: &str = include_str!("../paddock.tmux");
 
 enum Cmd {

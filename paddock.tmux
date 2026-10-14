@@ -49,7 +49,7 @@ agents_key=$(tmux show-option -gqv @paddock-agents-key)
 click=$(tmux show-option -gqv @paddock-click)
 [ "$click" = on ] || click=
 if [ -z "$key$agents_key$click" ]; then
-  tmux display-message "paddock: set @paddock-key before loading paddock.tmux"
+  tmux display-message "paddock: set @paddock-key before paddock init (or paddock.tmux)"
 fi
 # On reload, drop the keys bound last time (the options may have changed),
 # unless the config has since bound one to something else.
