@@ -7,6 +7,13 @@
 
 <p align="center"><b>Keep an eye on your agents without leaving tmux.</b></p>
 
+<p align="center"><b>Stay in tmux. Add a control panel for your agents.</b></p>
+
+<p align="center">
+Keep your tmux.conf, your prefix and keybindings, your plugins and sessions.
+paddock is one popup on top of them.
+</p>
+
 <p align="center">
 A fast tmux popup for jumping between sessions, windows and panes, and for
 keeping an eye on the AI coding agents running in them (Claude Code, Codex,
@@ -15,21 +22,18 @@ pi, …): which one is working, which is waiting for you, which has finished.
 
 <p align="center">Your tmux, your config, ssh and your phone. No new app or terminal to move to.</p>
 
-<p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a></p>
+<p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a></p>
 
 <details open>
 <summary><b>Demo</b></summary>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/demo-dark.svg">
-  <img src="docs/brand/demo-light.svg" alt="paddock in tmux: agents change state in the status bar, prefix C opens the popup, a filter narrows the sessions, Tab shows the agents grouped by state, Enter jumps to the agent that is waiting." width="100%">
-</picture>
+<img src="docs/brand/demo.svg" alt="paddock in tmux: agents change state in the status bar, prefix C opens the popup, a filter narrows the sessions, Tab shows the agents grouped by state, Enter jumps to the agent that is waiting." width="100%">
 
 <sub>Recorded from paddock 0.1.0 in a scratch tmux server; the sessions and agent output are staged.</sub>
 
 </details>
 
-> **Status: prototype.** It's used daily on macOS. Linux should work. Expect
+> **Status: beta.** It's used daily on macOS. Linux should work. Expect
 > changes.
 
 ## Why
@@ -45,34 +49,83 @@ are waiting for you and which have finished, and jump to one with a key press.
 - **On your phone.** Under 80 columns it switches to a compact layout with
   tappable words, and `@paddock-click` opens it from the session name in the
   status line.
+- **One setup for agent state.** paddock's companion plugin,
+  [agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux), listens
+  to your agents' own hooks. Add both and you get the status bar dots, the
+  desktop notifications and paddock's agents tab, with no daemon and no
+  polling. paddock doesn't start or wrap your agents; they run in your panes as
+  they do today. Agents without lifecycle hooks, such as Codex, are not
+  covered (see [Agent state](#agent-state)).
 
-paddock shows the state a producer reports (see [Agent state](#agent-state));
-it doesn't run your agents or work out their state itself.
-[agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) is one
-producer. Its providers don't include Codex, which has no lifecycle hooks, so a
-Codex pane shows an agent only if another producer sets its state.
-
-[herdr](https://herdr.dev) gives your agents a runtime of their own, and
-[cmux](https://cmux.com) is a native macOS terminal built around agents; if your
-home is already tmux, paddock brings an at-a-glance view to it, with no new
-server, terminal or config to move to.
+[herdr](https://herdr.dev) is an agent runtime: its own server that keeps your
+agents' terminals alive, with its own TUI, CLI and API, and a good home if you
+are starting fresh. [cmux](https://cmux.com) is a native macOS terminal built
+around agents. If your home is already tmux, paddock brings an at-a-glance view
+to it, with no new server, terminal or config to move to.
 
 ## Features
 
-- **Sessions and agents in one popup**: a tab for the session tree and a tab
-  for the agents. Agent cards group by status, session or folder, or not at
-  all (`ctrl-g`); within a state, the most recent change comes first.
-- **Preview and filter**: the selected pane, live, when the popup is wide
-  enough (`ctrl-o` toggles it), and a fuzzy filter with `'exact`, `^prefix`,
-  `suffix$` and `!not`.
-- **Edit in place**: rename sessions, windows and agents; move windows and
-  panes; kill sessions, windows and panes; create windows and sessions; undo the
-  last rename or move. An agent can get a suggested title when the producer
-  offers suggestions.
-- **Mouse and touch**: click, double-click, drag and a right-click menu; tabs
-  and footer hints are buttons.
-- **Your colours**: `@paddock-color-*`, else your tmux theme and
-  `@agent-color-*`, else the defaults (see [Options](#options)).
+### A dot beside each window that has an agent
+
+Your status bar stays as it is; agent-status.tmux adds one dot to each window
+that has an agent, for working, finished or asking you something, and paddock
+shows the same state.
+
+<img src="docs/brand/status.svg" alt="paddock's status dot: a dot appears beside each tmux window that has an agent and turns blue when the agent has finished." width="100%">
+
+### Open paddock, jump to the agent that needs you
+
+`prefix C` opens a popup over whatever you were doing. `Tab` shows every agent,
+the one that needs you first, and `Enter` jumps to its pane. Start typing to
+filter sessions, windows and agents with a fuzzy filter (`'exact`, `^prefix`,
+`suffix$`, `!not`). That is the demo above.
+
+### Group agents
+
+Agent cards group by status, session or folder, or not at all (`ctrl-g`);
+within a state, the most recent change comes first. Grouped by folder, agents
+working in the same project, one per worktree, sit together.
+
+<img src="docs/brand/group.svg" alt="paddock's agents tab grouped by status, then by session, then by folder, then not grouped." width="100%">
+
+### Skim agents without jumping to them
+
+The selected pane, live, beside the list, when the popup is at least 102
+columns wide (`ctrl-o` toggles it). Move down the list and the preview follows,
+so you can read what an agent is doing, or asking, before you jump to it.
+
+<img src="docs/brand/preview.svg" alt="paddock's agents tab with the selected agent's pane shown live beside the list; moving down the list changes the preview, and nothing is opened or switched." width="100%">
+
+### Rename an agent, with a suggested title
+
+`ctrl-r` renames the selected agent in place; press it again and paddock fills
+in a suggested title when agent-status.tmux offers one, to keep, edit or drop.
+`Enter` saves it, `ctrl-z` undoes it.
+
+### Sessions, windows and panes from the popup
+
+New, rename, move, kill and undo, without leaving the popup: rename sessions,
+windows and agents; move windows and panes; kill sessions, windows and panes;
+create windows and sessions. Click, double-click, drag and a right-click menu
+work too; tabs and footer hints are buttons.
+
+### Know when an agent needs you
+
+A red dot in the status bar means an agent is waiting for you, and in paddock
+it is the first card. agent-status.tmux can also raise a clickable desktop
+notification.
+
+<img src="docs/brand/notify.svg" alt="While you work in one session, the dot of another window turns red when its agent asks for an answer and blue when another agent finishes; paddock's agents tab lists who is waiting and who is done." width="100%">
+
+### On your phone
+
+Under 80 columns paddock switches to a compact two-line layout with tappable
+words (see [Use](#use)).
+
+### Your colours
+
+Colours follow `@paddock-color-*`, else your tmux theme and `@agent-color-*`,
+else the defaults (see [Options](#options)).
 
 It uses one tmux control-mode connection and redraws only when something
 changes.
@@ -80,7 +133,10 @@ changes.
 ## Install
 
 You need tmux 3.8 or later (`tmux -V`); distribution packages are usually
-older. Prebuilt binaries cover macOS and Linux, arm64 and x86_64.
+older. Prebuilt binaries cover macOS and Linux, arm64 and x86_64. For agent state
+add the companion plugin [agent-status.tmux](#agent-state) too: the TPM snippet
+below includes it, and with Homebrew or cargo you add it as in
+[its README](https://github.com/plopezlpz/agent-status.tmux).
 
 ### TPM
 
@@ -90,6 +146,7 @@ options before the plugin loads):
 ```tmux
 set -g @paddock-key 'C'          # prefix C opens paddock (replaces customize-mode)
 set -g @plugin 'plopezlpz/paddock'
+set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state: dots, notifications
 ```
 
 Press `prefix I`, then the key. It offers to download the matching binary
@@ -152,10 +209,7 @@ does not reach a running tmux server):
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/frame-phone-dark.svg">
-    <img src="docs/brand/frame-phone-light.svg" alt="paddock's agents tab on a 50-column phone screen: the compact layout, with the agents grouped by state and a card waiting for you." width="300">
-  </picture>
+  <img src="docs/brand/frame-phone.svg" alt="paddock's agents tab on a 40-column phone screen: the compact layout, with the agents grouped by state and a card waiting for you." width="300">
 </p>
 
 | Key | Action |
@@ -178,7 +232,7 @@ does not reach a running tmux server):
 Renaming edits the name in place, with `←` `→`, `Home` `End` (`ctrl-a`
 `ctrl-e`), `ctrl-w` and `ctrl-u`. `Enter` saves. An empty window name hands
 naming back to tmux, and an empty agent title goes back to the automatic one;
-for an agent, `ctrl-r` again fills in a suggested title when the producer
+for an agent, `ctrl-r` again fills in a suggested title when agent-status.tmux
 offers suggestions (see below), to keep, edit or drop.
 
 Dropped on a session, a window goes first in it; on a window, after it. A
@@ -210,16 +264,17 @@ of room, ⋯ opens the menu.
 
 ## Agent state
 
-paddock displays agent state; something else produces it.
-[agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) does,
-by hooking into each agent. Without a producer, paddock is a session switcher
-with a live preview.
+paddock's companion plugin,
+[agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux), listens to
+your agents' own hooks and keeps their state on each agent's pane. Add both and
+you get the status bar dots, the desktop notifications and paddock's agents
+tab. Without it, paddock is a session switcher with a live preview.
 
 agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code
 (partial) and Claude Code; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
 
-Any producer can feed paddock by setting these options on the agent's pane
-(one agent per pane, one producer per tmux server):
+Any tool can feed paddock by setting these options on the agent's pane
+(one agent per pane, one tool setting them per tmux server):
 
 | Pane option | Value |
 |---|---|
@@ -230,7 +285,7 @@ Any producer can feed paddock by setting these options on the agent's pane
 | `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
 
-Only `@agent-state` is required. A producer:
+Only `@agent-state` is required. The tool that sets them:
 
 - **unsets** them all when the agent exits, along with `@agent-description`
   (below). A pane without `@agent-state` has no agent.
@@ -245,7 +300,7 @@ An agent's title is its `@agent-description`, the title you gave it, else
 glyphs such as `✳`; tmux's default, the host name, is not a title).
 Renaming sets `@agent-description` on the pane; clearing it unsets it.
 
-For suggested titles, a producer sets the global `@agent-suggest-command` to
+For suggested titles, a tool sets the global `@agent-suggest-command` to
 a shell command. paddock runs it with the pane id appended, in its own
 process group, and stops it when you cancel, type over it, or after 30
 seconds. It prints the title on stdout, or fails with the reason as the last
