@@ -73,7 +73,7 @@ run-shell 'paddock init'</code></pre></div>
   </div>
   <div class="tabpanel" role="tabpanel" id="panel-cargo" aria-labelledby="tab-cargo">
     <p class="panel-label">cargo</p>
-    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-cargo-sh" aria-label="Copy the cargo install command">copy</button></div><pre tabindex="0"><code id="code-cargo-sh">cargo install --git https://github.com/plopezlpz/paddock</code></pre></div>
+    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-cargo-sh" aria-label="Copy the cargo install command">copy</button></div><pre tabindex="0"><code id="code-cargo-sh">cargo install --locked --git https://github.com/plopezlpz/paddock</code></pre></div>
     <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-cargo-tmux" aria-label="Copy the cargo tmux config">copy</button></div><pre tabindex="0"><code id="code-cargo-tmux">set -g @paddock-key 'a'
 run-shell '~/.cargo/bin/paddock init'</code></pre></div>
     <p class="note">Needs Rust 1.88+. Reload tmux after <code>cargo install</code>. For agent state, add <a href="#agents">agent-status.tmux</a> too.</p>

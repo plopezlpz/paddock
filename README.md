@@ -179,7 +179,7 @@ for another version.
 Needs Rust 1.88+.
 
 ```sh
-cargo install --git https://github.com/plopezlpz/paddock
+cargo install --locked --git https://github.com/plopezlpz/paddock
 ```
 
 ```tmux
