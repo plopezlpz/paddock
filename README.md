@@ -135,7 +135,7 @@ changes.
 You need tmux 3.8 or later (`tmux -V`); distribution packages are usually
 older. Prebuilt binaries cover macOS and Linux, arm64 and x86_64. For agent state
 add the companion plugin [agent-status.tmux](#agent-state) too: the TPM snippet
-below includes it, and with Homebrew or cargo you add it as in
+below includes it, and with Homebrew you add it as in
 [its README](https://github.com/plopezlpz/agent-status.tmux).
 
 ### TPM
@@ -173,21 +173,6 @@ If tmux's `PATH` lacks Homebrew's, write out the full path,
 
 After `brew upgrade`, reload tmux; until then the key says its bindings are
 for another version.
-
-### From source
-
-Needs Rust 1.88+.
-
-```sh
-cargo install --locked --git https://github.com/plopezlpz/paddock
-```
-
-```tmux
-set -g @paddock-key 'a'
-run-shell '~/.cargo/bin/paddock init'
-```
-
-Reload tmux after `cargo install` too.
 
 ### From a clone
 

@@ -12,8 +12,8 @@ exist yet. The Release workflow takes care of that: it moves master itself, last
    - `tap`: updates the Homebrew tap (plopezlpz/homebrew-tap) with the
      `HOMEBREW_TAP_DEPLOY_KEY` secret, a write deploy key for the tap only.
      Pre-release tags (`vX.Y.Z-rc1`) leave the tap alone;
-   - `master`: fast-forwards master to the tagged commit (TPM and
-     `cargo install --git` follow master) and redeploys the site.
+   - `master`: fast-forwards master to the tagged commit (TPM
+     follows master) and redeploys the site.
 4. If a step failed, finish it by hand:
    - tap: `HOMEBREW_TAP_DEPLOY_KEY=... scripts/update-tap.sh X.Y.Z`, or commit
      the output of `scripts/update-formula.sh X.Y.Z` to the tap as `Formula/paddock.rb`;

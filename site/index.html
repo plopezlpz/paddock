@@ -55,7 +55,6 @@
   <div class="tabs" role="tablist" aria-label="Install method">
     <button class="tab" role="tab" id="tab-tpm" type="button" aria-controls="panel-tpm" aria-selected="true">TPM</button>
     <button class="tab" role="tab" id="tab-brew" type="button" aria-controls="panel-brew" aria-selected="false" tabindex="-1">Homebrew</button>
-    <button class="tab" role="tab" id="tab-cargo" type="button" aria-controls="panel-cargo" aria-selected="false" tabindex="-1">cargo</button>
   </div>
   <div class="tabpanel is-active" role="tabpanel" id="panel-tpm" aria-labelledby="tab-tpm">
     <p class="panel-label">TPM</p>
@@ -70,13 +69,6 @@ set -g @plugin 'plopezlpz/agent-status.tmux'   <span class="cm"># agent state: d
     <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-brew-tmux" aria-label="Copy the Homebrew tmux config">copy</button></div><pre tabindex="0"><code id="code-brew-tmux">set -g @paddock-key 'a'
 run-shell 'paddock init'</code></pre></div>
     <p class="note">If tmux's <code>PATH</code> lacks Homebrew's, write out the full path: <code>/opt/homebrew/bin/paddock</code> (Apple silicon), <code>/usr/local/bin/paddock</code> (Intel Mac) or <code>/home/linuxbrew/.linuxbrew/bin/paddock</code> (Linux). After <code>brew upgrade</code>, reload tmux. For agent state, add <a href="#agents">agent-status.tmux</a> too.</p>
-  </div>
-  <div class="tabpanel" role="tabpanel" id="panel-cargo" aria-labelledby="tab-cargo">
-    <p class="panel-label">cargo</p>
-    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-cargo-sh" aria-label="Copy the cargo install command">copy</button></div><pre tabindex="0"><code id="code-cargo-sh">cargo install --locked --git https://github.com/plopezlpz/paddock</code></pre></div>
-    <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-cargo-tmux" aria-label="Copy the cargo tmux config">copy</button></div><pre tabindex="0"><code id="code-cargo-tmux">set -g @paddock-key 'a'
-run-shell '~/.cargo/bin/paddock init'</code></pre></div>
-    <p class="note">Needs Rust 1.88+. Reload tmux after <code>cargo install</code>. For agent state, add <a href="#agents">agent-status.tmux</a> too.</p>
   </div>
 </div>
   </section>

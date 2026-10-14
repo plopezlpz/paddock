@@ -269,7 +269,7 @@ async function noJsShot(browser, base) {
   const log = instrument(page, new URL(base).origin);
   await page.goto(base, { waitUntil: 'load' });
   const panels = await page.locator('.tabpanel').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height > 0));
-  check(panels.length === 3 && panels.every(Boolean), 'no-js: all three install panels are visible');
+  check(panels.length === 2 && panels.every(Boolean), 'no-js: both install panels are visible');
   check(await page.locator('.tabs').isHidden(), 'no-js: tablist hidden');
   for (const sel of ['.pd-window', '.pd-controls', '.pd-cap', '.pd-player', '.copy', '.sc-col']) {
     const vis = await page.locator(sel).evaluateAll((els) => els.filter((e) => e.getBoundingClientRect().height > 0).length);
@@ -319,12 +319,12 @@ async function behaviour(browser, url, label, { grantClipboard, blockStorage }) 
   check((await page.textContent('#code-brew-sh')) === 'brew install plopezlpz/tap/paddock', L('Homebrew snippet verbatim'));
   await page.focus('#tab-brew');
   await page.keyboard.press('ArrowRight');
-  check((await sel('tab-cargo')) === 'true' && (await page.evaluate(() => document.activeElement.id)) === 'tab-cargo', L('ArrowRight moves to cargo and focuses it'));
-  check((await page.textContent('#code-cargo-sh')) === 'cargo install --locked --git https://github.com/plopezlpz/paddock', L('cargo snippet verbatim'));
+  check((await sel('tab-tpm')) === 'true' && (await page.evaluate(() => document.activeElement.id)) === 'tab-tpm', L('ArrowRight wraps to TPM and focuses it'));
+  check((await page.$('#tab-cargo')) === null && (await page.$('#panel-cargo')) === null, L('no cargo install tab'));
   await page.keyboard.press('Home');
   check((await sel('tab-tpm')) === 'true', L('Home selects the first tab'));
   await page.keyboard.press('ArrowLeft');
-  check((await sel('tab-cargo')) === 'true', L('ArrowLeft wraps to the last tab'));
+  check((await sel('tab-brew')) === 'true', L('ArrowLeft wraps to the last tab'));
   await page.click('#tab-tpm');
 
   // copy
