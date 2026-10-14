@@ -187,8 +187,7 @@ set -g @paddock-key 'a'
 run-shell '~/.cargo/bin/paddock init'
 ```
 
-(`cargo install paddock` will work once it is on crates.io.) Reload tmux
-after `cargo install` too.
+Reload tmux after `cargo install` too.
 
 ### From a clone
 
