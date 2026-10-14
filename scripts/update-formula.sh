@@ -82,7 +82,7 @@ class Paddock < Formula
     <<~EOS
       paddock needs tmux 3.8 or later (tmux -V). Add to ~/.tmux.conf:
 
-        set -g @paddock-key 'C'
+        set -g @paddock-key 'a'
         run-shell '#{HOMEBREW_PREFIX}/bin/paddock init'
 
       Reload tmux after installing and after every upgrade.
