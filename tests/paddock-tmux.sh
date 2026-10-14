@@ -140,6 +140,18 @@ check "the click alone is enough" has "$(root_click)" "$TMP/plugin/target/releas
 check "nested client still attached" test -n "$(t list-clients)"
 check "no missing-key warning" test -z "$(t show-messages 2>/dev/null | grep 'set @paddock-key')"
 
+# No key and no click: prefix a, but never over a binding of the user's own.
+t set -gu @paddock-click
+load
+check "no key set: prefix a opens paddock" has "$(t list-keys -T prefix a 2>/dev/null)" "$TMP/plugin/target/release/paddock"
+t unbind a
+t bind a display-message mine
+load
+check "no key set: a user's own prefix a survives" has "$(t list-keys -T prefix a 2>/dev/null)" "display-message mine"
+check "no key set: paddock says prefix a is taken" has "$(t show-messages 2>/dev/null)" "prefix a is taken"
+t unbind a
+t set -g @paddock-click on
+
 # Which binary gets bound: only one reporting this checkout's version (and
 # exiting 0), from target/release or bin/ and nowhere else; else the installer.
 reset
@@ -435,6 +447,48 @@ press 4d
 press 6d
 wait_opened
 check "e2e: pressing the key again opens paddock" has "$(cat "$TMP/opened" 2>/dev/null)" "$PLUG/bin/paddock $client "
+
+# A first install also offers to hook up the agents agent-status.tmux finds
+# (a stub stands in for its manage-provider.sh); an upgrade doesn't ask again.
+mkdir -p "$TMP/as/scripts/agent"
+cat >"$TMP/as/manage-provider.sh" <<EOF
+case "\$1" in
+  found) exit 0 ;;
+  install) printf 'agent-status: found fake.\nHook them up? [Y/n] '; read -r a; echo "\$a" >"$TMP/hooked" ;;
+esac
+EOF
+t set -g @agent-scripts-dir "$TMP/as/scripts/agent"
+t set-environment -g PADDOCK_RELEASE_URL "$TMP/rel/good"
+wait_file() { for _ in $(seq 50); do [ -s "$1" ] && return 0; sleep 0.1; done; return 1; }
+reset
+rm -f "$TMP/hooked"
+load
+wait_screen "[main]"
+press 4d
+press 6d
+check "e2e agents: the installer asks first" wait_screen "[Y/n]"
+tmux -L "$OUT" send-keys Enter
+check "e2e agents: then offers to hook up the agents" wait_screen "Hook them up?"
+tmux -L "$OUT" send-keys y Enter
+check "e2e agents: and hooks them up" wait_file "$TMP/hooked"
+check "e2e agents: then says to press the key again" wait_screen "Press the key again"
+tmux -L "$OUT" send-keys q
+wait_gone "Press any key to close."
+reset
+rm -f "$TMP/hooked"
+stub "$PLUG/bin/paddock" 0.0.1
+load
+wait_screen "[main]"
+press 4d
+press 6d
+check "e2e upgrade: the installer asks first" wait_screen "[Y/n]"
+tmux -L "$OUT" send-keys Enter
+check "e2e upgrade: it installs" wait_screen "Press the key again"
+check "e2e upgrade: without asking about agents" test ! -e "$TMP/hooked"
+tmux -L "$OUT" send-keys q
+wait_gone "Press any key to close."
+t set -gu @agent-scripts-dir
+t set-environment -gu PADDOCK_RELEASE_URL
 
 # A failure stays on screen until a key is pressed.
 reset

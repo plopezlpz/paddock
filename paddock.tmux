@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # paddock -- tmux entrypoint (TPM or run-shell): binds @paddock-key (the tab paddock
 # was last closed on) and @paddock-agents-key (agents tab) to the paddock popup,
-# and with @paddock-click on, a click on the session name (status-left). All
-# unbound unless set. The binary must report this plugin's version: the popup's
+# and with @paddock-click on, a click on the session name (status-left). With
+# none of the three set, @paddock-key is a, unless the config binds prefix a to
+# something else. The binary must report this plugin's version: the popup's
 # flags and env are a contract between the two.
 set -euf
 CURRENT_DIR='' VERSION='' BIN='' install=''
@@ -49,7 +50,11 @@ agents_key=$(tmux show-option -gqv @paddock-agents-key)
 click=$(tmux show-option -gqv @paddock-click)
 [ "$click" = on ] || click=
 if [ -z "$key$agents_key$click" ]; then
-  tmux display-message "paddock: set @paddock-key before paddock init (or paddock.tmux)"
+  # Nothing chosen: prefix a, but never over a binding of the user's own.
+  case $(tmux list-keys -T prefix a 2>/dev/null) in
+    '' | *paddock*) key=a ;;
+    *) tmux display-message "paddock: prefix a is taken; set @paddock-key to choose a key" ;;
+  esac
 fi
 # On reload, drop the keys bound last time (the options may have changed),
 # unless the config has since bound one to something else.

@@ -138,9 +138,25 @@ got=$("$tmp/x/paddock" --version 2>/dev/null </dev/null) || got="${got:-nothing}
 
 mv -f "$tmp/x/paddock" "$PLUGIN_DIR/bin/paddock" || fail "cannot write $PLUGIN_DIR/bin/paddock"
 
+# A first install, answered in the popup: offer to hook up the agents that
+# agent-status.tmux finds (it asks itself). Upgrades and --yes runs don't ask.
+hook_agents() {
+  local dir mp rc=0
+  { [ -z "$old" ] && [ -z "$yes" ] && [ -t 0 ]; } || return 0
+  dir=$(tmux show-option -gqv @agent-scripts-dir 2>/dev/null) || return 0
+  mp=${dir%/scripts/agent}/manage-provider.sh
+  { [ -n "$dir" ] && [ -f "$mp" ]; } || return 0
+  # An agent-status.tmux without "found" can't list agents: leave it to its README.
+  bash "$mp" found claude >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 2 ] || return 0
+  echo
+  bash "$mp" install || echo "Hooking up the agents failed; later, run: bash $(printf %q "$mp") install"
+}
+
 if [ -n "${TMUX:-}" ]; then
   bash "$PLUGIN_DIR/paddock.tmux" || die "paddock $VERSION installed, but rebinding failed -- reload tmux"
   echo "paddock $VERSION installed."
+  hook_agents
   echo "Press the key again to open it."
 else
   echo "paddock $VERSION installed; reload tmux (outside tmux the keys cannot be rebound)."
