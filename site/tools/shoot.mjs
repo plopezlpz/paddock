@@ -320,7 +320,7 @@ async function behaviour(browser, url, label, { grantClipboard, blockStorage }) 
   await page.focus('#tab-brew');
   await page.keyboard.press('ArrowRight');
   check((await sel('tab-cargo')) === 'true' && (await page.evaluate(() => document.activeElement.id)) === 'tab-cargo', L('ArrowRight moves to cargo and focuses it'));
-  check((await page.textContent('#code-cargo-sh')) === 'cargo install --git https://github.com/plopezlpz/paddock', L('cargo snippet verbatim'));
+  check((await page.textContent('#code-cargo-sh')) === 'cargo install --locked --git https://github.com/plopezlpz/paddock', L('cargo snippet verbatim'));
   await page.keyboard.press('Home');
   check((await sel('tab-tpm')) === 'true', L('Home selects the first tab'));
   await page.keyboard.press('ArrowLeft');
