@@ -62,13 +62,10 @@
     <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-tpm" aria-label="Copy the TPM config">copy</button></div><pre tabindex="0"><code id="code-tpm">set -g @paddock-key 'a'                        <span class="cm"># prefix a opens paddock</span>
 set -g @plugin 'plopezlpz/paddock'
 set -g @plugin 'plopezlpz/agent-status.tmux'   <span class="cm"># agent state</span>
-<span class="cm"># the agent state dot in front of each window name</span>
-setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
-setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "</code></pre></div>
+set -g @agent-icon-in-status on                <span class="cm"># its dot in front of each window name</span></code></pre></div>
     <p class="note step-n"><b>2</b> Press <code>prefix I</code> to install the plugins, then <code>prefix a</code>: it offers to download paddock's binary from the GitHub release (checksum verified). Press <code>prefix a</code> again to open paddock.</p>
-    <p class="note step-n"><b>3</b> Hook up each agent you use, once, then restart it:</p>
-    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-tpm-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-tpm-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
-<span class="cm"># the same for pi, omp, opencode, kilo, kimi or mastracode</span></code></pre></div>
+    <p class="note step-n"><b>3</b> Hook up your agents, once, then restart them. It lists the supported agents it finds and asks first:</p>
+    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-tpm-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-tpm-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install</code></pre></div>
     <p class="note">To update, press <code>prefix U</code>; the key then offers paddock's new version. No Rust needed.</p>
   </div>
   <div class="tabpanel" role="tabpanel" id="panel-brew" aria-labelledby="tab-brew">
@@ -78,14 +75,11 @@ setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "</c
 git clone https://github.com/plopezlpz/agent-status.tmux ~/.tmux/plugins/agent-status.tmux</code></pre></div>
     <p class="note step-n"><b>2</b> Add this to your tmux config, then reload it with <code>tmux source-file ~/.tmux.conf</code>:</p>
     <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-brew-tmux" aria-label="Copy the Homebrew tmux config">copy</button></div><pre tabindex="0"><code id="code-brew-tmux">set -g @paddock-key 'a'                        <span class="cm"># prefix a opens paddock</span>
+set -g @agent-icon-in-status on                <span class="cm"># agent state dot in front of each window name</span>
 run-shell 'paddock init'
-run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'
-<span class="cm"># the agent state dot in front of each window name</span>
-setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
-setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "</code></pre></div>
-    <p class="note step-n"><b>3</b> Hook up each agent you use, once, then restart it:</p>
-    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-brew-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-brew-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
-<span class="cm"># the same for pi, omp, opencode, kilo, kimi or mastracode</span></code></pre></div>
+run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'</code></pre></div>
+    <p class="note step-n"><b>3</b> Hook up your agents, once, then restart them. It lists the supported agents it finds and asks first:</p>
+    <div class="code"><div class="code-head"><span>shell</span><button class="copy" type="button" data-copy="code-brew-hook" aria-label="Copy the agent hook command">copy</button></div><pre tabindex="0"><code id="code-brew-hook">bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install</code></pre></div>
     <p class="note">If tmux says <code>'paddock init' returned 127</code>, its <code>PATH</code> lacks Homebrew's: write out the full path, <code>/opt/homebrew/bin/paddock</code> (Apple silicon), <code>/usr/local/bin/paddock</code> (Intel Mac) or <code>/home/linuxbrew/.linuxbrew/bin/paddock</code> (Linux). To update, <code>brew upgrade</code> and reload tmux.</p>
   </div>
 </div>
@@ -163,7 +157,7 @@ setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "</c
         <h3><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a></h3>
         <p>The agent side of paddock. It hooks into each agent you use and keeps its state on the agent's pane, where the status bar and paddock both read it.</p>
         <ul class="ag-chips" aria-label="Providers"><li>pi</li><li>OMP (Oh My Pi)</li><li>OpenCode</li><li>Kimi Code</li><li>MastraCode</li><li>Kilo Code (partial: no exit event)</li><li>Claude Code</li></ul>
-        <p>The <a href="#install">install steps</a> at the top set it up. Already have your own window status formats? Instead of the two <code>setw</code> lines, put this at the front of yours:</p>
+        <p>The <a href="#install">install steps</a> at the top set it up. <code>@agent-icon-in-status on</code> puts the dot in front of your window status formats (set yours before the plugins load). To place it yourself, leave it off and add this to your formats:</p>
         <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-as-icon" aria-label="Copy the agent icon format">copy</button></div><pre tabindex="0"><code id="code-as-icon">#{?@agent-icon,#{@agent-icon} ,}</code></pre></div>
         <p>It needs tmux 3.8, Bash 3.2 and jq; desktop notifications need alerter, terminal-notifier or notify-send, and suggested titles need pi. Agents without lifecycle hooks, such as Codex, are not supported: their state can't be known without polling the pane.</p>
       </div>

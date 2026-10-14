@@ -146,20 +146,20 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
    set -g @paddock-key 'a'                        # prefix a opens paddock
    set -g @plugin 'plopezlpz/paddock'
    set -g @plugin 'plopezlpz/agent-status.tmux'   # agent state
-   # the agent state dot in front of each window name
-   setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
-   setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
+   set -g @agent-icon-in-status on                # its dot in front of each window name
    ```
 
 2. Press `prefix I` to install the plugins, then `prefix a`: it offers to
    download paddock's binary from the GitHub release (checksum verified). Press
    `prefix a` again to open paddock.
-3. Hook up each agent you use, once, then restart it:
+3. Hook up your agents, once, then restart them:
 
    ```sh
-   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
-   # the same for pi, omp, opencode, kilo, kimi or mastracode
+   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install
    ```
+
+   It lists the supported agents it finds (Claude Code, pi, OpenCode, …) and
+   asks before hooking them up.
 
 To update, press `prefix U`; the key then offers paddock's new version. TPM
 may keep plugins in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
@@ -180,19 +180,19 @@ binary.
 
    ```tmux
    set -g @paddock-key 'a'                        # prefix a opens paddock
+   set -g @agent-icon-in-status on                # agent state dot in front of each window name
    run-shell 'paddock init'
    run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'
-   # the agent state dot in front of each window name
-   setw -g window-status-format         "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
-   setw -g window-status-current-format "#{?@agent-icon,#{@agent-icon} ,}#I:#W "
    ```
 
-3. Hook up each agent you use, once, then restart it:
+3. Hook up your agents, once, then restart them:
 
    ```sh
-   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install claude
-   # the same for pi, omp, opencode, kilo, kimi or mastracode
+   bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install
    ```
+
+   It lists the supported agents it finds (Claude Code, pi, OpenCode, …) and
+   asks before hooking them up.
 
 If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
 out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
@@ -202,8 +202,9 @@ bindings are for another version), and `git -C ~/.tmux/plugins/agent-status.tmux
 
 ### Notes
 
-- Already have your own window status formats? Instead of the two `setw` lines,
-  put `#{?@agent-icon,#{@agent-icon} ,}` at the front of yours.
+- `@agent-icon-in-status on` puts the dot in front of your window status
+  formats (set yours before the plugins load). To place it yourself, leave it
+  off and add `#{?@agent-icon,#{@agent-icon} ,}` to your formats.
 - Desktop notifications need alerter, terminal-notifier or notify-send;
   suggested titles need [pi](https://pi.dev). See
   [agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) for its
