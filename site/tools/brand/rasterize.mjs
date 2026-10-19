@@ -1,6 +1,7 @@
-// Brand rasteriser. Run from anywhere: node tools/brand/rasterize.mjs [--png] [--sheet]
+// Brand rasteriser. Run from anywhere: node tools/brand/rasterize.mjs [--png] [--sheet] [--og]
 //   (no flag = --png)  --png    writes assets/brand/favicon-32.png and apple-touch-icon.png
 //                      --sheet  writes tools/.out/brand-sheet@{1,2}x.png (contact sheet)
+//                      --og     writes assets/brand/og.png (1200x630 link card for X, Slack, etc.)
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +13,8 @@ const out = path.resolve(here, '../.out');
 const read = (f) => fs.readFileSync(path.join(brand, f), 'utf8').trim();
 const args = new Set(process.argv.slice(2));
 const doSheet = args.has('--sheet');
-const doPng = args.has('--png') || !doSheet;
+const doOg = args.has('--og');
+const doPng = args.has('--png') || !(doSheet || doOg);
 
 const PAPER = '#f5f5f0';
 const browser = await chromium.launch();
@@ -68,5 +70,33 @@ if (doSheet) {
     await ctx.close();
   }
   console.log('wrote', path.join(out, 'brand-sheet@{1,2}x.png'));
+}
+if (doOg) {
+  // og.png: lockup and headline on the left, the tour poster (a real paddock frame) bleeding off the right edge.
+  // Rendered on macOS so the serif is Iowan Old Style, like the site's h1.
+  const fonts = path.resolve(brand, '../fonts');
+  const lockup = read('logo.svg').replace('<svg ', '<svg height="40" ');
+  const poster = fs.readFileSync(path.resolve(brand, '../frames/tour-poster.svg'), 'utf8');
+  await shoot(`<style>
+    @font-face { font-family: "JetBrains Mono"; src: url("${pathToFileURL(path.join(fonts, 'jetbrains-mono-latin-400-normal.woff2')).href}"); }
+    html,body{margin:0}
+    body{width:1200px;height:630px;overflow:hidden;position:relative;color:#e4e4e4;--green:#a2a970;
+      background:linear-gradient(rgba(228,228,228,.035) 1px,transparent 1px) 0 0/28px 28px,
+        linear-gradient(90deg,rgba(228,228,228,.035) 1px,transparent 1px) 0 0/28px 28px,#181818}
+    .txt{position:absolute;left:64px;top:72px;width:380px}
+    .txt svg{display:block;color:#e4e4e4}
+    h1{margin:56px 0 0;font:400 50px/1.06 "Iowan Old Style",Palatino,Georgia,serif;letter-spacing:-.028em}
+    h1 span{display:block}
+    p{margin:30px 0 0;font:18px/1.5 "JetBrains Mono",monospace;color:#8b9698}
+    p i{font-style:normal;margin-right:7px}
+    .shot{position:absolute;left:452px;top:104px;width:${Math.round(1140.8 * 0.72)}px;height:${Math.round(650 * 0.72)}px;overflow:hidden;
+      border-radius:12px;border:1px solid #484848;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+    .shot svg{display:block;width:${Math.round(1140.8 * 0.72)}px;height:auto}
+  </style>
+  <div class="txt">${lockup}<h1><span>Stay in tmux.</span> <span>Add a control panel for your agents.</span></h1>
+    <p><i style="color:#cc8c3c">●</i>working &nbsp;<i style="color:#cc4048">●</i>waiting &nbsp;<i style="color:#96a6c8">●</i>finished</p></div>
+  <div class="shot">${poster}</div>`,
+    { w: 1200, h: 630, scheme: 'dark', file: path.join(brand, 'og.png') });
+  console.log('wrote og.png');
 }
 await browser.close();

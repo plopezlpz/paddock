@@ -1,7 +1,8 @@
 # paddock brand: final geometry
 
 Files live in `assets/brand/`.
-Regenerate the PNGs: `node tools/brand/rasterize.mjs --png`. Contact sheet: `node tools/brand/rasterize.mjs --sheet`
+Regenerate the PNGs: `node tools/brand/rasterize.mjs --png`. Link card (`og.png`, 1200x630, for X and Slack previews):
+`node tools/brand/rasterize.mjs --og`; run it on macOS (the headline is Iowan Old Style) and again after re-recording the tour. Contact sheet: `node tools/brand/rasterize.mjs --sheet`
 (writes `tools/.out/brand-sheet@{1,2}x.png`; works from any directory).
 
 ## Colours
