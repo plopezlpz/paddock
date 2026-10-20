@@ -197,6 +197,9 @@ pub struct Rename {
     /// The title or name when renaming began, and whether the user set it
     /// (else it is automatic: the agent's title, or tmux's window name).
     original: String,
+    /// What the field began with (ORIGINAL cut to TITLE_MAX, trimmed):
+    /// saving that changes nothing.
+    unchanged: String,
     renamed: bool,
     /// What an empty field means: the automatic title or name.
     pub placeholder: String,
@@ -218,6 +221,8 @@ pub struct Confirm {
 /// A new window or session being named, on its own row where it will go.
 #[derive(Debug)]
 pub struct Create {
+    /// The row selected when naming began, selected again after.
+    from: Option<Target>,
     pub new: New,
     /// The other one (^s switches): a session for a window, and back.
     other: New,
@@ -238,6 +243,8 @@ pub struct Carry {
 
 #[derive(Debug)]
 pub struct Menu {
+    /// The row it was opened on: its items act on that row only.
+    target: Option<Target>,
     pub items: Vec<Item>,
     pub selected: usize,
     /// The screen cell it hangs from (the click, or the selected row).
@@ -505,9 +512,16 @@ impl App {
             if let Some(i) = self.position(&target).or_else(|| window.and_then(|w| self.position(&w))) {
                 self.selected = i;
             }
-            return;
+        } else {
+            self.rebuild(false);
         }
-        self.rebuild(false);
+        // The menu's row went away: its items would act on the next one.
+        if let Mode::Menu(m) = &self.mode
+            && m.target.as_ref() != self.selected_target()
+        {
+            self.mode = Mode::List;
+            self.status = Some(Status::Failed("that row has gone".into()));
+        }
     }
 
     /// The session, window or pane with tmux id ID, as a target (a window
@@ -766,10 +780,12 @@ impl App {
         };
         // Listed while it is renamed, whatever its row's text turns into.
         self.keep = Some(target.clone());
+        let field = LineEdit::new(&text, Some(TITLE_MAX));
         self.mode = Mode::Rename(Rename {
             target,
             what,
-            field: LineEdit::new(&text, Some(TITLE_MAX)),
+            unchanged: field.text().trim().to_string(),
+            field,
             original: text,
             renamed,
             placeholder,
@@ -815,7 +831,7 @@ impl App {
     fn finish_rename(&mut self, save: bool) -> Action {
         let Mode::Rename(r) = &mut self.mode else { return Action::None };
         let text = r.field.text().trim().to_string();
-        if !save || text == r.original || (text.is_empty() && !r.renamed) {
+        if !save || text == r.unchanged || (text.is_empty() && !r.renamed) {
             self.mode = Mode::List;
             return Action::None;
         }
@@ -1176,7 +1192,8 @@ impl App {
         let (window, session_new) = (New::Window { session: sid, after, dir: dir.clone() }, New::Session { dir });
         let (new, other) = if session { (session_new, window) } else { (window, session_new) };
         self.set_tab(Tab::Sessions);
-        self.mode = Mode::Create(Create { new, other, field: LineEdit::new("", Some(TITLE_MAX)), error: None });
+        let from = self.selected_target().cloned();
+        self.mode = Mode::Create(Create { from, new, other, field: LineEdit::new("", Some(TITLE_MAX)), error: None });
         self.rebuild(false);
     }
 
@@ -1193,13 +1210,9 @@ impl App {
     /// would refuse its name (the row says why); or cancel.
     fn finish_create(&mut self, save: bool) -> Action {
         let Mode::Create(c) = &mut self.mode else { return Action::None };
-        if !save {
-            self.mode = Mode::List;
-            self.rebuild(false);
-            return Action::None;
-        }
         let name = c.field.text().trim().to_string();
         let refuse = match &c.new {
+            _ if !save => None,
             New::Session { .. } if name.is_empty() => Some("a session needs a name".to_string()),
             New::Session { .. } if name.contains(['.', ':']) => Some("session names can't have . or :".to_string()),
             New::Session { .. } if self.snap.sessions.iter().any(|s| s.name == name) => Some(format!("a session called {name} exists")),
@@ -1210,7 +1223,15 @@ impl App {
             return Action::None;
         }
         let Mode::Create(c) = std::mem::replace(&mut self.mode, Mode::List) else { return Action::None };
+        // The new row goes: back to the row naming began on, not the one
+        // that takes the new row's place.
         self.rebuild(false);
+        if let Some(i) = c.from.as_ref().and_then(|t| self.position(t)) {
+            self.selected = i;
+        }
+        if !save {
+            return Action::None;
+        }
         let mut job = match c.new {
             New::Session { dir } => Job::new(Op::NewSession { name: name.clone(), dir }, format!("created session {name}")),
             New::Window { session, after, dir } => Job::new(Op::NewWindow { session, after, name, dir }, "created a window"),
@@ -1233,7 +1254,7 @@ impl App {
     fn open_menu(&mut self, anchor: Position, preview_fits: bool) {
         let items = self.menu_items(preview_fits);
         if !items.is_empty() {
-            self.mode = Mode::Menu(Menu { items, selected: 0, anchor });
+            self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), items, selected: 0, anchor });
         }
     }
 
@@ -2156,6 +2177,22 @@ mod tests {
     }
 
     #[test]
+    fn a_long_or_padded_name_left_as_it_was_is_not_saved() {
+        let long = "a".repeat(TITLE_MAX + 20);
+        let snap = fixture(&[&format!("$1| sp |@1|1|{long}|1|0|%1|0|1|claude||working|0|claude||{long}|||/a")]);
+        let mut app = new(snap, Tab::Sessions, "@1");
+        for target in [Target::Session { session: "$1".into() }, window("$1", "@1"), pane("$1", "@1", "%1")] {
+            if matches!(target, Target::Pane { .. }) {
+                app.set_tab(Tab::Agents);
+            }
+            select(&mut app, target.clone());
+            ctrl(&mut app, 'r');
+            assert!(renaming(&app).is_some(), "{target:?}");
+            assert!(matches!(enter(&mut app), Action::None), "{target:?}: cut to {TITLE_MAX} or trimmed, not changed");
+        }
+    }
+
+    #[test]
     fn a_renamed_card_stays_listed_under_the_filter() {
         let mut app = agents_app();
         type_(&mut app, "three");
@@ -2312,6 +2349,21 @@ mod tests {
         draw(&app, &mut view, 120, 30);
         mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), (110, 25), Instant::now());
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn a_menu_closes_when_its_row_goes() {
+        let mut app = sessions_app("@1");
+        select(&mut app, window("$1", "@2"));
+        app.run(Command::Menu);
+        let without_logs = || fixture(&["$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a", "$2|play|@3|1|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c"]);
+        app.set_snapshot(without_logs());
+        assert!(matches!(app.mode, Mode::List), "its move down would swap another window");
+        assert!(matches!(&app.status, Some(Status::Failed(_))));
+        // A refresh that keeps the row keeps the menu.
+        app.run(Command::Menu);
+        app.set_snapshot(without_logs());
+        assert!(matches!(app.mode, Mode::Menu(_)));
     }
 
     #[test]
@@ -2714,10 +2766,13 @@ mod tests {
         select(&mut app, Target::Session { session: "$1".into() });
         ctrl(&mut app, 's');
         assert_eq!(job(enter(&mut app)).op, Op::NewWindow { session: "$1".into(), after: "@2".into(), name: String::new(), dir: "/h/a".into() });
-        // Esc: nothing made.
+        // Esc: nothing made, and the window naming began on stays selected
+        // (not "logs", which takes the new row's place).
+        select(&mut app, window("$1", "@1"));
         ctrl(&mut app, 's');
         assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::None));
         assert!(matches!(app.mode, Mode::List) && app.position(&Target::New(0)).is_none());
+        assert_eq!(app.selected_target(), Some(&window("$1", "@1")));
     }
 
     #[test]

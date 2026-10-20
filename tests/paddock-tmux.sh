@@ -289,6 +289,17 @@ if [ -x "$PB" ]; then
   check "real paddock: then with the tool's title" wait_screen "from the tool"
   t set -pu -t main @agent-state \; set -pu -t main @agent-auto-description
   check "real paddock: and goes when it ends" wait_gone "from the tool"
+  # Two ⇧↓ in one read walk the window down two places: the second waits
+  # for the snapshot after the first, which would otherwise swap it back.
+  t new-window -d -t main: -n w2 'sleep 600' \; new-window -d -t main: -n w3 'sleep 600'
+  tmux -L "$OUT" send-keys Tab
+  check "real paddock: back on the sessions tab" wait_screen "w3"
+  first=$(t display -p -t main:0 '#{window_id}')
+  tmux -L "$OUT" send-keys S-Down S-Down
+  third() { [ "$(t display -p -t main:2 '#{window_id}')" = "$first" ]; }
+  wait_third() { for _ in $(seq 30); do third && return 0; sleep 0.1; done; return 1; }
+  check "real paddock: ⇧↓ ⇧↓ moves a window down twice" wait_third
+  t kill-window -t main:w2 \; kill-window -t main:w3
   tmux -L "$OUT" send-keys Escape
   check "real paddock: closed, its session is gone" wait_gone "agents"
   check "real paddock: and so is its session" test -z "$(t list-sessions -F '#{session_name}' | grep _paddock)"

@@ -328,7 +328,9 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
         let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
         let folder = p.path.rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or(&p.path);
         let kind = p.label();
-        let score = filter.score(&format!("{} {} {} {} {}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" }));
+        // The state as shown, and asking as tools and notifications say it.
+        let asking = if a.state == State::Asking { " asking" } else { "" };
+        let score = filter.score(&format!("{} {} {} {} {}{asking}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" }));
         if score.is_none() && keep != Some(&target) {
             continue;
         }
@@ -454,6 +456,13 @@ mod tests {
         let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0);
         assert_eq!(names(&rows), ["waiting (1)", "  deploy", "working (1)", "  fix parser"]);
         assert_eq!(snap().counts, [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn a_waiting_agent_is_found_by_the_tools_word_too() {
+        for q in ["waiting", "asking"] {
+            assert!(names(&agents(&snap(), &mut filter(q), Group::Flat, None, "/h", 0)).contains(&"  deploy".to_string()), "{q}");
+        }
     }
 
     #[test]

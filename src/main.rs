@@ -537,6 +537,11 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                                 // followed then).
                                 stale = true;
                                 shown.clear();
+                                // Events still queued (a held ⇧↓) wait for that
+                                // snapshot: from this one, a second swap would
+                                // undo the first.
+                                dirty = true;
+                                break;
                             }
                             Action::Suggest { pane, id } => match suggest(&suggest_command, &pane, id, answers.clone()) {
                                 Ok(s) => suggestion = Some(s),
