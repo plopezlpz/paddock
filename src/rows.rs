@@ -167,7 +167,7 @@ pub struct Tree<'a> {
     /// Listed whatever the filter says: the row just renamed or moved, so it
     /// doesn't vanish under the user's eyes.
     pub keep: Option<&'a Target>,
-    /// The session paddock was opened from.
+    /// The session the client shows (it follows a refuge move).
     pub current: &'a str,
     pub home: &'a str,
 }
