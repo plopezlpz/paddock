@@ -112,9 +112,30 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
 
 /// The error (without main's "paddock: " prefix) if the key bindings that
 /// started us, from plugin version PLUGIN, are not for OURS: the popup's
-/// flags and env are a contract between the two.
+/// flags and env are a contract between the two. The fix depends on which
+/// side is older; each line fits a popup on an 80-column terminal.
 fn version_mismatch(plugin: Option<&str>, ours: &str) -> Option<String> {
-    plugin.filter(|p| *p != ours).map(|p| format!("these key bindings are for paddock {p} but this is paddock {ours} -- reload tmux (or update the plugin)"))
+    // Numerically, part by part: "0.10.0" is newer than "0.9.0".
+    let parts = |v: &str| v.split('.').map(str::parse::<u64>).collect::<Result<Vec<_>, _>>().ok();
+    plugin.filter(|p| *p != ours).map(|p| {
+        let fix = match (parts(p), parts(ours)) {
+            (Some(a), Some(b)) if a < b => "reload tmux to rebind the keys".to_string(),
+            (Some(a), Some(b)) if a > b => format!("install paddock {p} (or point PADDOCK_BIN at it)"),
+            _ => format!("reload tmux, or install paddock {p}"),
+        };
+        format!("key bindings for paddock {p}, but this is {ours}\n{fix}")
+    })
+}
+
+/// The command ARGS ask for, run from key bindings for PLUGIN. Bindings from
+/// another version are refused before the arguments are checked: newer ones
+/// may pass flags this binary does not know, and the version is what to fix.
+fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
+    let cmd = parse(args);
+    if matches!(cmd, Ok(Cmd::Init | Cmd::Version | Cmd::Help)) {
+        return cmd;
+    }
+    version_mismatch(plugin, ours).map_or(cmd, Err)
 }
 
 /// The path the key bindings should use for this binary, one that survives an
@@ -170,11 +191,9 @@ fn init() -> Result<(), String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = parse(&args).and_then(|cmd| match cmd {
-        Cmd::Run(tab) => match version_mismatch(env::var("PADDOCK_PLUGIN_VERSION").ok().as_deref(), env!("CARGO_PKG_VERSION")) {
-            Some(e) => Err(e),
-            None => run(tab),
-        },
+    let plugin = env::var("PADDOCK_PLUGIN_VERSION").ok();
+    let result = command(&args, plugin.as_deref(), env!("CARGO_PKG_VERSION")).and_then(|cmd| match cmd {
+        Cmd::Run(tab) => run(tab),
         Cmd::Init => init(),
         Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));
@@ -727,8 +746,35 @@ mod tests {
     fn handshake_refuses_other_versions() {
         assert_eq!(version_mismatch(None, "0.1.0"), None);
         assert_eq!(version_mismatch(Some("0.1.0"), "0.1.0"), None);
-        let e = version_mismatch(Some("0.2.0"), "0.1.0").unwrap();
-        assert_eq!(e, "these key bindings are for paddock 0.2.0 but this is paddock 0.1.0 -- reload tmux (or update the plugin)");
+        // Stale bindings, an upgraded binary: a reload rebinds them.
+        let e = version_mismatch(Some("0.9.0"), "0.10.0").unwrap();
+        assert_eq!(e, "key bindings for paddock 0.9.0, but this is 0.10.0\nreload tmux to rebind the keys");
+        // An old binary (PADDOCK_BIN, or not rebuilt): reloading does nothing.
+        let e = version_mismatch(Some("0.3.0"), "0.2.0").unwrap();
+        assert_eq!(e, "key bindings for paddock 0.3.0, but this is 0.2.0\ninstall paddock 0.3.0 (or point PADDOCK_BIN at it)");
+        let e = version_mismatch(Some("0.3.0-rc1"), "0.3.0").unwrap();
+        assert!(e.ends_with("\nreload tmux, or install paddock 0.3.0-rc1"), "{e}");
+        // A popup 80% of 80 columns wide shows each line unwrapped.
+        for (p, o) in [("10.10.10", "10.10.9"), ("10.10.9", "10.10.10")] {
+            for line in version_mismatch(Some(p), o).unwrap().lines() {
+                assert!("paddock: ".len() + line.len() <= 64, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn version_is_checked_before_arguments() {
+        let mismatch = version_mismatch(Some("0.9.0"), "0.8.0");
+        // A flag from newer bindings: the version is the error, not usage.
+        assert_eq!(command(&["--tab", "future"], Some("0.9.0"), "0.8.0").err(), mismatch);
+        assert_eq!(command(&["--tab", "agents"], Some("0.9.0"), "0.8.0").err(), mismatch);
+        assert_eq!(command(&["--tab", "future"], Some("0.8.0"), "0.8.0").err().as_deref(), Some(USAGE));
+        assert!(matches!(command(&["--tab", "last"], Some("0.8.0"), "0.8.0"), Ok(Cmd::Run(None))));
+        assert!(matches!(command(&["--tab", "last"], None, "0.8.0"), Ok(Cmd::Run(None))));
+        // These never need bindings, so any environment runs them.
+        assert!(matches!(command(&["--version"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Version)));
+        assert!(matches!(command(&["--help"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Help)));
+        assert!(matches!(command(&["init"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Init)));
     }
 
     #[test]
