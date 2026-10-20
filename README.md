@@ -295,7 +295,7 @@ Any tool can feed paddock by setting these options on the agent's pane
 |---|---|
 | `@agent-state` | `working`, `asking` or `idle` |
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
-| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also marks an agent whose pane is back at a shell, killed without its exit hook |
+| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also shows a `?` while a shell is the pane's foreground command, as after an agent killed without its exit hook, so a wrapper script or launch command should `exec` the agent (not `agent; exec $SHELL`) |
 | `@agent-kind` | the agent's name, e.g. `claude` |
 | `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |

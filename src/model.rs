@@ -49,8 +49,10 @@ pub struct Agent {
     /// Whether the user set the title (@agent-description).
     pub renamed: bool,
     pub since: Option<u64>,
-    /// Unconfirmed: the tool says so (@agent-stale), or the pane is back at
-    /// a shell, so the agent went without its exit hook (killed, crashed).
+    /// Unconfirmed: the tool says so (@agent-stale), or a shell is the
+    /// pane's foreground command, as after the agent went without its exit
+    /// hook (killed, crashed). That also holds while a shell runs the agent
+    /// without exec (`agent; exec $SHELL`, a wrapper script).
     pub stale: bool,
 }
 
