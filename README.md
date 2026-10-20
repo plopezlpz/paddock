@@ -297,7 +297,7 @@ you get the status bar dots, the desktop notifications and paddock's agents
 tab. Without it, paddock is a session switcher with a live preview.
 
 agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code,
-Claude Code, Codex and Gemini CLI; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+Claude Code, Codex, Gemini CLI and Qwen Code; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
 Gemini CLI runs hooks only in folders you trust.
 Codex runs a hook only once you have trusted it: when it says "Hooks need
 review", choose "Review hooks" (or run `/hooks`) and trust the `hook-event.sh`
