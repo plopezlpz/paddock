@@ -432,28 +432,14 @@ fn next_minute() -> Instant {
     Instant::now() + Duration::from_secs(60 - now.as_secs() % 60)
 }
 
-/// Attach and subscribe. Another popup closing can destroy the shared
-/// session between our creating and attaching to it, so that is tried
-/// twice; a failed attempt's events never reach the loop.
+/// Attach and subscribe.
 fn connect(tx: &Sender<Ev>) -> Result<Control, String> {
-    let mut failure = String::new();
-    for _ in 0..2 {
-        let live = Arc::new(AtomicBool::new(true));
-        let (forward, events) = (Arc::clone(&live), tx.clone());
-        let mut tmux = Control::connect(move |m| {
-            if forward.load(Ordering::SeqCst) {
-                let _ = events.send(Ev::Tmux(m));
-            }
-        })?;
-        match tmux.cmd(&subscription()) {
-            Ok(_) => return Ok(tmux),
-            Err(e) => {
-                live.store(false, Ordering::SeqCst);
-                failure = e;
-            }
-        }
-    }
-    Err(format!("cannot attach to tmux session {SESSION}: {failure}"))
+    let events = tx.clone();
+    let mut tmux = Control::connect(move |m| {
+        let _ = events.send(Ev::Tmux(m));
+    })?;
+    tmux.cmd(&subscription()).map_err(|e| format!("cannot attach to tmux session {SESSION}: {e}"))?;
+    Ok(tmux)
 }
 
 /// Global option holding the tab paddock was last closed on.

@@ -37,10 +37,11 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 /// there names no client, and the newest one until the next key press.
 pub const SESSION: &str = "_paddock";
 
-/// Hooks attaching or detaching fires, emptied on SESSION so the user's
-/// global ones do not run for paddock (client-created fires before the
-/// client has a session, so only the global one applies).
-const HOOKS: &[&str] = &["client-attached", "client-session-changed", "client-resized", "client-active", "client-detached", "client-closed"];
+/// Hooks attaching or detaching fires (the attach also focuses SESSION's
+/// pane), emptied on SESSION so the user's global ones do not run for
+/// paddock (client-created fires before the client has a session, so only
+/// the global one applies).
+const HOOKS: &[&str] = &["client-attached", "client-session-changed", "client-resized", "client-active", "client-detached", "client-closed", "pane-focus-in"];
 
 /// `tmux` invocation for the server the popup runs on. Inside tmux the TMUX
 /// variable names the socket; it is dropped so `attach` is not refused as
@@ -62,16 +63,16 @@ impl Control {
     pub fn connect(events: impl Fn(Msg) + Send + 'static) -> Result<Control, String> {
         // Exact: a bare name is also tried as a prefix and as a window.
         let target = format!("={SESSION}:");
-        // Create SESSION unless it exists (another popup is open).
-        let _ = tmux_command()
-            .args(["new-session", "-d", "-s", SESSION, "-n", "paddock", "cat"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
         let mut cmd = tmux_command();
         // -u: UTF-8 output whatever the popup's locale says.
         cmd.args(["-u", "-C"]);
+        // Create SESSION unless it exists (another popup is open), in the
+        // same command list as the attach: tmux runs a list in one go, so
+        // another popup closing cannot destroy SESSION in between. if-shell
+        // runs the create next, before the overrides.
+        let exists = format!("#{{S:#{{?#{{==:#{{session_name}},{SESSION}}},1,}}}}");
+        let create = format!("new-session -d -s {SESSION} -n paddock cat");
+        cmd.args(["if-shell", "-F", &exists, "", &create, ";"]);
         // Every time, before attaching: a session from an older paddock or
         // restored by tmux-resurrect has no overrides.
         for hook in HOOKS {
