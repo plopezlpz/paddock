@@ -80,6 +80,8 @@ pub struct Session {
 
 pub struct Snapshot {
     pub sessions: Vec<Session>,
+    /// Agents per state, indexed by `State as usize`.
+    pub counts: [usize; State::ALL.len()],
 }
 
 /// A session, window or pane, by tmux ids (`$1`, `@2`, `%3`); or the
@@ -204,7 +206,12 @@ pub fn parse(text: &str, host: &str) -> Snapshot {
             agent,
         });
     }
-    Snapshot { sessions }
+    let mut snap = Snapshot { sessions, counts: [0; State::ALL.len()] };
+    snap.counts = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).fold(snap.counts, |mut counts, a| {
+        counts[a.state as usize] += 1;
+        counts
+    });
+    snap
 }
 
 impl Pane {
@@ -244,16 +251,16 @@ impl Snapshot {
 
     /// Pane ID with its (first) session and window.
     pub fn pane(&self, id: &str) -> Option<(&Session, &Window, &Pane)> {
-        self.unique_panes().find(|(_, _, p)| p.id == id)
+        self.sessions.iter().flat_map(|s| s.windows.iter().map(move |w| (s, w))).find_map(|(s, w)| Some((s, w, w.panes.iter().find(|p| p.id == id)?)))
     }
 
-    /// Agents per state, indexed by `State as usize`.
-    pub fn counts(&self) -> [usize; State::ALL.len()] {
-        let mut counts = [0; State::ALL.len()];
-        for a in self.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()) {
-            counts[a.state as usize] += 1;
-        }
-        counts
+    /// The agent in pane ID.
+    pub fn agent(&self, id: &str) -> Option<&Agent> {
+        self.pane(id)?.2.agent.as_ref()
+    }
+
+    pub fn session(&self, id: &str) -> Option<&Session> {
+        self.sessions.iter().find(|s| s.id == id)
     }
 }
 

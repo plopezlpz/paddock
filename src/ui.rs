@@ -86,7 +86,7 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         title.push(Span::raw("  "));
         x += name.len() as u16 + 2;
     }
-    let counts = app.snap.counts();
+    let counts = app.snap.counts;
     let mut groups: Vec<[Span; 3]> = State::ALL
         .into_iter()
         .rev()

@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(names(&rows), ["~/a/src (1)", "  fix parser", "~/b/src (1)", "  deploy"]);
         let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0);
         assert_eq!(names(&rows), ["waiting (1)", "  deploy", "working (1)", "  fix parser"]);
-        assert_eq!(snap().counts(), [0, 0, 1, 1]);
+        assert_eq!(snap().counts, [0, 0, 1, 1]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, Mo
 use ratatui::layout::{Position, Rect};
 
 use crate::edit::{Edited, LineEdit};
-use crate::model::{Snapshot, Target};
+use crate::model::{Pane, Session, Snapshot, Target, Window};
 use crate::rows::{self, Filter, Group, New, Row, RowKind, Tree};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -272,9 +272,21 @@ fn id_of(t: &Target) -> &str {
 }
 
 /// "codex waiting, claude working" for the agents among PANES.
-fn agents_in<'a>(panes: impl Iterator<Item = &'a crate::model::Pane>) -> String {
+fn agents_in<'a>(panes: impl Iterator<Item = &'a Pane>) -> String {
     let agents: Vec<String> = panes.filter_map(|p| p.agent.as_ref().map(|a| format!("{} {}", p.label(), a.state.label()))).collect();
     agents.join(", ")
+}
+
+/// The move that puts window WI of SESSION back where it is now, from
+/// session FROM, where it is going.
+fn window_return(session: &Session, wi: usize, from: &str) -> Option<Op> {
+    let ws = &session.windows;
+    let back = |to: &str, before| Op::MoveWindow { from: from.into(), window: ws[wi].id.clone(), into: session.id.clone(), to: to.into(), before };
+    match (wi.checked_sub(1).map(|i| &ws[i]), ws.get(wi + 1)) {
+        (Some(prev), _) => Some(back(&prev.id, false)),
+        (None, Some(next)) => Some(back(&next.id, true)),
+        _ => None,
+    }
 }
 
 /// What a mouse press landed on; the release completes it there.
@@ -463,7 +475,7 @@ impl App {
         // What is being renamed went away: there is nothing left to name.
         if let Mode::Rename(r) = &self.mode {
             let gone = match &r.what {
-                Renaming::Agent { pane } => self.snap.pane(pane).and_then(|(_, _, p)| p.agent.as_ref()).is_none().then_some("that agent has exited"),
+                Renaming::Agent { pane } => self.snap.agent(pane).is_none().then_some("that agent has exited"),
                 Renaming::Session { session } => self.find(session).is_none().then_some("that session has closed"),
                 Renaming::Window { window } => self.find(window).is_none().then_some("that window has closed"),
             };
@@ -520,7 +532,7 @@ impl App {
     /// The client was moved to SESSION (out of one an op closes): it is the
     /// current session now, at its active window.
     pub fn moved(&mut self, session: &str) {
-        if let Some(w) = self.snap.sessions.iter().find(|s| s.id == session).and_then(|s| s.active_window()) {
+        if let Some(w) = self.snap.session(session).and_then(|s| s.active_window()) {
             self.current_window = w.id.clone();
         }
         self.current_session = session.to_string();
@@ -729,7 +741,7 @@ impl App {
     fn selected_agent(&self) -> Option<(Target, String)> {
         let target = self.selected_target()?;
         let Target::Pane { pane, .. } = target else { return None };
-        self.snap.pane(pane)?.2.agent.as_ref()?;
+        self.snap.agent(pane)?;
         Some((target.clone(), pane.clone()))
     }
 
@@ -739,17 +751,15 @@ impl App {
         let Some(target) = self.selected_target().cloned() else { return };
         let (what, text, renamed, placeholder) = match &target {
             Target::Pane { pane, .. } => {
-                let Some(agent) = self.snap.pane(pane).and_then(|(_, _, p)| p.agent.as_ref()) else { return };
+                let Some(agent) = self.snap.agent(pane) else { return };
                 (Renaming::Agent { pane: pane.clone() }, agent.title.clone(), agent.renamed, agent.auto.clone())
             }
             Target::Session { session } => {
-                let Some(s) = self.snap.sessions.iter().find(|s| &s.id == session) else { return };
+                let Some(s) = self.snap.session(session) else { return };
                 (Renaming::Session { session: s.id.clone() }, s.name.clone(), true, String::new())
             }
             Target::Window { session, window } => {
-                let Some(w) = self.snap.sessions.iter().find(|s| &s.id == session).and_then(|s| s.windows.iter().find(|w| &w.id == window)) else {
-                    return;
-                };
+                let Some((_, _, _, w)) = self.window_at(session, window) else { return };
                 (Renaming::Window { window: w.id.clone() }, w.name.clone(), !w.auto, "named after what runs".to_string())
             }
             Target::New(_) => return,
@@ -869,7 +879,7 @@ impl App {
     fn undo(&mut self) -> Action {
         match self.undo.pop() {
             // A title for an agent that has exited would go to the pane's next one.
-            Some((Op::SetTitle { pane, .. }, _)) if self.snap.pane(&pane).and_then(|(_, _, p)| p.agent.as_ref()).is_none() => {
+            Some((Op::SetTitle { pane, .. }, _)) if self.snap.agent(&pane).is_none() => {
                 self.note("that agent has exited");
                 Action::None
             }
@@ -893,11 +903,12 @@ impl App {
         self.status = Some(Status::Note(text.into()));
     }
 
-    /// Where a window is: its session's index, its own index (first copy).
-    fn window_at(&self, session: &str, window: &str) -> Option<(usize, usize)> {
-        let si = self.snap.sessions.iter().position(|s| s.id == session)?;
-        let wi = self.snap.sessions[si].windows.iter().position(|w| w.id == window)?;
-        Some((si, wi))
+    /// Where a window is: its session and the session's index, the window
+    /// (first copy) and its index there.
+    fn window_at(&self, session: &str, window: &str) -> Option<(usize, &Session, usize, &Window)> {
+        let (si, s) = self.snap.sessions.iter().enumerate().find(|(_, s)| s.id == session)?;
+        let (wi, w) = s.windows.iter().enumerate().find(|(_, w)| w.id == window)?;
+        Some((si, s, wi, w))
     }
 
     /// TARGET in words, and what it holds: ("window webshop:2 web",
@@ -906,13 +917,12 @@ impl App {
         let with = |count: String, agents: String| if agents.is_empty() { count } else { format!("{count} · {agents}") };
         let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
         match target {
-            Target::Session { session } => match self.snap.sessions.iter().find(|s| &s.id == session) {
+            Target::Session { session } => match self.snap.session(session) {
                 Some(s) => (format!("session {}", s.name), with(plural(s.windows.len(), "window"), agents_in(s.windows.iter().flat_map(|w| &w.panes)))),
                 None => ("session".into(), String::new()),
             },
             Target::Window { session, window } => match self.window_at(session, window) {
-                Some((si, wi)) => {
-                    let (s, w) = (&self.snap.sessions[si], &self.snap.sessions[si].windows[wi]);
+                Some((_, s, _, w)) => {
                     (format!("window {}:{} {}", s.name, w.index, w.name), with(plural(w.panes.len(), "pane"), agents_in(w.panes.iter())))
                 }
                 None => ("window".into(), String::new()),
@@ -974,9 +984,9 @@ impl App {
     }
 
     fn shift_window(&self, session: &str, window: &str, down: bool) -> Result<(Job, Option<String>), String> {
-        let (si, wi) = self.window_at(session, window).ok_or("that window has closed")?;
+        let (si, s, wi, _) = self.window_at(session, window).ok_or("that window has closed")?;
         let sessions = &self.snap.sessions;
-        let ws = &sessions[si].windows;
+        let ws = &s.windows;
         let neighbour = if down { ws.get(wi + 1) } else { wi.checked_sub(1).map(|i| &ws[i]) };
         if let Some(n) = neighbour.filter(|n| n.id != window) {
             let op = Op::SwapWindows { session: session.into(), a: window.into(), b: n.id.clone() };
@@ -986,30 +996,17 @@ impl App {
         let other = other.ok_or(if down { "already the last window" } else { "already the first window" })?;
         let to = if down { other.windows.first() } else { other.windows.last() }.ok_or("that session has no windows")?;
         let op = Op::MoveWindow { from: session.into(), window: window.into(), into: other.id.clone(), to: to.id.clone(), before: down };
-        let job = Job::new(op, format!("moved to {}", other.name)).undo(self.window_return(si, wi, &other.id)).follow(window);
-        let closes = (ws.len() == 1).then(|| format!("move window {} to {}? {} closes: it is its only window", ws[wi].name, other.name, sessions[si].name));
+        let job = Job::new(op, format!("moved to {}", other.name)).undo(window_return(s, wi, &other.id)).follow(window);
+        let closes = (ws.len() == 1).then(|| format!("move window {} to {}? {} closes: it is its only window", ws[wi].name, other.name, s.name));
         Ok((job, closes))
-    }
-
-    /// The move that puts window WI of session SI back where it is now,
-    /// from session FROM, where it is going.
-    fn window_return(&self, si: usize, wi: usize, from: &str) -> Option<Op> {
-        let session = &self.snap.sessions[si];
-        let ws = &session.windows;
-        let back = |to: &str, before| Op::MoveWindow { from: from.into(), window: ws[wi].id.clone(), into: session.id.clone(), to: to.into(), before };
-        match (wi.checked_sub(1).map(|i| &ws[i]), ws.get(wi + 1)) {
-            (Some(prev), _) => Some(back(&prev.id, false)),
-            (None, Some(next)) => Some(back(&next.id, true)),
-            _ => None,
-        }
     }
 
     /// The move that puts PANE back beside its neighbours in its window.
     fn pane_return(&self, session: &str, window: &str, pane: &str) -> Option<Op> {
-        let (si, wi) = self.window_at(session, window)?;
-        let ps = &self.snap.sessions[si].windows[wi].panes;
+        let (_, _, _, w) = self.window_at(session, window)?;
+        let ps = &w.panes;
         let pi = ps.iter().position(|p| p.id == pane)?;
-        let to = |p: &crate::model::Pane, before| Op::JoinPane { pane: pane.into(), to: p.id.clone(), before };
+        let to = |p: &Pane, before| Op::JoinPane { pane: pane.into(), to: p.id.clone(), before };
         match (pi.checked_sub(1).map(|i| &ps[i]), ps.get(pi + 1)) {
             (Some(prev), _) => Some(to(prev, false)),
             (None, Some(next)) => Some(to(next, true)),
@@ -1018,8 +1015,8 @@ impl App {
     }
 
     fn shift_pane(&self, session: &str, window: &str, pane: &str, down: bool) -> Result<(Job, Option<String>), String> {
-        let (si, wi) = self.window_at(session, window).ok_or("that pane has closed")?;
-        let ps = &self.snap.sessions[si].windows[wi].panes;
+        let (_, _, _, w) = self.window_at(session, window).ok_or("that pane has closed")?;
+        let ps = &w.panes;
         let pi = ps.iter().position(|p| p.id == pane).ok_or("that pane has closed")?;
         if ps.len() == 1 {
             return Err("it is its window's only pane: move the window".into());
@@ -1030,7 +1027,7 @@ impl App {
             return Ok((Job::new(op.clone(), if down { "moved down" } else { "moved up" }).undo(Some(op)).follow(pane), None));
         }
         // Into the next (previous) window, in tree order across sessions.
-        let windows: Vec<(&crate::model::Session, &crate::model::Window)> = self.snap.sessions.iter().flat_map(|s| s.windows.iter().map(move |w| (s, w))).collect();
+        let windows: Vec<(&Session, &Window)> = self.snap.sessions.iter().flat_map(|s| s.windows.iter().map(move |w| (s, w))).collect();
         let here = windows.iter().position(|(s, w)| s.id == session && w.id == window).ok_or("that pane has closed")?;
         let other = if down { windows.get(here + 1) } else { here.checked_sub(1).map(|i| &windows[i]) };
         let (s, w) = other.ok_or(if down { "already the last pane" } else { "already the first pane" })?;
@@ -1062,18 +1059,17 @@ impl App {
         match (&carry.target, at) {
             (_, Target::New(_)) => Err("drop it on a session, window or pane".into()),
             (Target::Window { session, window }, at) => {
-                let (si, wi) = self.window_at(session, window).ok_or("that window has closed")?;
-                let ws = &self.snap.sessions[si].windows;
+                let (_, s, wi, _) = self.window_at(session, window).ok_or("that window has closed")?;
+                let ws = &s.windows;
                 let (into, to, before, done) = match at {
                     Target::Session { session: other } => {
-                        let s = self.snap.sessions.iter().find(|s| &s.id == other).ok_or("that session has closed")?;
-                        let first = s.windows.first().ok_or("that session has no windows")?;
-                        (other.clone(), first.id.clone(), true, format!("moved to the top of {}", s.name))
+                        let o = self.snap.session(other).ok_or("that session has closed")?;
+                        let first = o.windows.first().ok_or("that session has no windows")?;
+                        (other.clone(), first.id.clone(), true, format!("moved to the top of {}", o.name))
                     }
                     Target::Window { session: other, window: to } | Target::Pane { session: other, window: to, .. } => {
-                        let (osi, owi) = self.window_at(other, to).ok_or("that window has closed")?;
-                        let (s, w) = (&self.snap.sessions[osi], &self.snap.sessions[osi].windows[owi]);
-                        (other.clone(), to.clone(), false, format!("moved after {}:{} {}", s.name, w.index, w.name))
+                        let (_, o, _, w) = self.window_at(other, to).ok_or("that window has closed")?;
+                        (other.clone(), to.clone(), false, format!("moved after {}:{} {}", o.name, w.index, w.name))
                     }
                     Target::New(_) => unreachable!(),
                 };
@@ -1082,25 +1078,24 @@ impl App {
                     return Ok(None);
                 }
                 let leaving = into != *session;
-                let undo = self.window_return(si, wi, &into);
+                let undo = window_return(s, wi, &into);
                 let op = Op::MoveWindow { from: session.clone(), window: window.clone(), into, to, before };
                 let job = Job::new(op, done).undo(undo).follow(window);
-                let closes = (ws.len() == 1 && leaving).then(|| format!("move {}? {} closes: it is its only window", carry.label, self.snap.sessions[si].name));
+                let closes = (ws.len() == 1 && leaving).then(|| format!("move {}? {} closes: it is its only window", carry.label, s.name));
                 Ok(Some((job, closes)))
             }
             (Target::Pane { session, window, pane }, at) => {
                 let undo = self.pane_return(session, window, pane);
                 let (op, done) = match at {
                     Target::Session { session: other } => {
-                        let name = self.snap.sessions.iter().find(|s| &s.id == other).map(|s| s.name.clone()).unwrap_or_default();
+                        let name = self.snap.session(other).map(|s| s.name.clone()).unwrap_or_default();
                         (Op::BreakPane { pane: pane.clone(), session: other.clone() }, format!("a window of its own in {name}"))
                     }
                     Target::Window { session: other, window: to } => {
                         if to == window {
                             return Ok(None);
                         }
-                        let (osi, owi) = self.window_at(other, to).ok_or("that window has closed")?;
-                        let w = &self.snap.sessions[osi].windows[owi];
+                        let (_, _, _, w) = self.window_at(other, to).ok_or("that window has closed")?;
                         let last = w.panes.last().ok_or("that window has no panes")?;
                         (Op::JoinPane { pane: pane.clone(), to: last.id.clone(), before: false }, format!("moved into {}", w.name))
                     }
@@ -1116,7 +1111,7 @@ impl App {
                     }
                     Target::New(_) => unreachable!(),
                 };
-                let alone = self.window_at(session, window).is_some_and(|(si, wi)| self.snap.sessions[si].windows[wi].panes.len() == 1);
+                let alone = self.window_at(session, window).is_some_and(|(_, _, _, w)| w.panes.len() == 1);
                 let closes = alone.then(|| format!("move {}? its window closes: it is its only pane", carry.label));
                 Ok(Some((Job::new(op, done).undo(undo).follow(pane), closes)))
             }
@@ -1166,12 +1161,11 @@ impl App {
     fn start_new(&mut self, session: bool) {
         let here = self.selected_target().cloned().unwrap_or(Target::Window { session: self.current_session.clone(), window: self.current_window.clone() });
         let window = match &here {
-            Target::Session { session } => self.snap.sessions.iter().find(|s| &s.id == session).and_then(|s| {
+            Target::Session { session } => self.snap.session(session).and_then(|s| {
                 let dir = s.active_window().and_then(|w| w.active_pane()).map(|p| p.path.clone());
                 s.windows.last().map(|w| (s.id.clone(), w.id.clone(), dir))
             }),
-            Target::Window { session, window } => self.window_at(session, window).map(|(si, wi)| {
-                let w = &self.snap.sessions[si].windows[wi];
+            Target::Window { session, window } => self.window_at(session, window).map(|(_, _, _, w)| {
                 (session.clone(), window.clone(), w.active_pane().map(|p| p.path.clone()))
             }),
             Target::Pane { session, window, pane } => Some((session.clone(), window.clone(), self.snap.pane(pane).map(|(_, _, p)| p.path.clone()))),
