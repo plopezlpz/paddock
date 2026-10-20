@@ -141,7 +141,8 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 
 ### With TPM
 
-1. Add this to your tmux config:
+1. Add this to your tmux config, above the line that runs TPM
+   (`run '~/.tmux/plugins/tpm/tpm'`):
 
    ```tmux
    set -g @plugin 'plopezlpz/paddock'
@@ -198,9 +199,10 @@ binary.
 If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
 out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
 `/usr/local/bin/paddock` (Intel Mac) or `/home/linuxbrew/.linuxbrew/bin/paddock`
-(Linux). To update, `brew upgrade`, `git -C ~/.tmux/plugins/agent-status.tmux pull`
-and reload tmux (until then the key says its bindings are for another version),
-then run step 3 again so your agents get the current hook commands.
+(Linux). To update, `brew upgrade plopezlpz/tap/paddock`,
+`git -C ~/.tmux/plugins/agent-status.tmux pull` and reload tmux (until then
+the key says its bindings are for another version), then run step 3 again so
+your agents get the current hook commands.
 
 ### Notes
 
@@ -226,14 +228,14 @@ is not checked: keep it at the clone's version, and update the two together.
 ## Use
 
 - **Sessions tab**: session › window › pane tree with each window's agent state.
-- **Agents tab**: one card per agent, grouped by status, session or folder; it opens on the agent you are in.
+- **Agents tab**: one card per agent, grouped by status, session or folder, or not at all; it opens on the agent you are in.
 - **Preview**: the selected pane, live, when the popup is at least 102
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
 | Key | Action |
 |---|---|
-| type | fuzzy filter (`'exact`, `^prefix`, `suffix$`, `!not`); `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |
+| type | fuzzy filter on names, folders, commands, agent kinds and states (a waiting agent also matches `asking`, an unconfirmed one `stale`): `'exact`, `^prefix`, `suffix$`, `!not`; `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |
 | `↑` `↓`, `ctrl-p` `ctrl-n` (`ctrl-k` `ctrl-j`), PageUp/PageDown | move |
 | `Enter` | jump there (a zoomed window stays zoomed) |
 | `Tab` | switch tabs |
@@ -294,8 +296,8 @@ your agents' own hooks and keeps their state on each agent's pane. Add both and
 you get the status bar dots, the desktop notifications and paddock's agents
 tab. Without it, paddock is a session switcher with a live preview.
 
-agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code
-(partial), Claude Code and Codex; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code,
+Claude Code and Codex; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
 Codex runs a hook only once you have trusted it: when it says "Hooks need
 review", choose "Review hooks" (or run `/hooks`) and trust the `hook-event.sh`
 ones. In tmux, run it as `codex --no-daemon` (e.g. `alias codex='codex --no-daemon'`):
