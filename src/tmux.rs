@@ -20,8 +20,6 @@ pub enum Msg {
 
 /// Separates the fields of one format's output.
 pub const SEP: char = '\u{1f}';
-/// Ends each row of a format that lists many in one line.
-pub const ROW: char = '\u{1e}';
 
 pub struct Control {
     child: Child,
@@ -139,8 +137,8 @@ const PLAIN: &[&str] = &["session_id", "window_id", "window_index", "window_acti
 
 /// `#{NAME}` with control characters as spaces: tmux does not escape
 /// values in replies or notifications, so a newline in a path or option
-/// would forge control lines, and a SEP or ROW would shift the fields. NAME
-/// may carry modifiers (`E:name`).
+/// would forge control lines, and a SEP (or a snapshot's marks, model.rs)
+/// would shift the fields. NAME may carry modifiers (`E:name`).
 pub fn field(name: &str) -> String {
     if PLAIN.contains(&name) {
         return format!("#{{{name}}}");

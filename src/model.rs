@@ -2,7 +2,7 @@
 //! tool (such as agent-status.tmux) sets on panes, from one format over the
 //! whole server; and the targets commands act on.
 
-use crate::tmux::{field, fields, quote, Control, ROW, SEP, SESSION};
+use crate::tmux::{field, fields, quote, Control, SEP, SESSION};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum State {
@@ -105,35 +105,33 @@ impl Target {
     }
 }
 
-/// A row's fields, in order: these, the pane title, AGENT_FIELDS, the path.
-const FIELDS: &[&str] = &[
-    "session_id",
-    "session_name",
-    "window_id",
-    "window_index",
-    "window_name",
-    "window_active",
-    "automatic-rename",
-    "pane_id",
-    "pane_index",
-    "pane_active",
-    "pane_current_command",
-];
+const SESSION_FIELDS: &[&str] = &["session_id", "session_name"];
+const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "window_active", "automatic-rename"];
+/// A pane's fields, in order: these, the pane title, AGENT_FIELDS, the path.
+const PANE_FIELDS: &[&str] = &["pane_id", "pane_index", "pane_active", "pane_current_command"];
 /// Read for agent panes (with an @agent-state) only.
 const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale"];
 
-/// Every pane as a row of `field`s ended by ROW, in one line: sessions by
-/// name, windows and panes by index (as `list-panes -a` lists them). The
-/// refresh subscription (main.rs) watches the same text, so it can stand
-/// for a snapshot. Other panes leave the agent fields empty, and agents
-/// with an automatic title the pane title, which they would not show: a
-/// shell sets it at every prompt, an agent animates it.
+/// What starts a session, a window and a pane in a snapshot's text
+/// (`field` keeps them out of the values).
+const SESSION_MARK: char = '\u{1c}';
+const WINDOW_MARK: char = '\u{1d}';
+const PANE_MARK: char = '\u{1e}';
+
+/// The whole server in one line: sessions by name, windows and panes by
+/// index (as `list-panes -a` lists them), each as its mark and its
+/// `field`s, so a session's and a window's are expanded once, not for each
+/// pane. The refresh subscription (main.rs) watches the same text, so it
+/// can stand for a snapshot. Other panes leave the agent fields empty, and
+/// agents with an automatic title the pane title, which they would not
+/// show: a shell sets it at every prompt, an agent animates it.
 pub fn format() -> String {
     let agent = format!("#{{?@agent-auto-description,,{}}}{SEP}{}", field("pane_title"), fields(AGENT_FIELDS));
     let none = SEP.to_string().repeat(AGENT_FIELDS.len());
     // The path last: a test fixture's last field may hold its separator.
-    let row = format!("{}{SEP}#{{?@agent-state,{agent},{none}}}{SEP}{}", fields(FIELDS), field("pane_current_path"));
-    format!("#{{S/n:#{{W:#{{P/i:{row}{ROW}}}}}}}")
+    let pane = format!("{PANE_MARK}{}{SEP}#{{?@agent-state,{agent},{none}}}{SEP}{}", fields(PANE_FIELDS), field("pane_current_path"));
+    let window = format!("{WINDOW_MARK}{}#{{P/i:{pane}}}", fields(WINDOW_FIELDS));
+    format!("#{{S/n:{SESSION_MARK}{}#{{W:{window}}}}}", fields(SESSION_FIELDS))
 }
 
 /// The snapshot's text (`format()`), now.
@@ -163,52 +161,45 @@ fn is_shell(command: &str) -> bool {
 /// Build the tree from a snapshot's TEXT (`format()`), without paddock's
 /// own session. HOST is the server's host name, tmux's default pane title.
 pub fn parse(text: &str, host: &str) -> Snapshot {
-    let n = FIELDS.len() + AGENT_FIELDS.len() + 2;
+    let n = PANE_FIELDS.len() + AGENT_FIELDS.len() + 2;
     let mut sessions: Vec<Session> = Vec::new();
-    for row in text.split_terminator(ROW) {
-        let row: Vec<&str> = row.splitn(n, SEP).collect();
-        let [sid, sname, wid, windex, wname, wactive, wauto, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] = row[..] else {
+    for session in text.split(SESSION_MARK).skip(1) {
+        let mut windows = session.split(WINDOW_MARK);
+        let head: Vec<&str> = windows.next().unwrap_or_default().split(SEP).collect();
+        let [id, name] = head[..] else { continue };
+        if name == SESSION {
             continue;
-        };
-        if sname == SESSION {
-            continue;
         }
-        if sessions.last().is_none_or(|s| s.id != sid) {
-            sessions.push(Session { id: sid.to_string(), name: sname.to_string(), windows: Vec::new() });
-        }
-        let session = sessions.last_mut().unwrap();
-        // The same window can be linked at two indexes of one session.
-        if session.windows.last().is_none_or(|w| w.id != wid || w.index != windex) {
-            session.windows.push(Window {
-                id: wid.to_string(),
-                index: windex.to_string(),
-                name: wname.to_string(),
-                active: wactive == "1",
-                auto: wauto == "1",
-                panes: Vec::new(),
-            });
-        }
-        let agent = State::parse(state, unseen).map(|state| {
-            let auto = if auto.trim().is_empty() { title_of(pane_title, host) } else { auto.trim().to_string() };
-            let desc = desc.trim();
-            Agent {
-                state,
-                kind: kind.to_string(),
-                title: if desc.is_empty() { auto.clone() } else { desc.to_string() },
-                auto,
-                renamed: !desc.is_empty(),
-                since: at.parse().ok(),
-                stale: stale == "1" || is_shell(command),
+        let mut session = Session { id: id.to_string(), name: name.to_string(), windows: Vec::new() };
+        // Each mark is a window: the same one can be linked at two indexes.
+        for window in windows {
+            let mut panes = window.split(PANE_MARK);
+            let head: Vec<&str> = panes.next().unwrap_or_default().split(SEP).collect();
+            let [id, index, name, active, auto] = head[..] else { continue };
+            let mut window = Window { id: id.to_string(), index: index.to_string(), name: name.to_string(), active: active == "1", auto: auto == "1", panes: Vec::new() };
+            for pane in panes {
+                let f: Vec<&str> = pane.splitn(n, SEP).collect();
+                let [id, index, active, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] = f[..] else {
+                    continue;
+                };
+                let agent = State::parse(state, unseen).map(|state| {
+                    let auto = if auto.trim().is_empty() { title_of(pane_title, host) } else { auto.trim().to_string() };
+                    let desc = desc.trim();
+                    Agent {
+                        state,
+                        kind: kind.to_string(),
+                        title: if desc.is_empty() { auto.clone() } else { desc.to_string() },
+                        auto,
+                        renamed: !desc.is_empty(),
+                        since: at.parse().ok(),
+                        stale: stale == "1" || is_shell(command),
+                    }
+                });
+                window.panes.push(Pane { id: id.to_string(), index: index.to_string(), active: active == "1", command: command.to_string(), path: path.to_string(), agent });
             }
-        });
-        session.windows.last_mut().unwrap().panes.push(Pane {
-            id: pid.to_string(),
-            index: pindex.to_string(),
-            active: pactive == "1",
-            command: command.to_string(),
-            path: path.to_string(),
-            agent,
-        });
+            session.windows.push(window);
+        }
+        sessions.push(session);
     }
     let mut snap = Snapshot { sessions, counts: [0; State::ALL.len()] };
     snap.counts = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).fold(snap.counts, |mut counts, a| {
@@ -268,11 +259,31 @@ impl Snapshot {
     }
 }
 
-/// A snapshot from `|`-separated rows of `format()`'s fields (host "host").
+/// A snapshot from `|`-separated rows of a pane's session, window and pane
+/// fields, as `format()` would put them (host "host"). A row too short for
+/// a session and window is a pane of the one before.
 #[cfg(test)]
 pub fn fixture(lines: &[&str]) -> Snapshot {
-    let n = FIELDS.len() + AGENT_FIELDS.len() + 2;
-    let text: String = lines.iter().map(|l| format!("{}{ROW}", l.splitn(n, '|').collect::<Vec<_>>().join(&SEP.to_string()))).collect();
+    let (s, w) = (SESSION_FIELDS.len(), SESSION_FIELDS.len() + WINDOW_FIELDS.len());
+    let n = w + PANE_FIELDS.len() + AGENT_FIELDS.len() + 2;
+    let sep = SEP.to_string();
+    let mut text = String::new();
+    let mut last: Vec<&str> = Vec::new();
+    for line in lines {
+        let f: Vec<&str> = line.splitn(n, '|').collect();
+        let mut pane = &f[..];
+        if f.len() > w {
+            if last.len() <= w || last[..s] != f[..s] {
+                text += &format!("{SESSION_MARK}{}", f[..s].join(&sep));
+            }
+            if last.len() <= w || last[..w] != f[..w] {
+                text += &format!("{WINDOW_MARK}{}", f[s..w].join(&sep));
+            }
+            pane = &f[w..];
+            last = f.clone();
+        }
+        text += &format!("{PANE_MARK}{}", pane.join(&sep));
+    }
     parse(&text, "host")
 }
 
@@ -288,8 +299,8 @@ mod tests {
             // The same window linked at a second index.
             "$1|work|@1|2|edit|0|0|%1|0|1|nvim|||||||||/w",
             "$1|work|@2|3|logs|0|1|%3|0|1|tail||idle|1||auto|mine|||/w|with|bars",
-            "$9|_paddock|@9|0|paddock|1|0|%9|0|1|cat|||||||||/",
             "broken|line",
+            "$9|_paddock|@9|0|paddock|1|0|%9|0|1|cat|||||||||/",
         ]);
         assert_eq!(snap.sessions.len(), 1, "paddock's own session is left out");
         let w = &snap.sessions[0].windows;
@@ -301,6 +312,7 @@ mod tests {
         let agent = w[2].panes[0].agent.as_ref().unwrap();
         assert_eq!((agent.state, agent.title.as_str(), agent.auto.as_str(), agent.renamed), (State::Finished, "mine", "auto", true));
         assert_eq!(w[2].panes[0].path, "/w|with|bars", "the last field keeps separators");
+        assert_eq!(w[2].panes.len(), 1, "a broken pane is skipped");
         assert!(w[0].panes[0].agent.is_none());
     }
 
