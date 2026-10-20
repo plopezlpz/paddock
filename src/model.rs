@@ -2,7 +2,7 @@
 //! tool (such as agent-status.tmux) sets on panes, from one format over the
 //! whole server; and the targets commands act on.
 
-use crate::tmux::{field, quote, Control, ROW, SEP, SESSION};
+use crate::tmux::{field, fields, quote, Control, ROW, SEP, SESSION};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum State {
@@ -129,11 +129,10 @@ const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", 
 /// with an automatic title the pane title, which they would not show: a
 /// shell sets it at every prompt, an agent animates it.
 pub fn format() -> String {
-    let join = |names: &[&str]| names.iter().map(|n| field(n)).collect::<Vec<_>>().join(&SEP.to_string());
-    let agent = format!("#{{?@agent-auto-description,,{}}}{SEP}{}", field("pane_title"), join(AGENT_FIELDS));
+    let agent = format!("#{{?@agent-auto-description,,{}}}{SEP}{}", field("pane_title"), fields(AGENT_FIELDS));
     let none = SEP.to_string().repeat(AGENT_FIELDS.len());
     // The path last: a test fixture's last field may hold its separator.
-    let row = format!("{}{SEP}#{{?@agent-state,{agent},{none}}}{SEP}{}", join(FIELDS), field("pane_current_path"));
+    let row = format!("{}{SEP}#{{?@agent-state,{agent},{none}}}{SEP}{}", fields(FIELDS), field("pane_current_path"));
     format!("#{{S/n:#{{W:#{{P/i:{row}{ROW}}}}}}}")
 }
 

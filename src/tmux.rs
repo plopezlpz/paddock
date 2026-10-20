@@ -123,20 +123,13 @@ impl Control {
         })?
     }
 
-    /// Run CMD with a format of NAMES (`#{a}<SEP>#{b}`...) as its last
-    /// argument, and split each output line into that many fields. Lines
-    /// with another count (notifications inside the reply, before tmux 3.8)
-    /// are dropped.
-    pub fn fields(&mut self, cmd: &str, names: &[&str]) -> Result<Vec<Vec<String>>, String> {
-        let format: Vec<String> = names.iter().map(|n| field(n)).collect();
-        let lines = self.cmd(&format!("{cmd} {}", quote(&format.join(&SEP.to_string()))))?;
-        Ok(lines.iter().map(|l| l.split(SEP).map(String::from).collect::<Vec<_>>()).filter(|f| f.len() == names.len()).collect())
-    }
-
     /// The one row of `display-message -p` over NAMES in TARGET (so its
-    /// session and window options count); empty on failure.
+    /// session and window options count); empty on failure. A line with
+    /// another field count (a notification inside the reply, before tmux
+    /// 3.8) is no row.
     pub fn row(&mut self, target: &str, names: &[&str]) -> Vec<String> {
-        self.fields(&format!("display-message -p -t {}", quote(target)), names).ok().and_then(|r| r.into_iter().next()).unwrap_or_default()
+        let lines = self.cmd(&format!("display-message -p -t {} {}", quote(target), quote(&fields(names)))).unwrap_or_default();
+        lines.iter().map(|l| l.split(SEP).map(String::from).collect::<Vec<_>>()).find(|f| f.len() == names.len()).unwrap_or_default()
     }
 }
 
@@ -154,6 +147,11 @@ pub fn field(name: &str) -> String {
     }
     let (mods, key) = name.rsplit_once(':').map_or((String::new(), name), |(m, k)| (format!("{m};"), k));
     format!("#{{{mods}s/[\x01-\x1f]/ /:{key}}}")
+}
+
+/// The `field`s of NAMES, separated by SEP.
+pub fn fields(names: &[&str]) -> String {
+    names.iter().map(|n| field(n)).collect::<Vec<_>>().join(&SEP.to_string())
 }
 
 impl Drop for Control {
