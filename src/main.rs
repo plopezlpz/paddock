@@ -53,7 +53,8 @@ fn subscription() -> String {
 
 enum Ev {
     Input(Event),
-    Tmux(Msg),
+    /// A notification, after this many replies (`Control::replied`).
+    Tmux(u64, Msg),
     /// The suggest command's answer to suggestion ID.
     Suggested(u64, Result<String, String>),
 }
@@ -423,8 +424,8 @@ fn next_minute() -> Instant {
 /// Attach and subscribe.
 fn connect(tx: &Sender<Ev>) -> Result<Control, String> {
     let events = tx.clone();
-    let mut tmux = Control::connect(move |m| {
-        let _ = events.send(Ev::Tmux(m));
+    let mut tmux = Control::connect(move |replied, m| {
+        let _ = events.send(Ev::Tmux(replied, m));
     })?;
     tmux.cmd(&subscription()).map_err(|e| format!("cannot attach to tmux session {SESSION}: {e}"))?;
     Ok(tmux)
@@ -448,6 +449,8 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
     let can_suggest = !suggest_command.trim().is_empty();
     // The snapshot's text, to skip a refresh that changes nothing.
     let mut shown = model::fetch(&mut tmux)?;
+    // Notifications tmux sent before the last fetch's reply are in it.
+    let mut fetched = tmux.replied();
     let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, can_suggest);
 
     let mut tui = Tui::new()?;
@@ -546,9 +549,13 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                         app.suggested(id, result);
                         dirty = true;
                     }
-                    Ev::Tmux(Msg::Changed) => stale = true,
-                    Ev::Tmux(Msg::Rows(text)) => fresh = Some(text),
-                    Ev::Tmux(Msg::Exit) => return Ok(None),
+                    Ev::Tmux(_, Msg::Exit) => return Ok(None),
+                    // Older than the snapshot shown: the %sessions-changed
+                    // making SESSION sends, or a subscription value from
+                    // before an op, which would put back what it changed.
+                    Ev::Tmux(replied, _) if replied < fetched => {}
+                    Ev::Tmux(_, Msg::Changed) => stale = true,
+                    Ev::Tmux(_, Msg::Rows(text)) => fresh = Some(text),
                 }
                 ev = rx.try_recv().ok();
             }
@@ -567,7 +574,13 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
             // One snapshot for any burst of notifications: the subscription's
             // latest unless one is due now. The preview's pane is captured on
             // its own schedule.
-            let text = if stale { Some(model::fetch(&mut tmux)?) } else { fresh };
+            let text = if stale {
+                let text = model::fetch(&mut tmux)?;
+                fetched = tmux.replied();
+                Some(text)
+            } else {
+                fresh
+            };
             if let Some(text) = text.filter(|t| *t != shown) {
                 app.set_snapshot(model::parse(&text, &host));
                 shown = text;

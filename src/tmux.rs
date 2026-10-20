@@ -25,6 +25,8 @@ pub struct Control {
     child: Child,
     stdin: ChildStdin,
     replies: Receiver<Result<Vec<String>, String>>,
+    /// Replies received so far.
+    replied: u64,
     /// A reply timed out: a late one would answer the next command.
     dead: bool,
 }
@@ -61,8 +63,10 @@ fn tmux_command() -> Command {
 
 impl Control {
     /// Attach a control client to SESSION without resizing windows or
-    /// streaming pane output. Notifications are passed to `events`.
-    pub fn connect(events: impl Fn(Msg) + Send + 'static) -> Result<Control, String> {
+    /// streaming pane output. Notifications are passed to `events` with the
+    /// number of replies tmux sent before them: one sent before a reply
+    /// (`replied`) is about the server before that command ran.
+    pub fn connect(events: impl Fn(u64, Msg) + Send + 'static) -> Result<Control, String> {
         // Exact: a bare name is also tried as a prefix and as a window.
         let target = format!("={SESSION}:");
         let mut cmd = tmux_command();
@@ -92,7 +96,12 @@ impl Control {
         let stdout = child.stdout.take().ok_or("no tmux stdout")?;
         let (reply_tx, replies) = mpsc::channel();
         thread::spawn(move || read_loop(BufReader::new(stdout), reply_tx, events));
-        Ok(Control { child, stdin, replies, dead: false })
+        Ok(Control { child, stdin, replies, replied: 0, dead: false })
+    }
+
+    /// How many commands have had their reply.
+    pub fn replied(&self) -> u64 {
+        self.replied
     }
 
     /// Whether a command timed out: the connection is no longer usable.
@@ -112,13 +121,15 @@ impl Control {
         }
         writeln!(self.stdin, "{line}").map_err(|e| format!("tmux connection lost: {e}"))?;
         self.stdin.flush().map_err(|e| format!("tmux connection lost: {e}"))?;
-        self.replies.recv_timeout(TIMEOUT).map_err(|e| {
+        let reply = self.replies.recv_timeout(TIMEOUT).map_err(|e| {
             self.dead = true;
             match e {
                 mpsc::RecvTimeoutError::Timeout => "tmux stopped answering".to_string(),
                 mpsc::RecvTimeoutError::Disconnected => "tmux connection lost".to_string(),
             }
-        })?
+        })?;
+        self.replied += 1;
+        reply
     }
 
     /// The one row of `display-message -p` over NAMES in TARGET (so its
@@ -168,8 +179,9 @@ impl Drop for Control {
 /// %error carrying its %begin's time, number and flags, so output that looks
 /// like a guard line (a captured pane showing one) stays inside. Blocks with
 /// flags 0 (the attach itself) are dropped, but a failed attach's error is
-/// the reply to whichever command is waiting when tmux exits.
-fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, events: impl Fn(Msg)) {
+/// the reply to whichever command is waiting when tmux exits. Each
+/// notification goes with the number of replies sent before it.
+fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, events: impl Fn(u64, Msg)) {
     struct Block {
         guard: String,
         ours: bool,
@@ -177,6 +189,7 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
     }
     let mut block: Option<Block> = None;
     let mut attach_error = None;
+    let mut replied = 0;
     for line in out.split(b'\n') {
         let Ok(line) = line else { break };
         let line = String::from_utf8_lossy(&line).into_owned();
@@ -186,6 +199,7 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
                 let lines = std::mem::take(&mut b.lines);
                 if b.ours {
                     let _ = replies.send(if end { Ok(lines) } else { Err(lines.join(" ")) });
+                    replied += 1;
                 } else if !end {
                     attach_error = Some(lines.join(" "));
                 }
@@ -202,16 +216,16 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
         } else if let Some(change) = line.strip_prefix("%subscription-changed ") {
             // `NAME $S - - - : VALUE`; the only subscription is the refresh one.
             if let Some((_, value)) = change.split_once(" : ") {
-                events(Msg::Rows(value.to_string()));
+                events(replied, Msg::Rows(value.to_string()));
             }
         } else if is_change(&line) {
-            events(Msg::Changed);
+            events(replied, Msg::Changed);
         }
     }
     if let Some(e) = attach_error {
         let _ = replies.send(Err(e));
     }
-    events(Msg::Exit);
+    events(replied, Msg::Exit);
 }
 
 /// Notifications that can change what the popup shows.
@@ -241,10 +255,18 @@ pub fn quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn run(stream: &str) -> (Vec<Result<Vec<String>, String>>, Vec<Msg>) {
+    type Replies = Vec<Result<Vec<String>, String>>;
+
+    fn run(stream: &str) -> (Replies, Vec<Msg>) {
+        let (replies, events) = run_counted(stream);
+        (replies, events.into_iter().map(|(_, m)| m).collect())
+    }
+
+    /// RUN, with the replies sent before each notification.
+    fn run_counted(stream: &str) -> (Replies, Vec<(u64, Msg)>) {
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
-        read_loop(stream.as_bytes(), tx, move |m| etx.send(m).unwrap());
+        read_loop(stream.as_bytes(), tx, move |n, m| etx.send((n, m)).unwrap());
         (rx.try_iter().collect(), erx.try_iter().collect())
     }
 
@@ -260,6 +282,18 @@ mod tests {
         ));
         assert_eq!(replies, vec![Ok(vec!["hello".to_string(), "world".to_string()]), Err("no such pane".to_string())]);
         assert_eq!(events, vec![Msg::Changed, Msg::Rows("a : b".into()), Msg::Exit]);
+    }
+
+    #[test]
+    fn notifications_count_the_replies_before_them() {
+        let (_, events) = run_counted(concat!(
+            "%begin 1 10 0\n%end 1 10 0\n",
+            "%sessions-changed\n",
+            "%begin 1 11 1\n%end 1 11 1\n",
+            "%begin 1 12 1\nno\n%error 1 12 1\n",
+            "%subscription-changed panes $1 - - - : v\n",
+        ));
+        assert_eq!(events, vec![(0, Msg::Changed), (2, Msg::Rows("v".into())), (2, Msg::Exit)], "the attach's block is no reply");
     }
 
     #[test]
