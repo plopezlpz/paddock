@@ -96,7 +96,7 @@ run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'</code></pre
       <div class="sc-col"><div class="sc-stage" id="stage" role="group" aria-label="Recorded demo of paddock, changing with the step you are reading"></div></div>
       <ol class="steps" id="steps">
       <li class="step" id="step-status" data-rec="status" data-dot data-fb-rec="tour" data-fb-ch="work">
-        <div class="step-txt"><h3>Your tmux, unchanged, plus an agent state dot</h3><p><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a> puts a dot in front of each window that has an agent (one addition to your <code>window-status-format</code>), coloured for working, finished or asking you something. You pick the colours with <code>@agent-color-*</code>; the theme shown here uses orange, blue and red.</p><p class="sub-note">It works through agent hooks. Claude Code, pi, OpenCode and other agents with hooks report working, asking and finished; agent-status.tmux colours the window's dot, and paddock shows the same state.</p></div>
+        <div class="step-txt"><h3>Your tmux, unchanged, plus an agent state dot</h3><p><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a> puts a dot in front of each window that has an agent (one addition to your <code>window-status-format</code>), coloured for working, finished or asking you something. You pick the colours with <code>@agent-color-*</code>; the theme shown here uses orange, blue and red.</p><p class="sub-note">It works through agent hooks. Claude Code, Codex, pi, OpenCode and other agents with hooks report working, asking and finished; agent-status.tmux colours the window's dot, and paddock shows the same state.</p></div>
         <div class="step-fig" data-slot><noscript><img src="assets/frames/status-poster.svg" alt="paddock beside a tmux window running an agent: the status bar has a dot beside the window name, blue because the agent has finished."></noscript></div>
       </li>
       <li class="step" id="step-open" data-rec="tour" data-ch="open" data-ch-to="jump">
@@ -157,10 +157,10 @@ run-shell 'bash ~/.tmux/plugins/agent-status.tmux/agent-status.tmux'</code></pre
       <div class="ag-box">
         <h3><a href="https://github.com/plopezlpz/agent-status.tmux">agent-status.tmux</a></h3>
         <p>The agent side of paddock. It hooks into each agent you use and keeps its state on the agent's pane, where the status bar and paddock both read it.</p>
-        <ul class="ag-chips" aria-label="Providers"><li>pi</li><li>OMP (Oh My Pi)</li><li>OpenCode</li><li>Kimi Code</li><li>MastraCode</li><li>Kilo Code (partial: no exit event)</li><li>Claude Code</li></ul>
+        <ul class="ag-chips" aria-label="Providers"><li>pi</li><li>OMP (Oh My Pi)</li><li>OpenCode</li><li>Kimi Code</li><li>MastraCode</li><li>Kilo Code (partial: no exit event)</li><li>Claude Code</li><li>Codex (run with --no-daemon)</li></ul>
         <p>The <a href="#install">install steps</a> at the top set it up. <code>@agent-icon-in-status on</code> puts the dot in front of your window status formats (set yours before the plugins load). To place it yourself, leave it off and add this to your formats:</p>
         <div class="code"><div class="code-head"><span>~/.tmux.conf</span><button class="copy" type="button" data-copy="code-as-icon" aria-label="Copy the agent icon format">copy</button></div><pre tabindex="0"><code id="code-as-icon">#{?@agent-icon,#{@agent-icon} ,}</code></pre></div>
-        <p>It needs tmux 3.8, Bash 3.2 and jq; desktop notifications need alerter, terminal-notifier or notify-send, and suggested titles need pi. Agents without lifecycle hooks, such as Codex, are not supported: their state can't be known without polling the pane.</p>
+        <p>It needs tmux 3.8, Bash 3.2 and jq; desktop notifications need alerter, terminal-notifier or notify-send, and suggested titles need pi. Codex runs a hook only once you trust it (it asks when it starts), and in tmux must run as <code>codex --no-daemon</code>: its default background server runs hooks without knowing their pane. Agents without lifecycle hooks, such as Gemini or Cursor, are not supported: their state can't be known without polling the pane.</p>
       </div>
       <div class="ag-box">
         <h3>Under the hood</h3>
