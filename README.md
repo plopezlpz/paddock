@@ -25,8 +25,9 @@ paddock is one popup on top of them.
 </details>
 
 A fast tmux popup for jumping between sessions, windows and panes, and for
-keeping an eye on the AI coding agents running in them (Claude Code, pi,
-OpenCode, …): which one is working, which is waiting for you, which has finished.
+keeping an eye on the AI coding agents running in them (Claude Code, Codex,
+pi, OpenCode, …): which one is working, which is waiting for you, which has
+finished.
 
 > **Status: beta.** It's used daily on macOS. Linux should work. Expect
 > changes.
@@ -49,8 +50,8 @@ are waiting for you and which have finished, and jump to one with a key press.
   to your agents' own hooks. Add both and you get the status bar dots, the
   desktop notifications and paddock's agents tab, with no daemon and no
   polling. paddock doesn't start or wrap your agents; they run in your panes as
-  they do today. Agents without lifecycle hooks, such as Codex, are not
-  covered (see [Agent state](#agent-state)).
+  they do today. Agents without lifecycle hooks, such as Gemini or Cursor,
+  are not covered (see [Agent state](#agent-state)).
 
 [herdr](https://herdr.dev) is an agent runtime: its own server that keeps your
 agents' terminals alive, with its own TUI, CLI and API, and a good home if you
@@ -150,8 +151,9 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 
 2. Press `prefix I` to install the plugins, then `prefix a`. It offers to
    download paddock's binary from the GitHub release (checksum verified), then
-   lists the agents it finds (Claude Code, pi, OpenCode, …) and offers to hook
-   them up. Restart those agents, and press `prefix a` again to open paddock.
+   lists the agents it finds (Claude Code, Codex, pi, OpenCode, …) and offers
+   to hook them up. Restart those agents, and press `prefix a` again to open
+   paddock. Codex needs one more step (see [Agent state](#agent-state)).
 
 `prefix a` is the default key, unless your config already binds it; set
 `@paddock-key` to choose another. Hooked up a new agent later? Run
@@ -187,8 +189,9 @@ binary.
    bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install
    ```
 
-   It lists the supported agents it finds (Claude Code, pi, OpenCode, …) and
-   asks before hooking them up.
+   It lists the supported agents it finds (Claude Code, Codex, pi, OpenCode, …)
+   and asks before hooking them up. Codex needs one more step (see
+   [Agent state](#agent-state)).
 
 If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
 out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
@@ -290,7 +293,12 @@ you get the status bar dots, the desktop notifications and paddock's agents
 tab. Without it, paddock is a session switcher with a live preview.
 
 agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code
-(partial) and Claude Code; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+(partial), Claude Code and Codex; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+Codex runs a hook only once you have trusted it: when it says "Hooks need
+review", choose "Review hooks" (or run `/hooks`) and trust the `hook-event.sh`
+ones. In tmux, run it as `codex --no-daemon` (e.g. `alias codex='codex --no-daemon'`):
+Codex's default background server runs the hooks without knowing their pane,
+so they report nothing.
 
 Any tool can feed paddock by setting these options on the agent's pane
 (one agent per pane, one tool setting them per tmux server):
