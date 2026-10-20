@@ -17,7 +17,8 @@ IN=paddock-test-in-$$
 OUT=paddock-test-out-$$
 # The test servers' sockets go in a private dir: tmux 3.8 leaves socket files
 # behind on exit. Under /tmp, as socket paths are limited to 104 bytes on macOS.
-TMUX_TMPDIR=$(mktemp -d /tmp/paddock-tmux-sock.XXXXXX)
+# Its path has no "paddock" in it, for a binary called something else.
+TMUX_TMPDIR=$(mktemp -d /tmp/pdk-tmux-sock.XXXXXX)
 export TMUX_TMPDIR
 cleanup() {
   chmod -R u+w "$TMP" 2>/dev/null # an interrupt inside the unwritable-dir check
@@ -86,6 +87,8 @@ lacks() { ! has "$@"; }
 # tmq VALUE: VALUE single-quoted for sh, # doubled for run-shell's format expansion.
 tmq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g; s/#/##/g")"; }
 reset() { rm -rf "$TMP/plugin/bin" "$TMP/plugin/target" "$TMP/probed"; }
+# PADDOCK_BIN goes inline: the server's environment was copied at its start.
+load_bin() { t run-shell "PADDOCK_BIN=$(tmq "$1") $(tmq "$TMP/plugin/paddock.tmux")"; }
 
 t set -g @paddock-key a \; set -g @paddock-click on
 load
@@ -113,6 +116,13 @@ wait_screen() { # wait_screen TEXT: poll the outer pane until TEXT is on screen.
   done
   return 1
 }
+wait_gone() { # wait_gone TEXT: poll the outer pane until TEXT is gone.
+  for _ in $(seq 50); do
+    has "$(tmux -L "$OUT" capture-pane -p)" "$1" || return 0
+    sleep 0.1
+  done
+  return 1
+}
 wait_opened() { # wait_opened: poll until the stub has recorded a run.
   for _ in $(seq 50); do
     [ -s "$TMP/opened" ] && return 0
@@ -125,7 +135,7 @@ press 4d; sleep 0.3
 check "press alone opens nothing" test ! -e "$TMP/opened"
 press 6d
 wait_opened
-expected="$TMP/plugin/target/release/paddock $client $(t display -p -t main '#{session_id} #{window_id}') "
+expected="$TMP/plugin/target/release/paddock $client $(t display -p -t main '#{session_id} #{window_id}') --tab last"
 check "a click opens paddock for the clicking client" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected"
 
 # Reloads: switching the click off removes paddock's binding, never a user's.
@@ -154,6 +164,21 @@ load
 check "no key set: a user's own prefix a survives" has "$(t list-keys -T prefix a 2>/dev/null)" "display-message mine"
 check "no key set: paddock says prefix a is taken" has "$(t show-messages 2>/dev/null)" "prefix a is taken"
 t unbind a
+# Ours by its note, whatever the binary is called: a reload keeps prefix a.
+stub "$TMUX_TMPDIR/pdk" 9.9.9
+taken() { t show-messages 2>/dev/null | grep -c 'prefix a is taken'; }
+before=$(taken)
+load_bin "$TMUX_TMPDIR/pdk"
+load_bin "$TMUX_TMPDIR/pdk"
+check "no key set: a reload keeps prefix a for a binary not named paddock" has "$(t list-keys -T prefix a 2>/dev/null)" "$TMUX_TMPDIR/pdk"
+check "no key set: and does not call it taken" test "$(taken)" -eq "$before"
+# A changed key drops the old one.
+t set -g @paddock-key b
+load
+check "a changed key is bound" has "$(t list-keys -T prefix b 2>/dev/null)" "paddock"
+check "and the old one is dropped" test -z "$(t list-keys -T prefix a 2>/dev/null)"
+t unbind b
+t set -gu @paddock-key
 t set -g @paddock-click on
 
 # Which binary gets bound: only one reporting this checkout's version (and
@@ -196,8 +221,6 @@ load
 check "a matching ~/.cargo/bin is not bound" has "$(root_click)" "install.sh"
 check "and was never run" test ! -e "$TMP/probed"
 
-# PADDOCK_BIN goes inline: the server's environment was copied at its start.
-load_bin() { t run-shell "PADDOCK_BIN=$(tmq "$1") $(tmq "$TMP/plugin/paddock.tmux")"; }
 reset
 stub "$TMP/custom/paddock" 9.9.9
 load_bin "$TMP/custom/paddock"
@@ -249,6 +272,18 @@ if [ -x "$PB" ]; then
   check "real paddock init runs silently" test -z "$out"
   check "real paddock init binds the binary that ran it" has "$(t list-keys -T prefix a)" "target/debug/paddock"
   check "real paddock init hands over its version" has "$(t list-keys -T prefix a)" "PADDOCK_PLUGIN_VERSION=$cargo_v"
+  # Opened for real from the key: it attaches to a _paddock session it makes
+  # (gone once closed), without running the user's pane-focus-in for it.
+  t set-hook -g pane-focus-in "run-shell 'echo #{session_name} >>$(tmq "$TMP/focused")'"
+  wait_screen "[main]"
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: the key opens it" wait_screen "agents"
+  check "real paddock: on its own session" t has-session -t =_paddock
+  check "real paddock: no pane-focus-in hook for its session" lacks "$(cat "$TMP/focused" 2>/dev/null)" _paddock
+  tmux -L "$OUT" send-keys Escape
+  check "real paddock: closed, its session is gone" wait_gone "agents"
+  check "real paddock: and so is its session" test -z "$(t list-sessions -F '#{session_name}' | grep _paddock)"
+  t set-hook -gu pane-focus-in
   t set -gu @paddock-key
   # The binary refuses bindings from another version, with no tmux needed.
   out=$(PADDOCK_PLUGIN_VERSION=0.0.0-nope "$PB" 2>&1); rc=$?
@@ -262,9 +297,8 @@ else
 fi
 
 # A plugin dir with a space, a ', a # and an = in its name, opened for real: a
-# lone popup command goes through sh, which breaks on these; tmux execs 2+ args
-# directly (and env would take the = for an assignment). Both the click and the
-# agents key.
+# lone popup command goes through sh, which breaks on these; with its --tab
+# tmux execs paddock directly. Both the click and the agents key.
 Q="$TMP/it's a #dir=x"
 mkdir -p "$Q/scripts"
 cp "$TMP/plugin/paddock.tmux" "$TMP/plugin/Cargo.toml" "$Q/"
@@ -280,8 +314,8 @@ wait_screen "[main]"
 press 4d
 press 6d
 wait_opened
-expected="$Q/bin/paddock $client $(t display -p -t main '#{session_id} #{window_id}') "
-check "quoted dir: a click opens paddock" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected"
+expected="$Q/bin/paddock $client $(t display -p -t main '#{session_id} #{window_id}')"
+check "quoted dir: a click opens paddock" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected --tab last"
 rm -f "$TMP/opened"
 # The click's popup may still be closing, and a key sent into it is lost: resend until it lands.
 for _ in $(seq 20); do
@@ -289,7 +323,7 @@ for _ in $(seq 20); do
   for _ in $(seq 3); do [ -s "$TMP/opened" ] || sleep 0.1; done
   [ -s "$TMP/opened" ] && break
 done
-check "quoted dir: the agents key opens paddock --tab agents" test "$(cat "$TMP/opened" 2>/dev/null)" = "${expected}--tab agents"
+check "quoted dir: the agents key opens paddock --tab agents" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected --tab agents"
 
 # The installer, offline: releases are directories (PADDOCK_RELEASE_URL), built
 # here from stubs. Every failure must say why, install nothing, leave no temp
@@ -424,13 +458,6 @@ check "install: leaves no temp files" no_leftovers "$PLUG"
 
 # End to end through the real key: the installer popup, then the real paddock.
 # Keys go to the outer server, and only once the popup shows what they answer.
-wait_gone() { # wait_gone TEXT: poll the outer pane until TEXT is gone.
-  for _ in $(seq 50); do
-    has "$(tmux -L "$OUT" capture-pane -p)" "$1" || return 0
-    sleep 0.1
-  done
-  return 1
-}
 reset
 rm -f "$TMP/opened"
 load

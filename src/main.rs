@@ -84,8 +84,9 @@ fn context() -> Result<Context, String> {
     }
 }
 
-/// Without --tab, paddock opens on the tab it was last closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents] | paddock init | paddock --version";
+/// Without --tab (or with --tab last), paddock opens on the tab it was last
+/// closed on.
+const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init | paddock --version";
 
 /// For `paddock init`: a binary installed without the plugin checkout
 /// (Homebrew) still binds the keys, by running this script itself.
@@ -100,7 +101,7 @@ enum Cmd {
 
 fn parse(args: &[&str]) -> Result<Cmd, String> {
     match args {
-        [] => Ok(Cmd::Run(None)),
+        [] | ["--tab", "last"] => Ok(Cmd::Run(None)),
         ["--tab", "sessions"] => Ok(Cmd::Run(Some(Tab::Sessions))),
         ["--tab", "agents"] => Ok(Cmd::Run(Some(Tab::Agents))),
         ["init"] => Ok(Cmd::Init),
@@ -695,6 +696,7 @@ mod tests {
         assert!(matches!(parse(&["--tab", "sessions"]), Ok(Cmd::Run(Some(Tab::Sessions)))));
         assert!(parse(&["--tab", "nope"]).is_err());
         assert!(matches!(parse(&[]), Ok(Cmd::Run(None))));
+        assert!(matches!(parse(&["--tab", "last"]), Ok(Cmd::Run(None))));
         assert!(matches!(parse(&["--version"]), Ok(Cmd::Version)));
         assert!(matches!(parse(&["-V"]), Ok(Cmd::Version)));
         assert!(matches!(parse(&["--help"]), Ok(Cmd::Help)));
