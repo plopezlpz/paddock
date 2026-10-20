@@ -67,6 +67,14 @@ fi
 # writes: the tmux commands this run sends, each followed by its ;.
 writes=()
 later() { writes+=("$@" \;); }
+# keyarg NAME KEY: KEY as one argument of that call. tmux ends a command at
+# an argument ending in ;, so ; or M-; goes as \; or M-\;. list-keys prints
+# them bare; the options may hold either spelling.
+keyarg() {
+  local v=$2
+  case $v in *\\\;) ;; *\;) v="${v%;}\\;" ;; esac
+  printf -v "$1" %s "$v"
+}
 taken=
 {
   IFS=$SEP read -r key agents_key click width height style
@@ -74,7 +82,10 @@ taken=
   # options may have changed. One the config has since rebound has its own.
   while read -r table k desc; do
     case $table:$desc in
-      prefix:paddock | 'prefix:paddock '* | root:paddock | 'root:paddock '*) later unbind -T "$table" -- "$k" ;;
+      prefix:paddock | 'prefix:paddock '* | root:paddock | 'root:paddock '*)
+        keyarg k "$k"
+        later unbind -T "$table" -- "$k"
+        ;;
       prefix:*) [ "$k" != a ] || taken=1 ;;
     esac
   done
@@ -123,15 +134,17 @@ popup="$popup -e PADDOCK_CLIENT=#{q:client_name} -e PADDOCK_SESSION=#{q:session_
 # bind_tab TABLE KEY [TAB]: without TAB, paddock reopens the tab it was closed on.
 bind_tab() {
   [ -n "$2" ] || return 0
+  local k
+  keyarg k "$2"
   if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-    later bind -N "paddock${3:+ $3}" -T "$1" "$2" run-shell -C "$popup $bin --tab ${3:-last}"
+    later bind -N "paddock${3:+ $3}" -T "$1" "$k" run-shell -C "$popup $bin --tab ${3:-last}"
   elif [ -n "$install" ]; then
-    later bind -N "paddock install" -T "$1" "$2" run-shell -C "$install"
+    later bind -N "paddock install" -T "$1" "$k" run-shell -C "$install"
   else
     # Messages are formats too, so a # in a path is doubled.
     if [ -n "$BIN" ]; then msg="$BIN is not executable"
     else msg="no paddock${VERSION:+ $VERSION} found -- see the README's Install section"; fi
-    later bind -N "paddock${3:+ $3}" -T "$1" "$2" display-message "paddock: ${msg//\#/##}"
+    later bind -N "paddock${3:+ $3}" -T "$1" "$k" display-message "paddock: ${msg//\#/##}"
   fi
 }
 bind_tab prefix "$key"

@@ -177,6 +177,21 @@ load
 check "a changed key is bound" has "$(t list-keys -T prefix b 2>/dev/null)" "paddock"
 check "and the old one is dropped" test -z "$(t list-keys -T prefix a 2>/dev/null)"
 t unbind b
+# A ; key, in either spelling: list-keys prints it bare, which would end the
+# reload's batched command early and fail it whole.
+printf "set -g @paddock-key '\\\\;'\n" >"$TMP/semi.conf"
+for spelling in ';' '\;'; do
+  t set -gu @paddock-agents-key
+  if [ "$spelling" = ';' ]; then t set -g @paddock-key '\;'; else t source-file "$TMP/semi.conf"; fi
+  check "a ; key: the option holds $spelling" test "$(t show -gv @paddock-key)" = "$spelling"
+  load
+  t set -g @paddock-agents-key g
+  check "a ; key ($spelling): a reload succeeds" load
+  check "a ; key ($spelling): the key binds" has "$(t list-keys -T prefix '\;' 2>/dev/null)" "--tab last"
+  check "a ; key ($spelling): the reload binds a new agents key" has "$(t list-keys -T prefix g 2>/dev/null)" "--tab agents"
+  t unbind '\;' \; unbind g
+done
+t set -gu @paddock-agents-key
 t set -gu @paddock-key
 t set -g @paddock-click on
 
