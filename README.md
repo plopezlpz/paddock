@@ -50,8 +50,8 @@ are waiting for you and which have finished, and jump to one with a key press.
   to your agents' own hooks. Add both and you get the status bar dots, the
   desktop notifications and paddock's agents tab, with no daemon and no
   polling. paddock doesn't start or wrap your agents; they run in your panes as
-  they do today. Agents without lifecycle hooks, such as Gemini or Cursor,
-  are not covered (see [Agent state](#agent-state)).
+  they do today. Agents agent-status.tmux has no hooks for, such as Gemini
+  or Cursor, are not covered yet (see [Agent state](#agent-state)).
 
 [herdr](https://herdr.dev) is an agent runtime: its own server that keeps your
 agents' terminals alive, with its own TUI, CLI and API, and a good home if you
@@ -153,7 +153,8 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
    download paddock's binary from the GitHub release (checksum verified), then
    lists the agents it finds (Claude Code, Codex, pi, OpenCode, …) and offers
    to hook them up. Restart those agents, and press `prefix a` again to open
-   paddock. Codex needs one more step (see [Agent state](#agent-state)).
+   paddock. Codex also needs its hooks trusted and to run as
+   `codex --no-daemon` (see [Agent state](#agent-state)).
 
 `prefix a` is the default key, unless your config already binds it; set
 `@paddock-key` to choose another. Hooked up a new agent later? Run
@@ -190,8 +191,8 @@ binary.
    ```
 
    It lists the supported agents it finds (Claude Code, Codex, pi, OpenCode, …)
-   and asks before hooking them up. Codex needs one more step (see
-   [Agent state](#agent-state)).
+   and asks before hooking them up. Codex also needs its hooks trusted and to
+   run as `codex --no-daemon` (see [Agent state](#agent-state)).
 
 If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
 out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
