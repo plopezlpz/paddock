@@ -119,12 +119,17 @@ impl Filter {
     }
 }
 
-/// PATH relative to HOME as `~`, shortened to its last two folders when long.
-pub fn short_path(path: &str, home: &str) -> String {
-    let p = match path.strip_prefix(home) {
+/// PATH relative to HOME as `~`.
+fn home_path(path: &str, home: &str) -> String {
+    match path.strip_prefix(home) {
         Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
         _ => path.to_string(),
-    };
+    }
+}
+
+/// `home_path`, shortened to its last two folders when long.
+pub fn short_path(path: &str, home: &str) -> String {
+    let p = home_path(path, home);
     if p.chars().count() <= 32 {
         return p;
     }
@@ -180,7 +185,9 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
         for w in &s.windows {
             let target = Target::Window { session: s.id.clone(), window: w.id.clone() };
             let active = w.active_pane();
-            let path = active.map(|p| short_path(&p.path, tree.home)).unwrap_or_default();
+            // Matched whole: folders the display leaves out still find it, and
+            // its `…` would put the matcher on its slow, non-ASCII path.
+            let path = active.map(|p| home_path(&p.path, tree.home)).unwrap_or_default();
             let text = format!("{} {} {} {}", s.name, w.index, w.name, path);
             let score = filter.score(&text);
             let pane_target = |p: &crate::model::Pane| Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
@@ -189,7 +196,7 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
             let pane_scores: Vec<Option<u32>> = if filtering && score.is_none() {
                 w.panes
                     .iter()
-                    .map(|p| filter.score(&format!("{text} {} {} {}", p.label(), p.command, short_path(&p.path, tree.home))))
+                    .map(|p| filter.score(&format!("{text} {} {} {}", p.label(), p.command, home_path(&p.path, tree.home))))
                     .collect()
             } else {
                 vec![None; w.panes.len()]
@@ -202,7 +209,7 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
             let open = many && tree.expanded.contains(&target);
             let explains = pane_scores.iter().zip(&pane_kept).any(|(s, k)| s.is_some() || *k);
             let listed = open || (explains && !tree.collapsed.contains(&target));
-            let mut meta = path;
+            let mut meta = active.map(|p| short_path(&p.path, tree.home)).unwrap_or_default();
             if many {
                 meta = format!("{meta} · {} panes", w.panes.len());
             }
@@ -423,6 +430,14 @@ mod tests {
         assert_eq!(sessions_for("claude"), ["work", "  edit", "    claude"]);
         // A single-pane window is listed without its pane.
         assert_eq!(sessions_for("tail"), ["work", "  logs", "play", "  logs"]);
+    }
+
+    #[test]
+    fn a_folder_the_display_leaves_out_still_matches() {
+        let snap = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/h/source/company/service-name/deep"]);
+        let none = HashSet::new();
+        let rows = sessions(&snap, &mut filter("company"), &tree(&none, &none, None));
+        assert!(matches!(&rows[1].kind, RowKind::Window { meta, .. } if meta == "…/service-name/deep"));
     }
 
     #[test]
