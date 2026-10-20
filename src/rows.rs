@@ -53,7 +53,7 @@ pub struct Row {
 /// `parent_last` leaves its window's │ out. `meta` is the muted detail
 /// after the name (or under it, compact).
 pub enum RowKind {
-    /// `current`: the session paddock was opened from.
+    /// `current`: the session the client shows.
     Session { name: String, windows: usize, current: bool },
     /// `active`: the session's current window. `expanded`: None for a
     /// single pane (nothing to list), else whether its panes are listed.

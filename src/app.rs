@@ -517,6 +517,15 @@ impl App {
         None
     }
 
+    /// The client was moved to SESSION (out of one an op closes): it is the
+    /// current session now, at its active window.
+    pub fn moved(&mut self, session: &str) {
+        if let Some(w) = self.snap.sessions.iter().find(|s| s.id == session).and_then(|s| s.active_window()) {
+            self.current_window = w.id.clone();
+        }
+        self.current_session = session.to_string();
+    }
+
     /// Rebuild from the same snapshot (ages tick over).
     pub fn refresh(&mut self) {
         self.rebuild(false);
@@ -2492,6 +2501,19 @@ mod tests {
         ctrl(&mut app, 'u');
         assert!(matches!(enter(&mut app), Action::None));
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn the_current_session_follows_the_client() {
+        let mut app = sessions_app("@1");
+        let current = |app: &App| -> Vec<String> {
+            app.rows.iter().filter_map(|r| if let RowKind::Session { name, current: true, .. } = &r.kind { Some(name.clone()) } else { None }).collect()
+        };
+        assert_eq!(current(&app), ["work"]);
+        app.moved("$2");
+        app.refresh();
+        assert_eq!(current(&app), ["play"]);
+        assert_eq!(app.current_window, "@3", "at its active window");
     }
 
     #[test]

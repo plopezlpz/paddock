@@ -210,55 +210,98 @@ fn probe(tmux: &mut Control, target: &str, format: &str) -> Result<Vec<String>, 
     Ok(line.first().map(|l| l.split(' ').map(String::from).collect()).unwrap_or_default())
 }
 
-/// Where CTX's client must go before OP runs, if OP closes the session it
-/// shows: with tmux's default detach-on-destroy the client would be
-/// detached. A moved window or pane is followed; otherwise another session.
-fn refuge(tmux: &mut Control, op: &Op, ctx: &Context) -> Result<Option<String>, String> {
-    let ours = |f: &[String]| f.first().is_some_and(|s| *s == ctx.session);
-    let last_window = |f: &[String]| f.get(1).is_some_and(|n| n == "1");
-    let last_pane = |f: &[String]| f.get(2).is_some_and(|n| n == "1");
-    const PANE: &str = "#{session_id} #{session_windows} #{window_panes}";
-    let dest = match op {
-        Op::Kill(Target::Session { session }) => (*session == ctx.session).then(String::new),
-        Op::Kill(Target::Window { session, window }) => {
-            let f = probe(tmux, &window_in(session, window), "#{session_id} #{session_windows}")?;
-            (ours(&f) && last_window(&f)).then(String::new)
-        }
-        Op::Kill(Target::Pane { pane, .. }) => {
-            let f = probe(tmux, &quote(pane), PANE)?;
-            (ours(&f) && last_window(&f) && last_pane(&f)).then(String::new)
-        }
-        Op::MoveWindow { from, window, into, .. } if *from == ctx.session && from != into => {
-            let f = probe(tmux, &window_in(from, window), "#{session_id} #{session_windows}")?;
-            last_window(&f).then(|| into.clone())
-        }
-        Op::JoinPane { pane, to, .. } | Op::BreakPane { pane, session: to } => {
-            let f = probe(tmux, &quote(pane), PANE)?;
-            if ours(&f) && last_window(&f) && last_pane(&f) {
-                let target = if matches!(op, Op::BreakPane { .. }) { to.clone() } else { probe(tmux, &quote(to), "#{session_id}")?.concat() };
-                Some(target)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-    let Some(dest) = dest else { return Ok(None) };
-    if !dest.is_empty() && dest != ctx.session {
-        return Ok(Some(dest));
-    }
-    // Any other session (not paddock's own).
-    let sessions = tmux.cmd(&format!("list-sessions -F {}", quote("#{session_id} #{session_name}")))?;
-    Ok(sessions.iter().filter_map(|l| l.split_once(' ')).find(|(id, name)| *id != ctx.session && *name != SESSION).map(|(id, _)| id.to_string()))
+/// A session as `refuge` sees it, live: its group, and its windows (one
+/// linked at two indexes is listed twice) with their panes.
+struct Place {
+    id: String,
+    group: String,
+    /// paddock's own session.
+    ours: bool,
+    windows: Vec<(String, Vec<String>)>,
 }
 
-/// Make OP's change on the server, for CTX's client; what it created, if
-/// anything. Moves and swaps keep every client's current window (-d).
-fn run_op(tmux: &mut Control, op: &Op, ctx: &Context) -> Result<Option<Target>, String> {
-    let q = |s: &str| quote(s);
-    if let Some(session) = refuge(tmux, op, ctx)? {
-        tmux.cmd(&format!("switch-client -c {} -t {}", q(&ctx.client), q(&session)))?;
+/// For `list-clients` of one client: its session, then every session as
+/// `ID OURS @W%P%P@W%P GROUP` (each id starts with its own sigil).
+fn places_format() -> String {
+    let windows = "#{W:#{window_id}#{P:#{pane_id}}}";
+    format!("#{{session_id}}#{{S:{SEP}#{{session_id}} #{{==:#{{session_name}},{SESSION}}} {windows} {}}}", field("session_group"))
+}
+
+/// The client's session and every session, from `places_format` output.
+fn places(line: &str) -> (String, Vec<Place>) {
+    let mut parts = line.split(SEP);
+    let current = parts.next().unwrap_or_default().to_string();
+    let sessions = parts
+        .filter_map(|p| {
+            let mut f = p.splitn(4, ' ');
+            let (id, ours, windows, group) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            let windows = windows
+                .split('@')
+                .skip(1)
+                .map(|w| {
+                    let mut ids = w.split('%');
+                    (format!("@{}", ids.next().unwrap_or_default()), ids.map(|p| format!("%{p}")).collect())
+                })
+                .collect();
+            Some(Place { id: id.to_string(), group: group.to_string(), ours: ours == "1", windows })
+        })
+        .collect();
+    (current, sessions)
+}
+
+/// Where the client must go before OP runs, if OP closes CURRENT, the
+/// session it shows: with tmux's default detach-on-destroy it would be
+/// detached. A moved window or pane is followed; otherwise any session OP
+/// leaves standing (not a group peer that closes with it).
+fn refuge(op: &Op, current: &str, sessions: &[Place]) -> Option<String> {
+    // A pane leaving its window as its only pane closes the window in every
+    // session it is linked into (kill-window too).
+    let only_pane = |pane: &str| sessions.iter().flat_map(|s| &s.windows).find(|(_, panes)| panes.iter().any(|p| p == pane)).filter(|(_, panes)| panes.len() == 1);
+    let in_group_of = |s: &Place, id: &str| s.id == id || sessions.iter().any(|o| o.id == id && !o.group.is_empty() && o.group == s.group);
+    let closes = |s: &Place| {
+        let only = |window: &str| s.windows.iter().all(|(w, _)| w == window);
+        match op {
+            Op::Kill(Target::Session { session }) => s.id == *session,
+            Op::Kill(Target::Window { window, .. }) => only(window),
+            Op::Kill(Target::Pane { pane, .. }) | Op::JoinPane { pane, .. } => only_pane(pane).is_some_and(|(w, _)| only(w)),
+            Op::BreakPane { pane, session } => s.id != *session && only_pane(pane).is_some_and(|(w, _)| only(w)),
+            // A window leaves FROM and its group only, once.
+            Op::MoveWindow { from, window, into, .. } => from != into && s.windows.len() == 1 && only(window) && in_group_of(s, from),
+            _ => false,
+        }
+    };
+    if !closes(sessions.iter().find(|s| s.id == current)?) {
+        return None;
     }
+    let follow = match op {
+        Op::MoveWindow { into, .. } => Some(into.as_str()),
+        Op::BreakPane { session, .. } => Some(session.as_str()),
+        Op::JoinPane { to, .. } => sessions.iter().find(|s| s.windows.iter().any(|(_, panes)| panes.contains(to))).map(|s| s.id.as_str()),
+        _ => None,
+    };
+    let first = sessions.iter().filter(|s| Some(s.id.as_str()) == follow);
+    first.chain(sessions).find(|s| !s.ours && !closes(s)).map(|s| s.id.clone())
+}
+
+/// Before OP runs, move CLIENT out of the session it shows (now: it may
+/// have moved since the popup opened) if OP closes it; where it went.
+fn shelter(tmux: &mut Control, op: &Op, client: &str) -> Result<Option<String>, String> {
+    if !matches!(op, Op::Kill(_) | Op::MoveWindow { .. } | Op::JoinPane { .. } | Op::BreakPane { .. }) {
+        return Ok(None);
+    }
+    // Not display-message: its formats see paddock's own client, even with -c.
+    let only = format!("#{{==:#{{client_name}},{client}}}");
+    let line = tmux.cmd(&format!("list-clients -f {} -F {}", quote(&only), quote(&places_format())))?;
+    let (current, sessions) = places(line.first().map_or("", String::as_str));
+    let Some(dest) = refuge(op, &current, &sessions) else { return Ok(None) };
+    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&dest)))?;
+    Ok(Some(dest))
+}
+
+/// Make OP's change on the server; what it created, if anything. Moves and
+/// swaps keep every client's current window (-d).
+fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
+    let q = |s: &str| quote(s);
     let line = match op {
         Op::SetTitle { pane, title: Some(title) } => format!("set-option -p -t {} @agent-description {}", q(pane), q(title)),
         Op::SetTitle { pane, title: None } => format!("set-option -p -u -t {} @agent-description", q(pane)),
@@ -492,7 +535,12 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                             Action::Quit => return Ok(None),
                             Action::Activate(t) => return Ok(Some(t)),
                             Action::Run(job) => {
-                                let result = run_op(&mut tmux, &job.op, &ctx);
+                                let result = shelter(&mut tmux, &job.op, &ctx.client).and_then(|moved| {
+                                    if let Some(session) = moved {
+                                        app.moved(&session);
+                                    }
+                                    run_op(&mut tmux, &job.op)
+                                });
                                 if let Some(created) = app.ran(job, result) {
                                     return Ok(Some(created));
                                 }
@@ -570,6 +618,87 @@ mod tests {
     fn names_and_folders_stay_literal() {
         assert_eq!(literal("#S #(rm -rf ~) it's"), r"'##S ##(rm -rf ~) it'\''s'");
         assert_eq!(window_in("$1", "@2"), "'$1:@2'");
+    }
+
+    /// `places_format` output: LINES are the client's session, then each
+    /// session's `ID OURS WINDOWS GROUP`.
+    fn layout(lines: &[&str]) -> (String, Vec<Place>) {
+        places(&lines.join(&SEP.to_string()))
+    }
+
+    #[test]
+    fn reads_every_session_from_one_line() {
+        // As tmux 3.8 printed it: a with a-2 (grouped), "b x", _paddock.
+        let (current, sessions) = layout(&["$0", "$0 0 @0%0@1%1%2 a", "$1 0 @2%3 ", "$2 0 @0%0@1%1%2 a", "$3 1 @4%5 "]);
+        assert_eq!(current, "$0");
+        let s = &sessions[0];
+        assert_eq!((s.id.as_str(), s.group.as_str(), s.ours), ("$0", "a", false));
+        assert_eq!(s.windows, [("@0".to_string(), vec!["%0".to_string()]), ("@1".to_string(), vec!["%1".to_string(), "%2".to_string()])]);
+        assert_eq!(sessions.iter().map(|s| (s.group.as_str(), s.ours)).collect::<Vec<_>>(), [("a", false), ("", false), ("a", false), ("", true)]);
+        assert_eq!(layout(&["$0", "$0 0 @0%0 my group"]).1[0].group, "my group");
+    }
+
+    #[test]
+    fn refuge_is_taken_from_the_session_the_client_shows_now() {
+        let kill = |session: &str| Op::Kill(Target::Session { session: session.into() });
+        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 ", "$9 1 @9%9 "]);
+        // The popup opened in $0, but a refuge (or anything else) moved the client to $1.
+        assert_eq!(refuge(&kill("$1"), "$1", &sessions).as_deref(), Some("$0"));
+        assert_eq!(refuge(&kill("$0"), "$1", &sessions), None, "not the client's session");
+        let pane = Op::Kill(Target::Pane { session: "$1".into(), window: "@1".into(), pane: "%1".into() });
+        assert_eq!(refuge(&pane, "$1", &sessions).as_deref(), Some("$0"));
+        // Never paddock's own session; with nowhere else, nothing.
+        let (_, alone) = layout(&["", "$0 0 @0%0 ", "$9 1 @9%9 "]);
+        assert_eq!(refuge(&kill("$0"), "$0", &alone), None);
+    }
+
+    #[test]
+    fn refuge_sees_windows_linked_elsewhere() {
+        // $0's only window @0 is also linked into $1 (at two indexes there).
+        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @0%0@1%1@0%0 "]);
+        let kill = Op::Kill(Target::Window { session: "$1".into(), window: "@0".into() });
+        assert_eq!(refuge(&kill, "$0", &sessions).as_deref(), Some("$1"), "killed through $1, it closes $0 too");
+        let pane = Op::Kill(Target::Pane { session: "$1".into(), window: "@0".into(), pane: "%0".into() });
+        assert_eq!(refuge(&pane, "$0", &sessions).as_deref(), Some("$1"));
+        // Linked twice into the client's session, it is still its only window.
+        let (_, twice) = layout(&["", "$0 0 @0%0@0%0 ", "$1 0 @1%1 "]);
+        let kill = Op::Kill(Target::Window { session: "$0".into(), window: "@0".into() });
+        assert_eq!(refuge(&kill, "$0", &twice).as_deref(), Some("$1"));
+        // A window with another pane, or a session with another window, stays.
+        let (_, more) = layout(&["", "$0 0 @0%0%3 ", "$1 0 @0%0%3@1%1 "]);
+        let pane = Op::Kill(Target::Pane { session: "$0".into(), window: "@0".into(), pane: "%0".into() });
+        assert_eq!(refuge(&pane, "$0", &more), None);
+        assert_eq!(refuge(&Op::Kill(Target::Window { session: "$1".into(), window: "@1".into() }), "$1", &more), None);
+    }
+
+    #[test]
+    fn refuge_is_never_a_group_peer_that_closes_too() {
+        // a ($0) and a-2 ($1) share their one window; b ($2) does not.
+        let (_, sessions) = layout(&["", "$0 0 @0%0 a", "$1 0 @0%0 a", "$2 0 @1%1 "]);
+        let window = Op::Kill(Target::Window { session: "$0".into(), window: "@0".into() });
+        assert_eq!(refuge(&window, "$0", &sessions).as_deref(), Some("$2"));
+        let pane = Op::Kill(Target::Pane { session: "$0".into(), window: "@0".into(), pane: "%0".into() });
+        assert_eq!(refuge(&pane, "$0", &sessions).as_deref(), Some("$2"));
+        // Killing the session alone leaves its peer, windows and all.
+        assert_eq!(refuge(&Op::Kill(Target::Session { session: "$0".into() }), "$0", &sessions).as_deref(), Some("$1"));
+        // Moving the window out of the peer empties the whole group: follow it.
+        let mv = Op::MoveWindow { from: "$1".into(), window: "@0".into(), into: "$2".into(), to: "@1".into(), before: false };
+        assert_eq!(refuge(&mv, "$0", &sessions).as_deref(), Some("$2"));
+        // Out of an ungrouped session that also links it, it stays in the client's.
+        let (_, linked) = layout(&["", "$0 0 @0%0 ", "$1 0 @0%0 ", "$2 0 @1%1 "]);
+        assert_eq!(refuge(&mv, "$0", &linked), None);
+    }
+
+    #[test]
+    fn refuge_follows_a_moved_window_or_pane() {
+        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 "]);
+        let mv = Op::MoveWindow { from: "$0".into(), window: "@0".into(), into: "$2".into(), to: "@2".into(), before: false };
+        assert_eq!(refuge(&mv, "$0", &sessions).as_deref(), Some("$2"));
+        let join = Op::JoinPane { pane: "%0".into(), to: "%2".into(), before: false };
+        assert_eq!(refuge(&join, "$0", &sessions).as_deref(), Some("$2"));
+        let break_ = |session: &str| Op::BreakPane { pane: "%0".into(), session: session.into() };
+        assert_eq!(refuge(&break_("$2"), "$0", &sessions).as_deref(), Some("$2"));
+        assert_eq!(refuge(&break_("$0"), "$0", &sessions), None, "a window of its own in the same session");
     }
 
     #[test]
