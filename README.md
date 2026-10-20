@@ -215,7 +215,8 @@ paddock.tmux binds the clone's build, else a `bin/paddock` it downloaded, and
 only if that reports the plugin's version; otherwise the key offers the
 download. `PADDOCK_BIN` overrides the choice, set inline (an exported variable
 does not reach a running tmux server):
-`run-shell 'PADDOCK_BIN=/path/to/paddock <clone>/paddock.tmux'`.
+`run-shell 'PADDOCK_BIN=/path/to/paddock <clone>/paddock.tmux'`. That binary
+is not checked: keep it at the clone's version, and update the two together.
 
 ## Use
 
