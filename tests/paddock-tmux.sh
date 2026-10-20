@@ -84,6 +84,8 @@ load() { t run-shell "$TMP/plugin/paddock.tmux"; }
 root_click() { t list-keys -T root MouseUp1StatusLeft 2>/dev/null; }
 has() { case $1 in *"$2"*) return 0 ;; esac; return 1; }
 lacks() { ! has "$@"; }
+# until_ok COMMAND...: retry COMMAND for up to 5 seconds until it succeeds.
+until_ok() { for _ in $(seq 50); do "$@" && return 0; sleep 0.1; done; return 1; }
 # tmq VALUE: VALUE single-quoted for sh, # doubled for run-shell's format expansion.
 tmq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g; s/#/##/g")"; }
 reset() { rm -rf "$TMP/plugin/bin" "$TMP/plugin/target" "$TMP/probed"; }
@@ -101,35 +103,18 @@ check "nothing on press" test -z "$(t list-keys -T root MouseDown1StatusLeft 2>/
 # A real click: an outer server's pane runs a client of the inner one, and
 # SGR mouse bytes typed into it press and release on the status line.
 tmux -L "$OUT" -f /dev/null new -d -x 60 -y 10 "env -u TMUX tmux -L $IN attach -t main"
-for _ in $(seq 50); do
-  [ -n "$(t list-clients)" ] && break
-  sleep 0.1
-done
+attached() { [ -n "$(t list-clients)" ]; }
+until_ok attached
 client=$(t list-clients -F '#{client_name}')
 check "nested client attached" test -n "$client"
 press() { tmux -L "$OUT" send-keys -H 1b 5b 3c 30 3b 32 3b 31 30 "$1"; }
 # Keys typed before the client has drawn are lost: wait for its status line.
-wait_screen() { # wait_screen TEXT: poll the outer pane until TEXT is on screen.
-  for _ in $(seq 50); do
-    has "$(tmux -L "$OUT" capture-pane -p)" "$1" && return 0
-    sleep 0.1
-  done
-  return 1
-}
-wait_gone() { # wait_gone TEXT: poll the outer pane until TEXT is gone.
-  for _ in $(seq 50); do
-    has "$(tmux -L "$OUT" capture-pane -p)" "$1" || return 0
-    sleep 0.1
-  done
-  return 1
-}
-wait_opened() { # wait_opened: poll until the stub has recorded a run.
-  for _ in $(seq 50); do
-    [ -s "$TMP/opened" ] && return 0
-    sleep 0.1
-  done
-  return 1
-}
+screen() { tmux -L "$OUT" capture-pane -p; }
+on_screen() { has "$(screen)" "$1"; }
+off_screen() { lacks "$(screen)" "$1"; }
+wait_screen() { until_ok on_screen "$1"; } # until TEXT is on the outer pane
+wait_gone() { until_ok off_screen "$1"; }  # until TEXT has left it
+wait_opened() { until_ok test -s "$TMP/opened"; } # until the stub has recorded a run
 check "nested client drew its status" wait_screen "[main]"
 press 4d; sleep 0.3
 check "press alone opens nothing" test ! -e "$TMP/opened"
@@ -297,8 +282,7 @@ if [ -x "$PB" ]; then
   first=$(t display -p -t main:0 '#{window_id}')
   tmux -L "$OUT" send-keys S-Down S-Down
   third() { [ "$(t display -p -t main:2 '#{window_id}')" = "$first" ]; }
-  wait_third() { for _ in $(seq 30); do third && return 0; sleep 0.1; done; return 1; }
-  check "real paddock: ⇧↓ ⇧↓ moves a window down twice" wait_third
+  check "real paddock: ⇧↓ ⇧↓ moves a window down twice" until_ok third
   t kill-window -t main:w2 \; kill-window -t main:w3
   tmux -L "$OUT" send-keys Escape
   check "real paddock: closed, its session is gone" wait_gone "agents"
@@ -510,7 +494,6 @@ esac
 EOF
 t set -g @agent-scripts-dir "$TMP/as/scripts/agent"
 t set-environment -g PADDOCK_RELEASE_URL "$TMP/rel/good"
-wait_file() { for _ in $(seq 50); do [ -s "$1" ] && return 0; sleep 0.1; done; return 1; }
 reset
 rm -f "$TMP/hooked"
 load
@@ -521,7 +504,7 @@ check "e2e agents: the installer asks first" wait_screen "[Y/n]"
 tmux -L "$OUT" send-keys Enter
 check "e2e agents: then offers to hook up the agents" wait_screen "Hook them up?"
 tmux -L "$OUT" send-keys y Enter
-check "e2e agents: and hooks them up" wait_file "$TMP/hooked"
+check "e2e agents: and hooks them up" until_ok test -s "$TMP/hooked"
 check "e2e agents: then says to press the key again" wait_screen "Press the key again"
 tmux -L "$OUT" send-keys q
 wait_gone "Press any key to close."
