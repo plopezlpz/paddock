@@ -300,7 +300,9 @@ agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code,
 Claude Code, Codex, Gemini CLI, Qwen Code and, in part, Antigravity CLI; see
 [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
 Gemini CLI runs hooks only in folders you trust. Antigravity CLI shows a
-permission prompt as working, and doesn't report quitting.
+session from its first prompt and a permission prompt as working, and doesn't
+report quitting: once agy has quit, paddock shows its last state as
+unconfirmed (e.g. `finished?`).
 Codex runs a hook only once you have trusted it: when it says "Hooks need
 review", choose "Review hooks" (or run `/hooks`) and trust the `hook-event.sh`
 ones. In tmux, run it as `codex --no-daemon` (e.g. `alias codex='codex --no-daemon'`):
