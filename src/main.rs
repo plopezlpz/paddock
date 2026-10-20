@@ -197,18 +197,6 @@ fn literal(s: &str) -> String {
     quote(&s.replace('#', "##"))
 }
 
-/// `SESSION:WINDOW`: a window linked into several sessions is the copy in
-/// SESSION, not whichever tmux finds first.
-fn window_in(session: &str, window: &str) -> String {
-    quote(&format!("{session}:{window}"))
-}
-
-/// The fields of FORMAT for TARGET, split on spaces.
-fn probe(tmux: &mut Control, target: &str, format: &str) -> Result<Vec<String>, String> {
-    let line = tmux.cmd(&format!("display-message -p -t {target} {}", quote(format)))?;
-    Ok(line.first().map(|l| l.split(' ').map(String::from).collect()).unwrap_or_default())
-}
-
 /// A session as `refuge` sees it, live: its group, and its windows (one
 /// linked at two indexes is listed twice) with their panes.
 struct Place {
@@ -301,6 +289,7 @@ fn shelter(tmux: &mut Control, op: &Op, client: &str) -> Result<Option<String>, 
 /// swaps keep every client's current window (-d).
 fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
     let q = |s: &str| quote(s);
+    let window_in = |session: &String, window: &String| Target::Window { session: session.clone(), window: window.clone() }.arg();
     let line = match op {
         Op::SetTitle { pane, title: Some(title) } => format!("set-option -p -t {} @agent-description {}", q(pane), q(title)),
         Op::SetTitle { pane, title: None } => format!("set-option -p -u -t {} @agent-description", q(pane)),
@@ -308,9 +297,8 @@ fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
         Op::RenameWindow { window, name } if name.is_empty() => format!("set-window-option -t {} automatic-rename on", q(window)),
         Op::RenameWindow { window, name } => format!("rename-window -t {} -- {}", q(window), literal(name)),
         Op::Kill(Target::Session { session }) => format!("kill-session -t {}", q(session)),
-        Op::Kill(Target::Window { session, window }) => format!("kill-window -t {}", window_in(session, window)),
+        Op::Kill(t @ Target::Window { .. }) => format!("kill-window -t {}", t.arg()),
         Op::Kill(Target::Pane { pane, .. }) => format!("kill-pane -t {}", q(pane)),
-        Op::Kill(Target::New(_)) => return Ok(None),
         Op::SwapWindows { session, a, b } => format!("swap-window -d -s {} -t {}", window_in(session, a), window_in(session, b)),
         Op::SwapPanes(a, b) => format!("swap-pane -d -s {} -t {}", q(a), q(b)),
         Op::MoveWindow { from, window, into, to, before } => {
@@ -319,7 +307,8 @@ fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
         Op::JoinPane { pane, to, before } => {
             // Side by side in a wide pane, else one above the other (cells
             // are about twice as tall as wide).
-            let size = probe(tmux, &q(to), "#{pane_width} #{pane_height}")?;
+            // Unknown (the pane went): join-pane says so.
+            let size = tmux.row(to, &["pane_width", "pane_height"]);
             let n = |i: usize| size.get(i).and_then(|v| v.parse::<u32>().ok());
             let wide = matches!((n(0), n(1)), (Some(w), Some(h)) if w >= 2 * h);
             format!("join-pane -d {}{} -s {} -t {}", if *before { "-b " } else { "" }, if wide { "-h" } else { "-v" }, q(pane), q(to))
@@ -456,11 +445,10 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
     let [host, suggest_command] = <[String; 2]>::try_from(tmux.row(&ctx.window, &["host", "@agent-suggest-command"])).unwrap_or_default();
     let theme = Theme::load(&mut tmux, &ctx.window);
     let home = std::env::var("HOME").unwrap_or_default();
-    let debug = std::env::var_os("PADDOCK_DEBUG").is_some();
     let can_suggest = !suggest_command.trim().is_empty();
     // The snapshot's text, to skip a refresh that changes nothing.
     let mut shown = model::fetch(&mut tmux)?;
-    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, debug, can_suggest);
+    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, can_suggest);
 
     let mut tui = Tui::new()?;
     let answers = tx.clone();
@@ -602,7 +590,7 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
         if let Err(e) = switched {
             // display-message expands formats: keep a # in the error literal.
             let message = format!("paddock: {e}");
-            let shown = tmux.cmd(&format!("display-message -c {} {}", quote(&ctx.client), quote(&message.replace('#', "##"))));
+            let shown = tmux.cmd(&format!("display-message -c {} {}", quote(&ctx.client), literal(&message)));
             // Unseen, the error goes to the popup (-EE keeps it open).
             shown.map_err(|_| e)?;
         }
@@ -617,7 +605,6 @@ mod tests {
     #[test]
     fn names_and_folders_stay_literal() {
         assert_eq!(literal("#S #(rm -rf ~) it's"), r"'##S ##(rm -rf ~) it'\''s'");
-        assert_eq!(window_in("$1", "@2"), "'$1:@2'");
     }
 
     /// `places_format` output: LINES are the client's session, then each

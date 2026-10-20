@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Command, Create, Hint, Menu, Mode, Rename, Status, Tab, View};
+use crate::edit::LineEdit;
 use crate::model::State;
 use crate::rows::{short_path, New, Row, RowKind};
 use crate::theme::Theme;
@@ -61,6 +62,23 @@ fn fit(s: &str, max: usize) -> String {
 /// Display columns SPANS take.
 fn cols(spans: &[Span]) -> usize {
     spans.iter().map(Span::width).sum()
+}
+
+/// SLOT at the right end of WIDTH columns, after LINE.
+fn push_right(line: &mut Vec<Span<'static>>, slot: Span<'static>, width: usize) {
+    line.push(Span::raw(" ".repeat(width.saturating_sub(cols(line) + slot.width()))));
+    line.push(slot);
+}
+
+/// A name being typed, in ROOM columns: bold around the cursor; empty, the
+/// cursor and PLACEHOLDER (what an empty name means).
+fn field_spans(field: &LineEdit, placeholder: &str, room: usize, t: &Theme) -> Vec<Span<'static>> {
+    let cursor = Span::styled("▏", Style::new().fg(t.accent));
+    if field.is_empty() {
+        return vec![cursor, Span::styled(fit(placeholder, room.saturating_sub(1)), t.muted().add_modifier(Modifier::ITALIC))];
+    }
+    let (before, after) = field.window(room);
+    vec![Span::styled(before, bold()), cursor, Span::styled(after, bold())]
 }
 
 /// The previewed pane: a title line and its screen.
@@ -165,7 +183,7 @@ fn status_line(status: &Status, max: usize, t: &Theme) -> Line<'static> {
 fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
     // A question replaces the line: what will happen, in the asking colour.
     if let Mode::Confirm(c) = &app.mode {
-        let note = if c.verb == "kill" && !compact { "can't be undone" } else { "" };
+        let note = if c.kills() && !compact { "can't be undone" } else { "" };
         let [left, side] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(note.width() as u16 + 1)]).areas(area);
         let warn = t.state(State::Asking);
         let line = Line::from(vec![Span::styled("✗ ", warn), Span::styled(fit(&c.question, (left.width as usize).saturating_sub(2)), warn.add_modifier(Modifier::BOLD))]);
@@ -208,7 +226,7 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
 fn draw_footer(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
     let compact = view.compact;
     let (hints, last) = app.hints(view);
-    let text = |h: &Hint| if compact || h.key.is_empty() { h.label.clone() } else { format!("{} {}", h.key, h.label) };
+    let text = |h: &Hint| if compact { h.label.clone() } else { format!("{} {}", h.key, h.label) };
     let room = (area.width as usize).saturating_sub(text(&last).width() + GAP.len());
     // Columns the SHOWN hints take, with a ⋯ after them if MORE.
     let total = |shown: &[bool], more: bool| {
@@ -231,7 +249,7 @@ fn draw_footer(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme)
         }
     }
     let style = |h: &Hint| -> Vec<Span<'static>> {
-        if compact || h.key.is_empty() {
+        if compact {
             vec![Span::styled(h.label.clone(), Style::new().fg(t.hint))]
         } else {
             vec![Span::styled(h.key, Style::new().fg(t.hint)), Span::styled(format!(" {}", h.label), t.muted())]
@@ -358,18 +376,10 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
     let spare = w.saturating_sub(cols(&line) + place.width() + c.field.text().width().max(8) + 4);
     let slot = c.error.as_ref().map(|e| Span::styled(format!("✗ {}", fit(e, spare.max(12))), t.state(State::Asking)));
     let room = w.saturating_sub(cols(&line) + place.width() + slot.as_ref().map_or(0, |s| s.width() + 2));
-    let cursor = Span::styled("▏", Style::new().fg(t.accent));
-    if c.field.is_empty() {
-        line.push(cursor);
-        line.push(Span::styled(fit(placeholder, room.saturating_sub(1)), t.muted().add_modifier(Modifier::ITALIC)));
-    } else {
-        let (before, after) = c.field.window(room);
-        line.extend([Span::styled(before, bold()), cursor, Span::styled(after, bold())]);
-    }
+    line.extend(field_spans(&c.field, placeholder, room, t));
     line.push(Span::styled(place, t.muted()));
     if let Some(slot) = slot {
-        line.push(Span::raw(" ".repeat(w.saturating_sub(cols(&line) + slot.width()))));
-        line.push(slot);
+        push_right(&mut line, slot, w);
     }
     vec![Line::from(line)]
 }
@@ -392,9 +402,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
         second.push(Span::styled(fit(session, width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
         second.extend(tail);
         if let Some(slot) = slot {
-            let pad = width.saturating_sub(cols(&second) + slot.width());
-            second.push(Span::raw(" ".repeat(pad)));
-            second.push(slot);
+            push_right(&mut second, slot, width);
         }
         return vec![first, Line::from(second)];
     }
@@ -441,17 +449,9 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
     first.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
     let wide_slot = if compact && card { None } else { slot.clone() };
     let room = w.saturating_sub(cols(&first) + wide_slot.as_ref().map_or(0, |s| s.width() + 2));
-    let cursor = Span::styled("▏", Style::new().fg(t.accent));
-    if r.field.is_empty() {
-        first.push(cursor);
-        first.push(Span::styled(fit(&r.placeholder, room.saturating_sub(1)), t.muted().add_modifier(Modifier::ITALIC)));
-    } else {
-        let (before, after) = r.field.window(room);
-        first.extend([Span::styled(before, bold()), cursor, Span::styled(after, bold())]);
-    }
+    first.extend(field_spans(&r.field, &r.placeholder, room, t));
     if let Some(slot) = wide_slot {
-        first.push(Span::raw(" ".repeat(w.saturating_sub(cols(&first) + slot.width()))));
-        first.push(slot);
+        push_right(&mut first, slot, w);
     }
     if card {
         return card_lines(Line::from(first), mark, row, compact, w, t, if compact { slot } else { None });

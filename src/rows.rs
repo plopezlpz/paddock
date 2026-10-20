@@ -39,7 +39,8 @@ impl Group {
 }
 
 pub struct Row {
-    /// None for group headers, which cannot be selected.
+    /// None for group headers, which cannot be selected, and the "+ new"
+    /// row, which names nothing on the server yet.
     pub target: Option<Target>,
     pub kind: RowKind,
     /// Pane shown in the preview.
@@ -301,7 +302,7 @@ pub fn place_new(rows: &mut Vec<Row>, new: &New) {
         }
         New::Session { .. } => rows.len(),
     };
-    rows.insert(at, Row { target: Some(Target::New(0)), kind: RowKind::New, preview: None, score: None });
+    rows.insert(at, Row { target: None, kind: RowKind::New, preview: None, score: None });
 }
 
 /// Groups in this order; one kind per build.

@@ -3,7 +3,8 @@
 //! screen is the View, written by each draw.
 //!
 //! Every action has one Command, whether it comes from a key, a footer hint,
-//! a menu item or a tap; `hints` and `menu_items` say which apply where.
+//! a menu item or a tap; `can` says which apply to the selected row, and
+//! `hints` and `menu_items` list them.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -141,7 +142,7 @@ pub enum Command {
     MoveUp,
     MoveDown,
     Undo,
-    /// The selected row's menu (the footer's ⋯).
+    /// The selected row's menu (the footer's ⋯, opened by on_mouse).
     Menu,
     // While renaming:
     Save,
@@ -152,9 +153,9 @@ pub enum Command {
     Confirm,
 }
 
-/// A footer hint: the key, the word, and the command a tap runs. Hints are
-/// listed in display order; `rank` says which go first when room runs out
-/// (lower goes first).
+/// A footer hint or a menu item: the key, the word, and the command a tap
+/// runs. Hints are listed in display order; `rank` says which go first when
+/// room runs out (lower goes first).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hint {
     pub key: &'static str,
@@ -163,36 +164,12 @@ pub struct Hint {
     pub rank: u8,
 }
 
-fn hint(key: &'static str, label: impl Into<String>, command: Command, rank: u8) -> Hint {
-    Hint { key, label: label.into(), command, rank }
-}
-
-/// A menu entry.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Item {
-    pub label: String,
-    pub key: &'static str,
-    pub command: Command,
-}
-
-fn item(label: impl Into<String>, key: &'static str, command: Command) -> Item {
-    Item { label: label.into(), key, command }
-}
-
-/// What a rename names.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Renaming {
-    /// An agent's title (@agent-description).
-    Agent { pane: String },
-    Session { session: String },
-    Window { window: String },
-}
-
 /// A title or name being edited in place.
 #[derive(Debug)]
 pub struct Rename {
+    /// A session or window's name, or a pane's agent's title
+    /// (@agent-description).
     pub target: Target,
-    pub what: Renaming,
     pub field: LineEdit,
     /// The title or name when renaming began, and whether the user set it
     /// (else it is automatic: the agent's title, or tmux's window name).
@@ -214,8 +191,13 @@ pub struct Rename {
 pub struct Confirm {
     pub job: Job,
     pub question: String,
-    /// The yes button's word ("kill", "move").
-    pub verb: &'static str,
+}
+
+impl Confirm {
+    /// A kill, which can't be undone; else a move that closes something.
+    pub fn kills(&self) -> bool {
+        matches!(self.job.op, Op::Kill(_))
+    }
 }
 
 /// A new window or session being named, on its own row where it will go.
@@ -245,7 +227,7 @@ pub struct Carry {
 pub struct Menu {
     /// The row it was opened on: its items act on that row only.
     target: Option<Target>,
-    pub items: Vec<Item>,
+    pub items: Vec<Hint>,
     pub selected: usize,
     /// The screen cell it hangs from (the click, or the selected row).
     pub anchor: Position,
@@ -274,7 +256,6 @@ fn id_of(t: &Target) -> &str {
         Target::Session { session } => session,
         Target::Window { window, .. } => window,
         Target::Pane { pane, .. } => pane,
-        Target::New(_) => "",
     }
 }
 
@@ -293,6 +274,20 @@ fn window_return(session: &Session, wi: usize, from: &str) -> Option<Op> {
         (Some(prev), _) => Some(back(&prev.id, false)),
         (None, Some(next)) => Some(back(&next.id, true)),
         _ => None,
+    }
+}
+
+/// Why tmux would refuse NAME for a session (the one with id RENAMED keeps
+/// its own name), if it would.
+fn session_name_problem(snap: &Snapshot, name: &str, renamed: Option<&str>) -> Option<String> {
+    if name.is_empty() {
+        Some("a session needs a name".into())
+    } else if name.contains(['.', ':']) {
+        Some("session names can't have . or :".into())
+    } else if snap.sessions.iter().any(|s| s.name == name && Some(s.id.as_str()) != renamed) {
+        Some(format!("a session called {name} exists"))
+    } else {
+        None
     }
 }
 
@@ -410,7 +405,6 @@ pub struct App {
     keep: Option<Target>,
     filter: Filter,
     home: String,
-    debug: bool,
     /// The last suggestion asked for.
     suggestions: u64,
     /// What ^z undoes, latest last, and what it did.
@@ -423,7 +417,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, debug: bool, can_suggest: bool) -> App {
+    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, can_suggest: bool) -> App {
         let mut app = App {
             snap,
             tab,
@@ -442,7 +436,6 @@ impl App {
             keep: None,
             filter: Filter::new(),
             home,
-            debug,
             suggestions: 0,
             undo: Vec::new(),
             press: None,
@@ -481,10 +474,10 @@ impl App {
         self.snap = snap;
         // What is being renamed went away: there is nothing left to name.
         if let Mode::Rename(r) = &self.mode {
-            let gone = match &r.what {
-                Renaming::Agent { pane } => self.snap.agent(pane).is_none().then_some("that agent has exited"),
-                Renaming::Session { session } => self.find(session).is_none().then_some("that session has closed"),
-                Renaming::Window { window } => self.find(window).is_none().then_some("that window has closed"),
+            let gone = match &r.target {
+                Target::Pane { pane, .. } => self.snap.agent(pane).is_none().then_some("that agent has exited"),
+                Target::Session { session } => self.find(session).is_none().then_some("that session has closed"),
+                Target::Window { window, .. } => self.find(window).is_none().then_some("that window has closed"),
             };
             if let Some(why) = gone {
                 self.mode = Mode::List;
@@ -612,7 +605,7 @@ impl App {
         self.selected = pick.or_else(|| self.nearest(0)).unwrap_or(0);
         // Naming something new: its row is the selection.
         if matches!(self.mode, Mode::Create(_))
-            && let Some(i) = self.position(&Target::New(0))
+            && let Some(i) = self.rows.iter().position(|r| matches!(r.kind, RowKind::New))
         {
             self.selected = i;
         }
@@ -723,23 +716,32 @@ impl App {
     /// paste: a newline in it must not act as Enter).
     pub fn paste(&mut self, text: &str) {
         match &mut self.mode {
-            Mode::Rename(r) => {
-                if r.field.insert(text) {
-                    r.suggesting = None;
-                    r.error = None;
-                }
-            }
-            Mode::Create(c) => {
-                if c.field.insert(text) {
-                    c.error = None;
-                }
-            }
+            Mode::Rename(_) | Mode::Create(_) => self.edit_name(|f| f.insert(text)),
             Mode::Menu(_) | Mode::Confirm(_) => {}
             Mode::List | Mode::Move(_) => {
                 if self.query.insert(text) {
                     self.requery();
                 }
             }
+        }
+    }
+
+    /// Edit the title or name being typed with EDIT, which says whether the
+    /// text changed: then a suggestion on its way or a refusal is stale.
+    fn edit_name(&mut self, edit: impl FnOnce(&mut LineEdit) -> bool) {
+        match &mut self.mode {
+            Mode::Rename(r) => {
+                if edit(&mut r.field) {
+                    r.suggesting = None;
+                    r.error = None;
+                }
+            }
+            Mode::Create(c) => {
+                if edit(&mut c.field) {
+                    c.error = None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -763,27 +765,25 @@ impl App {
     /// agent's pane row), a session's or a window's name.
     fn rename(&mut self) {
         let Some(target) = self.selected_target().cloned() else { return };
-        let (what, text, renamed, placeholder) = match &target {
+        let (text, renamed, placeholder) = match &target {
             Target::Pane { pane, .. } => {
                 let Some(agent) = self.snap.agent(pane) else { return };
-                (Renaming::Agent { pane: pane.clone() }, agent.title.clone(), agent.renamed, agent.auto.clone())
+                (agent.title.clone(), agent.renamed, agent.auto.clone())
             }
             Target::Session { session } => {
                 let Some(s) = self.snap.session(session) else { return };
-                (Renaming::Session { session: s.id.clone() }, s.name.clone(), true, String::new())
+                (s.name.clone(), true, String::new())
             }
             Target::Window { session, window } => {
                 let Some((_, _, _, w)) = self.window_at(session, window) else { return };
-                (Renaming::Window { window: w.id.clone() }, w.name.clone(), !w.auto, "named after what runs".to_string())
+                (w.name.clone(), !w.auto, "named after what runs".to_string())
             }
-            Target::New(_) => return,
         };
         // Listed while it is renamed, whatever its row's text turns into.
         self.keep = Some(target.clone());
         let field = LineEdit::new(&text, Some(TITLE_MAX));
         self.mode = Mode::Rename(Rename {
             target,
-            what,
             unchanged: field.text().trim().to_string(),
             field,
             original: text,
@@ -797,7 +797,7 @@ impl App {
     /// Ask for a title to fill the field with, unless one is on its way.
     fn suggest(&mut self) -> Action {
         let Mode::Rename(r) = &mut self.mode else { return Action::None };
-        let Renaming::Agent { pane } = &r.what else { return Action::None };
+        let Target::Pane { pane, .. } = &r.target else { return Action::None };
         if r.suggesting.is_some() {
             return Action::None;
         }
@@ -835,34 +835,28 @@ impl App {
             self.mode = Mode::List;
             return Action::None;
         }
-        let refuse = match &r.what {
-            Renaming::Session { .. } if text.is_empty() => Some("a session needs a name".to_string()),
-            Renaming::Session { .. } if text.contains(['.', ':']) => Some("session names can't have . or :".to_string()),
-            Renaming::Session { session } if self.snap.sessions.iter().any(|s| s.name == text && &s.id != session) => {
-                Some(format!("a session called {text} exists"))
-            }
-            _ => None,
-        };
-        if let Some(why) = refuse {
+        if let Target::Session { session } = &r.target
+            && let Some(why) = session_name_problem(&self.snap, &text, Some(session))
+        {
             r.error = Some(why);
             return Action::None;
         }
         let Mode::Rename(r) = std::mem::replace(&mut self.mode, Mode::List) else { return Action::None };
         // The row stays listed even if its new name doesn't match the filter.
-        self.keep = Some(r.target);
+        self.keep = Some(r.target.clone());
         let auto = text.is_empty();
-        let (op, undo, done) = match r.what {
-            Renaming::Agent { pane } => (
+        let (op, undo, done) = match r.target {
+            Target::Pane { pane, .. } => (
                 Op::SetTitle { pane: pane.clone(), title: (!auto).then(|| text.clone()) },
                 Op::SetTitle { pane, title: r.renamed.then_some(r.original) },
                 if auto { "back to the automatic title" } else { "renamed" },
             ),
-            Renaming::Session { session } => (
+            Target::Session { session } => (
                 Op::RenameSession { session: session.clone(), name: text.clone() },
                 Op::RenameSession { session, name: r.original },
                 "renamed",
             ),
-            Renaming::Window { window } => (
+            Target::Window { window, .. } => (
                 Op::RenameWindow { window: window.clone(), name: text.clone() },
                 Op::RenameWindow { window, name: if r.renamed { r.original } else { String::new() } },
                 if auto { "named after what runs" } else { "renamed" },
@@ -947,13 +941,12 @@ impl App {
                 Some((s, w, p)) => (format!("pane {}:{}.{}", s.name, w.index, p.index), agents_in(std::iter::once(p))),
                 None => ("pane".into(), String::new()),
             },
-            Target::New(_) => (String::new(), String::new()),
         }
     }
 
     /// Ask before killing the selected session, window or pane.
     fn kill(&mut self) {
-        let Some(target) = self.selected_target().cloned().filter(|t| !matches!(t, Target::New(_))) else { return };
+        let Some(target) = self.selected_target().cloned() else { return };
         if matches!(target, Target::Session { .. }) && self.snap.sessions.len() == 1 {
             return self.note("that is the only session: kill the server instead");
         }
@@ -963,7 +956,7 @@ impl App {
             (_, _) => detail,
         };
         let question = if detail.is_empty() { format!("kill {label}?") } else { format!("kill {label}? {detail}") };
-        self.mode = Mode::Confirm(Confirm { job: Job::new(Op::Kill(target), format!("killed {label}")), question, verb: "kill" });
+        self.mode = Mode::Confirm(Confirm { job: Job::new(Op::Kill(target), format!("killed {label}")), question });
     }
 
     /// Run JOB now, or ask first when QUESTION says it does more than it
@@ -971,7 +964,7 @@ impl App {
     fn maybe_confirm(&mut self, job: Job, question: Option<String>) -> Action {
         match question {
             Some(question) => {
-                self.mode = Mode::Confirm(Confirm { job, question, verb: "move" });
+                self.mode = Mode::Confirm(Confirm { job, question });
                 Action::None
             }
             None => Action::Run(job),
@@ -1054,13 +1047,13 @@ impl App {
 
     /// Pick up the selected window or pane (sessions tab).
     fn pick_up(&mut self, dragging: bool) {
-        if self.tab != Tab::Sessions {
+        if !self.movable() {
+            if self.tab == Tab::Sessions {
+                self.note("pick up a window or a pane");
+            }
             return;
         }
         let Some(target) = self.selected_target().cloned() else { return };
-        if !matches!(target, Target::Window { .. } | Target::Pane { .. }) {
-            return self.note("pick up a window or a pane");
-        }
         let (label, _) = self.describe(&target);
         self.keep = Some(target.clone());
         self.mode = Mode::Move(Carry { target, label, dragging });
@@ -1073,7 +1066,6 @@ impl App {
         let Mode::Move(carry) = &self.mode else { return Ok(None) };
         let at = self.selected_target().ok_or("choose a session, window or pane")?;
         match (&carry.target, at) {
-            (_, Target::New(_)) => Err("drop it on a session, window or pane".into()),
             (Target::Window { session, window }, at) => {
                 let (_, s, wi, _) = self.window_at(session, window).ok_or("that window has closed")?;
                 let ws = &s.windows;
@@ -1087,7 +1079,6 @@ impl App {
                         let (_, o, _, w) = self.window_at(other, to).ok_or("that window has closed")?;
                         (other.clone(), to.clone(), false, format!("moved after {}:{} {}", o.name, w.index, w.name))
                     }
-                    Target::New(_) => unreachable!(),
                 };
                 let already = to == *window || (!before && wi > 0 && ws[wi - 1].id == to) || (before && ws.get(wi + 1).is_some_and(|w| w.id == to));
                 if already {
@@ -1125,7 +1116,6 @@ impl App {
                         }
                         (Op::JoinPane { pane: pane.clone(), to: to.clone(), before: false }, "moved".to_string())
                     }
-                    Target::New(_) => unreachable!(),
                 };
                 let alone = self.window_at(session, window).is_some_and(|(_, _, _, w)| w.panes.len() == 1);
                 let closes = alone.then(|| format!("move {}? its window closes: it is its only pane", carry.label));
@@ -1185,7 +1175,6 @@ impl App {
                 (session.clone(), window.clone(), w.active_pane().map(|p| p.path.clone()))
             }),
             Target::Pane { session, window, pane } => Some((session.clone(), window.clone(), self.snap.pane(pane).map(|(_, _, p)| p.path.clone()))),
-            Target::New(_) => None,
         };
         let Some((sid, after, dir)) = window else { return };
         let dir = dir.unwrap_or_else(|| self.home.clone());
@@ -1211,14 +1200,10 @@ impl App {
     fn finish_create(&mut self, save: bool) -> Action {
         let Mode::Create(c) = &mut self.mode else { return Action::None };
         let name = c.field.text().trim().to_string();
-        let refuse = match &c.new {
-            _ if !save => None,
-            New::Session { .. } if name.is_empty() => Some("a session needs a name".to_string()),
-            New::Session { .. } if name.contains(['.', ':']) => Some("session names can't have . or :".to_string()),
-            New::Session { .. } if self.snap.sessions.iter().any(|s| s.name == name) => Some(format!("a session called {name} exists")),
-            _ => None,
-        };
-        if let Some(why) = refuse {
+        if save
+            && matches!(c.new, New::Session { .. })
+            && let Some(why) = session_name_problem(&self.snap, &name, None)
+        {
             c.error = Some(why);
             return Action::None;
         }
@@ -1258,102 +1243,127 @@ impl App {
         }
     }
 
+    /// Whether the selected row is a window or a pane to move (sessions tab).
+    fn movable(&self) -> bool {
+        self.tab == Tab::Sessions && matches!(self.selected_target(), Some(Target::Window { .. } | Target::Pane { .. }))
+    }
+
+    /// Whether COMMAND applies in the list, to the selected row: what the
+    /// footer and the menu offer. PREVIEW_FITS: whether the preview has room.
+    fn can(&self, command: Command, preview_fits: bool) -> bool {
+        match command {
+            Command::Open | Command::Kill => self.selected_target().is_some(),
+            Command::Panes => self.selected_window().is_some(),
+            Command::Rename => self.renamable(),
+            Command::RenameSuggest => self.can_suggest && self.selected_agent().is_some(),
+            Command::Move | Command::MoveUp | Command::MoveDown => self.movable(),
+            Command::Undo => !self.undo.is_empty(),
+            Command::Group => self.tab == Tab::Agents,
+            Command::Preview => preview_fits,
+            _ => true,
+        }
+    }
+
+    /// COMMAND's key, as hints and menu items show it (on_key binds them).
+    fn key(&self, command: Command) -> &'static str {
+        match command {
+            Command::Open | Command::Save | Command::Confirm => "⏎",
+            Command::Close | Command::Cancel => "esc",
+            Command::Tab(_) => "⇥",
+            Command::Panes if self.selected_window().is_some_and(|(_, open)| open) => "←",
+            Command::Panes => "→",
+            Command::Group => "^g",
+            Command::Preview => "^o",
+            Command::Rename | Command::Suggest => "^r",
+            Command::RenameSuggest => "^r^r",
+            Command::Kill => "^x",
+            Command::NewWindow => "^s",
+            // Naming a new window, ^s switches to a session.
+            Command::NewSession if matches!(self.mode, Mode::Create(_)) => "^s",
+            Command::NewSession => "^s^s",
+            Command::Move => "^t",
+            Command::MoveUp => "⇧↑",
+            Command::MoveDown => "⇧↓",
+            Command::Undo => "^z",
+            Command::Clear => "^u",
+            Command::Menu => "",
+        }
+    }
+
+    fn hint(&self, command: Command, label: impl Into<String>, rank: u8) -> Hint {
+        Hint { key: self.key(command), label: label.into(), command, rank }
+    }
+
     /// What can be done with the selected row, and in the popup.
-    pub fn menu_items(&self, preview_fits: bool) -> Vec<Item> {
-        let mut items = Vec::new();
-        let target = self.selected_target();
-        if target.is_some() {
-            items.push(item("open", "⏎", Command::Open));
-        }
-        if let Some((_, open)) = self.selected_window() {
-            items.push(item(if open { "hide panes" } else { "show panes" }, if open { "←" } else { "→" }, Command::Panes));
-        }
-        if self.renamable() {
-            items.push(item("rename", "^r", Command::Rename));
-        }
-        if self.selected_agent().is_some() && self.can_suggest {
-            items.push(item("suggest a title", "^r^r", Command::RenameSuggest));
-        }
-        if self.tab == Tab::Sessions && matches!(target, Some(Target::Window { .. } | Target::Pane { .. })) {
-            items.push(item("move…", "^t", Command::Move));
-            items.push(item("move up", "⇧↑", Command::MoveUp));
-            items.push(item("move down", "⇧↓", Command::MoveDown));
-        }
-        if target.is_some() {
-            items.push(item("kill…", "^x", Command::Kill));
-        }
-        items.push(item("new window here", "^s", Command::NewWindow));
-        items.push(item("new session", "^s^s", Command::NewSession));
-        if !self.undo.is_empty() {
-            items.push(item("undo", "^z", Command::Undo));
-        }
-        if self.tab == Tab::Agents {
-            items.push(item(format!("group by {}", self.group.next().label()), "^g", Command::Group));
-        }
-        if preview_fits {
-            items.push(item(if self.preview_on { "hide preview" } else { "show preview" }, "^o", Command::Preview));
-        }
-        items.push(item(format!("{} tab", self.tab.other().label()), "⇥", Command::Tab(self.tab.other())));
-        items
+    pub fn menu_items(&self, preview_fits: bool) -> Vec<Hint> {
+        let open = self.selected_window().is_some_and(|(_, open)| open);
+        let group = format!("group by {}", self.group.next().label());
+        let tab = format!("{} tab", self.tab.other().label());
+        [
+            (Command::Open, "open"),
+            (Command::Panes, if open { "hide panes" } else { "show panes" }),
+            (Command::Rename, "rename"),
+            (Command::RenameSuggest, "suggest a title"),
+            (Command::Move, "move…"),
+            (Command::MoveUp, "move up"),
+            (Command::MoveDown, "move down"),
+            (Command::Kill, "kill…"),
+            (Command::NewWindow, "new window here"),
+            (Command::NewSession, "new session"),
+            (Command::Undo, "undo"),
+            (Command::Group, &group),
+            (Command::Preview, if self.preview_on { "hide preview" } else { "show preview" }),
+            (Command::Tab(self.tab.other()), &tab),
+        ]
+        .into_iter()
+        .filter(|&(c, _)| self.can(c, preview_fits))
+        .map(|(c, label)| self.hint(c, label, 0))
+        .collect()
     }
 
     /// The footer: hints in display order, and the one pinned on the right.
     pub fn hints(&self, view: &View) -> (Vec<Hint>, Hint) {
-        let mut out = Vec::new();
+        let cancel = self.hint(Command::Cancel, "cancel", 0);
         match &self.mode {
             Mode::Rename(r) => {
-                out.push(hint("⏎", "save", Command::Save, 0));
+                let mut out = vec![self.hint(Command::Save, "save", 0)];
                 if self.can_suggest {
-                    out.push(hint("^r", if r.error.is_some() { "retry" } else { "suggest" }, Command::Suggest, 1));
+                    out.push(self.hint(Command::Suggest, if r.error.is_some() { "retry" } else { "suggest" }, 1));
                 }
-                out.push(hint("^u", "clear", Command::Clear, 2));
-                return (out, hint("esc", "cancel", Command::Cancel, 0));
+                out.push(self.hint(Command::Clear, "clear", 2));
+                return (out, cancel);
             }
-            Mode::Menu(_) => return (vec![hint("⏎", "choose", Command::Open, 0)], hint("esc", "back", Command::Cancel, 0)),
-            Mode::Confirm(c) => return (vec![hint("⏎", c.verb, Command::Confirm, 0)], hint("esc", "cancel", Command::Cancel, 0)),
-            Mode::Move(_) => return (vec![hint("⏎", "drop here", Command::Confirm, 0)], hint("esc", "cancel", Command::Cancel, 0)),
+            Mode::Menu(_) => return (vec![self.hint(Command::Open, "choose", 0)], self.hint(Command::Cancel, "back", 0)),
+            Mode::Confirm(c) => return (vec![self.hint(Command::Confirm, if c.kills() { "kill" } else { "move" }, 0)], cancel),
+            Mode::Move(_) => return (vec![self.hint(Command::Confirm, "drop here", 0)], cancel),
             Mode::Create(c) => {
                 let other = if matches!(c.new, New::Window { .. }) { "session" } else { "window" };
-                let hints = vec![hint("⏎", "create", Command::Save, 0), hint("^s", other, Command::NewSession, 1), hint("^u", "clear", Command::Clear, 2)];
-                return (hints, hint("esc", "cancel", Command::Cancel, 0));
+                return (vec![self.hint(Command::Save, "create", 0), self.hint(Command::NewSession, other, 1), self.hint(Command::Clear, "clear", 2)], cancel);
             }
             Mode::List => {}
         }
-        if self.selected_target().is_some() {
-            out.push(hint("⏎", "open", Command::Open, 0));
-        }
+        let open = self.selected_window().is_some_and(|(_, open)| open);
         let other = self.tab.other();
-        out.push(if view.compact { hint("", other.label(), Command::Tab(other), 3) } else { hint("⇥", "tab", Command::Tab(other), 3) });
-        match self.tab {
-            Tab::Sessions => {
-                if let Some((_, open)) = self.selected_window() {
-                    out.push(if open { hint("←", "hide panes", Command::Panes, 4) } else { hint("→", "panes", Command::Panes, 4) });
-                }
-            }
-            Tab::Agents => {
-                let group = if view.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
-                out.push(hint("^g", group, Command::Group, 5));
-            }
-        }
-        if self.renamable() {
-            out.push(hint("^r", "rename", Command::Rename, 1));
-        }
-        if self.tab == Tab::Sessions && matches!(self.selected_target(), Some(Target::Window { .. } | Target::Pane { .. })) {
-            out.push(hint("^t", "move", Command::Move, 4));
-        }
-        if self.selected_target().is_some() {
-            out.push(hint("^x", "kill", Command::Kill, 5));
-        }
-        if self.tab == Tab::Sessions {
-            out.push(hint("^s", "new", Command::NewWindow, 7));
-        }
-        if !self.undo.is_empty() {
-            out.push(hint("^z", "undo", Command::Undo, 2));
-        }
-        if view.preview_fits {
-            out.push(hint("^o", "preview", Command::Preview, 6));
-        }
-        (out, hint("esc", "close", Command::Close, 0))
+        let group = if view.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
+        let hints = [
+            (Command::Open, "open", 0),
+            // Compact (words alone), the other tab's name.
+            (Command::Tab(other), if view.compact { other.label() } else { "tab" }, 3),
+            (Command::Panes, if open { "hide panes" } else { "panes" }, 4),
+            (Command::Group, &group, 5),
+            (Command::Rename, "rename", 1),
+            (Command::Move, "move", 4),
+            (Command::Kill, "kill", 5),
+            (Command::NewWindow, "new", 7),
+            (Command::Undo, "undo", 2),
+            (Command::Preview, "preview", 6),
+        ];
+        // New windows show in the sessions tab: its footer offers them.
+        let out = (hints.into_iter())
+            .filter(|&(c, ..)| self.can(c, view.preview_fits) && (c != Command::NewWindow || self.tab == Tab::Sessions))
+            .map(|(c, label, rank)| self.hint(c, label, rank))
+            .collect();
+        (out, self.hint(Command::Close, "close", 0))
     }
 
     /// Do what COMMAND says, whether by key, tap or menu.
@@ -1362,11 +1372,12 @@ impl App {
             (Mode::Rename(_), Command::Save) => return self.finish_rename(true),
             (Mode::Rename(_), Command::Cancel) => return self.finish_rename(false),
             (Mode::Rename(_), Command::Suggest) => return self.suggest(),
-            (Mode::Rename(r), Command::Clear) => {
-                if !r.field.is_empty() {
-                    r.field.set("");
-                    r.suggesting = None;
-                }
+            (Mode::Rename(_) | Mode::Create(_), Command::Clear) => {
+                self.edit_name(|f| {
+                    let had = !f.is_empty();
+                    f.set("");
+                    had
+                });
                 return Action::None;
             }
             (Mode::Rename(_), _) => return Action::None,
@@ -1397,11 +1408,6 @@ impl App {
                 return Action::None;
             }
             (Mode::Create(_), Command::Cancel) => return self.finish_create(false),
-            (Mode::Create(c), Command::Clear) => {
-                c.field.set("");
-                c.error = None;
-                return Action::None;
-            }
             (Mode::Create(_), _) => return Action::None,
             (Mode::List, _) => {}
         }
@@ -1427,29 +1433,27 @@ impl App {
             Command::Move => self.pick_up(false),
             Command::MoveUp => return self.shift(false),
             Command::MoveDown => return self.shift(true),
-            Command::Menu => self.open_menu(Position::default(), true),
-            Command::Group | Command::Save | Command::Suggest | Command::Clear | Command::Cancel | Command::Confirm => {}
+            // The footer's ⋯ opens the menu itself (on_mouse): its view says
+            // whether the preview fits.
+            Command::Menu | Command::Group | Command::Save | Command::Suggest | Command::Clear | Command::Cancel | Command::Confirm => {}
         }
         Action::None
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
-        if !self.debug {
-            self.status = None;
-        }
+        self.status = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match &mut self.mode {
-            Mode::Rename(r) => {
+            Mode::Rename(_) | Mode::Create(_) => {
                 return match key.code {
                     KeyCode::Enter => self.run(Command::Save),
                     KeyCode::Esc => self.run(Command::Cancel),
                     KeyCode::Char('c') if ctrl => self.run(Command::Cancel),
+                    // Renaming: a suggestion. Creating: a window or a session.
                     KeyCode::Char('r') if ctrl => self.run(Command::Suggest),
+                    KeyCode::Char('s') if ctrl => self.run(Command::NewSession),
                     _ => {
-                        if r.field.key(key) == Edited::Text {
-                            r.suggesting = None;
-                            r.error = None;
-                        }
+                        self.edit_name(|f| f.key(key) == Edited::Text);
                         Action::None
                     }
                 };
@@ -1479,24 +1483,10 @@ impl App {
                 // Not Delete: it asked, and a held key repeats.
                 let yes = match key.code {
                     KeyCode::Enter => true,
-                    KeyCode::Char('x') => ctrl && c.verb == "kill",
+                    KeyCode::Char('x') => ctrl && c.kills(),
                     _ => false,
                 };
                 return self.run(if yes { Command::Confirm } else { Command::Cancel });
-            }
-            Mode::Create(c) => {
-                return match key.code {
-                    KeyCode::Enter => self.run(Command::Save),
-                    KeyCode::Esc => self.run(Command::Cancel),
-                    KeyCode::Char('c') if ctrl => self.run(Command::Cancel),
-                    KeyCode::Char('s') if ctrl => self.run(Command::NewSession),
-                    _ => {
-                        if c.field.key(key) == Edited::Text {
-                            c.error = None;
-                        }
-                        Action::None
-                    }
-                };
             }
             Mode::Move(_) => match key.code {
                 KeyCode::Enter => return self.run(Command::Confirm),
@@ -1549,16 +1539,11 @@ impl App {
     /// double-tap may arrive as something else): a tap on the selected row
     /// opens it. Right-click (or ctrl-click) opens the row's menu.
     pub fn on_mouse(&mut self, ev: MouseEvent, view: &View, now: Instant) -> Action {
-        if self.debug {
-            self.status = Some(Status::Note(format!("mouse {:?} at {},{}", ev.kind, ev.column, ev.row)));
-        }
         let at = Position::new(ev.column, ev.row);
         let hit = view.hit(at);
         match ev.kind {
             MouseEventKind::Down(button) => {
-                if !self.debug {
-                    self.status = None;
-                }
+                self.status = None;
                 let context = button == MouseButton::Right || (button == MouseButton::Left && ev.modifiers.contains(KeyModifiers::CONTROL));
                 self.press = None;
                 if matches!(self.mode, Mode::Menu(_)) && hit.is_none() {
@@ -1584,15 +1569,18 @@ impl App {
                     self.mode = Mode::List;
                     return Action::None;
                 }
+                // A click on the row being named does nothing (the "+ new" row
+                // names nothing, so it is no hit); elsewhere, how to finish.
                 let editing = match &self.mode {
-                    Mode::Rename(r) => Some((r.target.clone(), "⏎ save or esc cancel first")),
-                    Mode::Create(_) => Some((Target::New(0), "⏎ create or esc cancel first")),
+                    Mode::Rename(r) => Some((Some(r.target.clone()), "⏎ save or esc cancel first")),
+                    Mode::Create(_) => Some((None, "⏎ create or esc cancel first")),
                     _ => None,
                 };
-                if let Some((target, how)) = editing {
+                if let Some((own, how)) = editing {
                     match &hit {
                         Some(Hit::Button(_)) => {}
-                        Some(Hit::Row(_, t)) if *t == target => return Action::None,
+                        Some(Hit::Row(_, t)) if Some(t) == own.as_ref() => return Action::None,
+                        None if own.is_none() => return Action::None,
                         _ => {
                             self.note(how);
                             return Action::None;
@@ -1699,7 +1687,7 @@ impl App {
         if let (Mode::List, Some(press)) = (&self.mode, &self.press) {
             let Some(Hit::Row(_, from)) = &press.hit else { return Action::None };
             let moved = !matches!(&hit, Some(Hit::Row(_, t)) if t == from);
-            if !moved || self.tab != Tab::Sessions || !matches!(from, Target::Window { .. } | Target::Pane { .. }) {
+            if !moved || !self.movable() {
                 return Action::None;
             }
             self.pick_up(true);
@@ -1750,7 +1738,7 @@ mod tests {
 
     /// An app opened from window WINDOW of session $1, with a suggest command.
     fn new(snap: Snapshot, tab: Tab, window: &str) -> App {
-        App::new(snap, tab, "$1".into(), window.into(), String::new(), false, true)
+        App::new(snap, tab, "$1".into(), window.into(), String::new(), true)
     }
 
     /// Agents in two folders: header, card, card, header, card, card.
@@ -1840,6 +1828,11 @@ mod tests {
             Mode::Rename(r) => Some(r.field.text()),
             _ => None,
         }
+    }
+
+    /// Whether the "+ new" row is listed.
+    fn naming(app: &App) -> bool {
+        app.rows.iter().any(|r| matches!(r.kind, RowKind::New))
     }
 
     fn renaming(app: &App) -> Option<&Rename> {
@@ -2087,6 +2080,24 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_has_every_hint_with_its_key() {
+        let mut app = sessions_app("@1");
+        app.expanded.insert(window("$1", "@1"));
+        let view = View::new();
+        for tab in [Tab::Sessions, Tab::Agents] {
+            app.run(Command::Tab(tab));
+            let rows: Vec<usize> = (0..app.rows.len()).filter(|&i| app.selectable(i)).collect();
+            for i in rows {
+                app.selected = i;
+                let menu = app.menu_items(view.preview_fits);
+                for h in app.hints(&view).0 {
+                    assert!(menu.iter().any(|m| m.command == h.command && m.key == h.key), "{h:?} on row {i} of {tab:?}: {menu:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_footer_keeps_close_and_folds_the_rest_into_a_menu() {
         let mut app = agents_app();
         let mut view = View::new();
@@ -2303,7 +2314,7 @@ mod tests {
         let term = draw(&app, &mut view, 120, 30);
         let action = click(&mut app, &view, MouseButton::Left, find(&term, "suggest a title"));
         assert!(matches!(&action, Action::Suggest { pane, .. } if pane == "%3"), "{action:?}");
-        assert_eq!(renaming(&app).map(|r| &r.what), Some(&Renaming::Agent { pane: "%3".into() }));
+        assert!(matches!(renaming(&app).map(|r| &r.target), Some(Target::Pane { pane, .. }) if pane == "%3"));
         // Clicking another card while renaming says how to finish.
         let term = draw(&app, &mut view, 120, 30);
         click(&mut app, &view, MouseButton::Left, find(&term, "one"));
@@ -2332,20 +2343,20 @@ mod tests {
         mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Right), at, Instant::now());
         draw(&app, &mut view, 120, 30);
         mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Right), item, Instant::now());
-        assert_eq!(renaming(&app).map(|r| &r.what), Some(&Renaming::Agent { pane: "%2".into() }));
+        assert!(matches!(renaming(&app).map(|r| &r.target), Some(Target::Pane { pane, .. }) if pane == "%2"));
         app.run(Command::Cancel);
         // Keys: ↓ ↓ then ⏎; any other key closes it and acts.
-        app.run(Command::Menu);
+        app.open_menu(Position::default(), true);
         app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
         app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(renaming(&app).is_some(), "the second item, rename");
         app.run(Command::Cancel);
-        app.run(Command::Menu);
+        app.open_menu(Position::default(), true);
         type_(&mut app, "t");
         assert!(matches!(app.mode, Mode::List));
         assert_eq!(app.query.text(), "t");
         // A click outside closes it.
-        app.run(Command::Menu);
+        app.open_menu(Position::default(), true);
         draw(&app, &mut view, 120, 30);
         mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), (110, 25), Instant::now());
         assert!(matches!(app.mode, Mode::List));
@@ -2355,13 +2366,13 @@ mod tests {
     fn a_menu_closes_when_its_row_goes() {
         let mut app = sessions_app("@1");
         select(&mut app, window("$1", "@2"));
-        app.run(Command::Menu);
+        app.open_menu(Position::default(), true);
         let without_logs = || fixture(&["$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a", "$2|play|@3|1|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c"]);
         app.set_snapshot(without_logs());
         assert!(matches!(app.mode, Mode::List), "its move down would swap another window");
         assert!(matches!(&app.status, Some(Status::Failed(_))));
         // A refresh that keeps the row keeps the menu.
-        app.run(Command::Menu);
+        app.open_menu(Position::default(), true);
         app.set_snapshot(without_logs());
         assert!(matches!(app.mode, Mode::Menu(_)));
     }
@@ -2607,6 +2618,8 @@ mod tests {
         assert!(matches!(shift(&mut app, KeyCode::Up), Action::None));
         let Mode::Confirm(c) = &app.mode else { panic!() };
         assert_eq!(c.question, "move window game to work? play closes: it is its only window");
+        assert!(matches!(ctrl(&mut app, 'x'), Action::None) && matches!(app.mode, Mode::List), "^x answers a kill only");
+        shift(&mut app, KeyCode::Up);
         assert_eq!(job(enter(&mut app)).op, Op::MoveWindow { from: "$2".into(), window: "@3".into(), into: "$1".into(), to: "@2".into(), before: false });
         // Panes swap inside their window, then join the next one.
         app.expanded.insert(window("$1", "@1"));
@@ -2748,11 +2761,18 @@ mod tests {
             _ => "·".into(),
         }).collect();
         assert_eq!(names, ["·", "edit", "+", "logs", "·", "game"]);
-        assert_eq!(app.selected_target(), Some(&Target::New(0)));
+        assert!(matches!(app.rows[app.selected].kind, RowKind::New));
         let lines = screen(&draw(&app, &mut View::new(), 120, 14));
         assert!(lines.iter().any(|l| l.contains("├─ + ▏window name (empty: named after what runs)  /h/a")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("+ new window")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("⏎ create   ^s session   ^u clear") && l.ends_with("esc cancel │")), "{lines:#?}");
+        let mut view = View::new();
+        let term = draw(&app, &mut view, 120, 14);
+        click(&mut app, &view, MouseButton::Left, find(&term, "▏window name"));
+        assert_eq!(app.status, None, "a click on the row being named");
+        click(&mut app, &view, MouseButton::Left, find(&term, "logs"));
+        assert_eq!(app.status, Some(Status::Note("⏎ create or esc cancel first".into())));
+        assert!(matches!(app.mode, Mode::Create(_)));
         // Moving and filtering wait: keys name it.
         app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
         type_(&mut app, "notes");
@@ -2761,7 +2781,7 @@ mod tests {
         assert_eq!(j.op, Op::NewWindow { session: "$1".into(), after: "@1".into(), name: "notes".into(), dir: "/h/a".into() });
         assert!(j.open, "and goes there");
         assert!(matches!(app.mode, Mode::List));
-        assert!(app.position(&Target::New(0)).is_none(), "the row goes with the mode");
+        assert!(!naming(&app), "the row goes with the mode");
         // On a session row: last in it. No name: tmux names it.
         select(&mut app, Target::Session { session: "$1".into() });
         ctrl(&mut app, 's');
@@ -2771,7 +2791,7 @@ mod tests {
         select(&mut app, window("$1", "@1"));
         ctrl(&mut app, 's');
         assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::None));
-        assert!(matches!(app.mode, Mode::List) && app.position(&Target::New(0)).is_none());
+        assert!(matches!(app.mode, Mode::List) && !naming(&app));
         assert_eq!(app.selected_target(), Some(&window("$1", "@1")));
     }
 

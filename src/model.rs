@@ -85,14 +85,12 @@ pub struct Snapshot {
     pub counts: [usize; State::ALL.len()],
 }
 
-/// A session, window or pane, by tmux ids (`$1`, `@2`, `%3`); or the
-/// filter's Nth "+ new …" row, which names nothing on the server yet.
+/// A session, window or pane, by tmux ids (`$1`, `@2`, `%3`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Target {
     Session { session: String },
     Window { session: String, window: String },
     Pane { session: String, window: String, pane: String },
-    New(usize),
 }
 
 impl Target {
@@ -103,7 +101,6 @@ impl Target {
             Target::Session { session } => session.clone(),
             Target::Window { session, window } => format!("{session}:{window}"),
             Target::Pane { session, window, pane } => format!("{session}:{window}.{pane}"),
-            Target::New(_) => String::new(),
         })
     }
 }
@@ -347,5 +344,6 @@ mod tests {
     fn targets_name_their_session() {
         let t = Target::Pane { session: "$1".into(), window: "@2".into(), pane: "%3".into() };
         assert_eq!(t.arg(), "'$1:@2.%3'");
+        assert_eq!(Target::Window { session: "$1".into(), window: "@2".into() }.arg(), "'$1:@2'");
     }
 }
