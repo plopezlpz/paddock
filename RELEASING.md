@@ -6,7 +6,10 @@ exist yet. The Release workflow takes care of that: it moves master itself, last
 1. Push any change to `.github/workflows/` to master first, on its own. The
    workflow's token is not allowed to push workflow changes, so a release whose
    commits include one publishes but cannot move master.
-2. Bump `version` in `Cargo.toml` (and `Cargo.lock`) and commit. Don't push master.
+2. Bump `version` in `Cargo.toml` (and `Cargo.lock`). In `CHANGELOG.md`, rename
+   `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a new, empty
+   `## [Unreleased]` above it, and update the compare links at the bottom.
+   Commit both in the commit you tag. Don't push master.
 3. Tag it and push the tag alone: `git tag vX.Y.Z && git push origin vX.Y.Z`.
    Never move a tag once pushed; the workflow refuses a tag that no longer
    names the commit it started from. If something is wrong, cut a new version.
@@ -25,6 +28,9 @@ exist yet. The Release workflow takes care of that: it moves master itself, last
      commit the output of `scripts/update-formula.sh X.Y.Z` to the tap as `Formula/paddock.rb`;
    - master: `git push origin 'vX.Y.Z^{commit}:master' && gh workflow run pages.yml --ref master`
      (only once the release is published).
+6. The workflow publishes GitHub's generated notes. Once the release is published,
+   replace them with the version's `CHANGELOG.md` section (its body, without the heading):
+   `awk '/^## /{p=0} /^## \[X\.Y\.Z\]/{p=1; next} p' CHANGELOG.md | gh release edit vX.Y.Z --notes-file -`
 
 A pre-release tag (`vX.Y.Z-rc1`) is published as a pre-release, never becomes
 "Latest", and leaves the tap and master alone.

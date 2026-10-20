@@ -13,7 +13,7 @@ Keep your tmux.conf, your prefix and keybindings, your plugins and sessions.
 paddock is one popup on top of them.
 </p>
 
-<p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a> · <a href="https://plopezlpz.github.io/paddock/">Website</a></p>
+<p align="center"><a href="#features">Features</a> · <a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#options">Options</a> · <a href="#agent-state">Agent state</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="https://plopezlpz.github.io/paddock/">Website</a></p>
 
 <details open>
 <summary><b>Demo</b></summary>
@@ -159,10 +159,11 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 `prefix a` is the default key, unless your config already binds it; set
 `@paddock-key` to choose another. Hooked up a new agent later? Run
 `bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install`.
-To update, press `prefix U`; the key then offers paddock's new version. Then
-run that `manage-provider.sh install` line again so your agents get the current
-hook commands (the old ones keep working until you do). TPM may keep plugins
-in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
+To update, press `prefix U`; the key then offers paddock's new version
+([what changed](CHANGELOG.md)). Then run that `manage-provider.sh install`
+line again so your agents get the current hook commands (the old ones keep
+working until you do). TPM may keep plugins in `~/.config/tmux/plugins/`
+instead of `~/.tmux/plugins/`.
 Outside tmux, `bash ~/.tmux/plugins/paddock/scripts/install.sh` downloads the
 binary.
 
