@@ -50,8 +50,8 @@ are waiting for you and which have finished, and jump to one with a key press.
   to your agents' own hooks. Add both and you get the status bar dots, the
   desktop notifications and paddock's agents tab, with no daemon and no
   polling. paddock doesn't start or wrap your agents; they run in your panes as
-  they do today. Agents agent-status.tmux has no hooks for, such as Gemini
-  or Cursor, are not covered yet (see [Agent state](#agent-state)).
+  they do today. Agents agent-status.tmux has no adapter for, such as
+  Cursor's agent, are not covered yet (see [Agent state](#agent-state)).
 
 [herdr](https://herdr.dev) is an agent runtime: its own server that keeps your
 agents' terminals alive, with its own TUI, CLI and API, and a good home if you
@@ -297,7 +297,8 @@ you get the status bar dots, the desktop notifications and paddock's agents
 tab. Without it, paddock is a session switcher with a live preview.
 
 agent-status.tmux supports pi, OMP, OpenCode, Kimi Code, MastraCode, Kilo Code,
-Claude Code and Codex; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+Claude Code, Codex and Gemini CLI; see [its README](https://github.com/plopezlpz/agent-status.tmux#providers).
+Gemini CLI runs hooks only in folders you trust.
 Codex runs a hook only once you have trusted it: when it says "Hooks need
 review", choose "Review hooks" (or run `/hooks`) and trust the `hook-event.sh`
 ones. In tmux, run it as `codex --no-daemon` (e.g. `alias codex='codex --no-daemon'`):
