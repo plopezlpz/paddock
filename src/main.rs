@@ -297,18 +297,6 @@ fn run_op(tmux: &mut Control, op: &Op, ctx: &Context) -> Result<Option<Target>, 
     tmux.cmd(&line).map(|_| None)
 }
 
-/// Before JOB runs: a window tmux names itself (automatic-rename) is
-/// renamed back to automatic naming by its undo, not frozen at its name.
-fn prepare(tmux: &mut Control, job: &mut app::Job) {
-    let Op::RenameWindow { window, .. } = &job.op else { return };
-    let auto = tmux.cmd(&format!("show-options -wv -t {} automatic-rename", quote(window)));
-    if auto.is_ok_and(|v| v.first().is_some_and(|v| v == "on"))
-        && let Some(Op::RenameWindow { name, .. }) = job.undo_op()
-    {
-        name.clear();
-    }
-}
-
 /// How long a suggestion may take before it is given up (and stopped).
 const SUGGEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -503,8 +491,7 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                         match action {
                             Action::Quit => return Ok(None),
                             Action::Activate(t) => return Ok(Some(t)),
-                            Action::Run(mut job) => {
-                                prepare(&mut tmux, &mut job);
+                            Action::Run(job) => {
                                 let result = run_op(&mut tmux, &job.op, &ctx);
                                 if let Some(created) = app.ran(job, result) {
                                     return Ok(Some(created));

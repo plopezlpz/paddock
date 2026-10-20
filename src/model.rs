@@ -67,6 +67,8 @@ pub struct Window {
     pub index: String,
     pub name: String,
     pub active: bool,
+    /// tmux names it after what runs (automatic-rename).
+    pub auto: bool,
     pub panes: Vec<Pane>,
 }
 
@@ -106,7 +108,7 @@ impl Target {
 /// The `list-panes -a` fields, by level. The refresh subscription (main.rs)
 /// watches the same ones.
 pub const SESSION_FIELDS: &[&str] = &["session_id", "session_name"];
-pub const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "window_active"];
+pub const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "window_active", "automatic-rename"];
 pub const PANE_FIELDS: &[&str] = &[
     "pane_id",
     "pane_index",
@@ -150,7 +152,7 @@ fn title_of(pane_title: &str, host: &str) -> String {
 pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
     let mut sessions: Vec<Session> = Vec::new();
     for row in rows {
-        let [sid, sname, wid, windex, wname, wactive, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] =
+        let [sid, sname, wid, windex, wname, wactive, wauto, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] =
             row.as_slice()
         else {
             continue;
@@ -169,6 +171,7 @@ pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
                 index: windex.clone(),
                 name: wname.clone(),
                 active: wactive == "1",
+                auto: wauto == "1",
                 panes: Vec::new(),
             });
         }
@@ -262,18 +265,19 @@ mod tests {
     #[test]
     fn parses_the_tree() {
         let snap = fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/w",
-            "$1|work|@1|1|edit|1|%2|1|0|claude||working|0|claude|fix it||100||/w",
+            "$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/w",
+            "$1|work|@1|1|edit|1|0|%2|1|0|claude||working|0|claude|fix it||100||/w",
             // The same window linked at a second index.
-            "$1|work|@1|2|edit|0|%1|0|1|nvim|||||||||/w",
-            "$1|work|@2|3|logs|0|%3|0|1|tail||idle|1||auto|mine|||/w|with|bars",
-            "$9|_paddock|@9|0|paddock|1|%9|0|1|cat|||||||||/",
+            "$1|work|@1|2|edit|0|0|%1|0|1|nvim|||||||||/w",
+            "$1|work|@2|3|logs|0|1|%3|0|1|tail||idle|1||auto|mine|||/w|with|bars",
+            "$9|_paddock|@9|0|paddock|1|0|%9|0|1|cat|||||||||/",
             "broken|line",
         ]);
         assert_eq!(snap.sessions.len(), 1, "paddock's own session is left out");
         let w = &snap.sessions[0].windows;
         assert_eq!(w.iter().map(|w| (w.id.as_str(), w.index.as_str())).collect::<Vec<_>>(), [("@1", "1"), ("@1", "2"), ("@2", "3")]);
         assert_eq!(w[0].panes.len(), 2);
+        assert_eq!(w.iter().map(|w| w.auto).collect::<Vec<_>>(), [false, false, true], "named by tmux (automatic-rename)");
         let agent = w[0].panes[1].agent.as_ref().unwrap();
         assert_eq!((agent.state, agent.title.as_str(), agent.since, agent.renamed), (State::Working, "fix it", Some(100), false));
         let agent = w[2].panes[0].agent.as_ref().unwrap();
@@ -285,9 +289,9 @@ mod tests {
     #[test]
     fn titles_fall_back_to_the_pane_title() {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh|✳ Fix the parser|working|0|claude||||1|/a",
-            "$1|s|@1|1|w|1|%2|1|0|zsh|host|working|0|pi|||||/a",
-            "$1|s|@1|1|w|1|%3|2|0|zsh|⠋ x|working|0|pi|first prompt||||/a",
+            "$1|s|@1|1|w|1|0|%1|0|1|zsh|✳ Fix the parser|working|0|claude||||1|/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|zsh|host|working|0|pi|||||/a",
+            "$1|s|@1|1|w|1|0|%3|2|0|zsh|⠋ x|working|0|pi|first prompt||||/a",
         ]);
         let agents: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| (a.title.as_str(), a.stale)).collect();
         assert_eq!(agents, [("Fix the parser", true), ("", false), ("first prompt", false)], "status glyphs dropped; the host name is no title");

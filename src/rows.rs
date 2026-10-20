@@ -370,12 +370,12 @@ mod tests {
 
     fn snap() -> Snapshot {
         fixture(&[
-            "$1|work|@1|1|edit|1|%1|0|1|nvim|||||||||/h/a/src",
-            "$1|work|@1|1|edit|1|%2|1|0|zsh||working|0|claude|fix parser||||/h/a/src",
-            "$1|work|@2|2|logs|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
-            "$2|play|@3|1|game|1|%4|0|1|zsh|||||||||/h/c",
+            "$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a/src",
+            "$1|work|@1|1|edit|1|0|%2|1|0|zsh||working|0|claude|fix parser||||/h/a/src",
+            "$1|work|@2|2|logs|0|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
+            "$2|play|@3|1|game|1|0|%4|0|1|zsh|||||||||/h/c",
             // @2 linked into play too.
-            "$2|play|@2|2|logs|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
+            "$2|play|@2|2|logs|0|0|%3|0|1|tail||asking|0|codex|deploy||||/h/b/src",
         ])
     }
 
@@ -444,11 +444,11 @@ mod tests {
     #[test]
     fn agents_in_a_state_list_the_most_recent_first() {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|%1|0|1|zsh||idle|1|claude|old||100||/a",
-            "$1|s|@2|2|w|0|%2|0|1|zsh||idle|1|claude|unknown||||/a",
-            "$1|s|@3|3|w|0|%3|0|1|zsh||idle|1|claude|new||300||/a",
-            "$1|s|@4|4|w|0|%4|0|1|zsh||asking|0|claude|asks||50||/a",
-            "$1|s|@5|5|w|0|%5|0|1|zsh||idle|1|claude|mid||200||/a",
+            "$1|s|@1|1|w|1|0|%1|0|1|zsh||idle|1|claude|old||100||/a",
+            "$1|s|@2|2|w|0|0|%2|0|1|zsh||idle|1|claude|unknown||||/a",
+            "$1|s|@3|3|w|0|0|%3|0|1|zsh||idle|1|claude|new||300||/a",
+            "$1|s|@4|4|w|0|0|%4|0|1|zsh||asking|0|claude|asks||50||/a",
+            "$1|s|@5|5|w|0|0|%5|0|1|zsh||idle|1|claude|mid||200||/a",
         ]);
         let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 400);
         assert_eq!(names(&rows), ["/a (5)", "  asks", "  new", "  mid", "  old", "  unknown"]);
