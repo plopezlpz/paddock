@@ -280,6 +280,15 @@ if [ -x "$PB" ]; then
   check "real paddock: the key opens it" wait_screen "agents"
   check "real paddock: on its own session" t has-session -t =_paddock
   check "real paddock: no pane-focus-in hook for its session" lacks "$(cat "$TMP/focused" 2>/dev/null)" _paddock
+  # An agent arrives with the subscription, titled by its pane until the tool
+  # names it.
+  t select-pane -t main -T 'from the pane' \; set -p -t main @agent-state working
+  tmux -L "$OUT" send-keys Tab
+  check "real paddock: an agent shows with its pane title" wait_screen "from the pane"
+  t set -p -t main @agent-auto-description 'from the tool'
+  check "real paddock: then with the tool's title" wait_screen "from the tool"
+  t set -pu -t main @agent-state \; set -pu -t main @agent-auto-description
+  check "real paddock: and goes when it ends" wait_gone "from the tool"
   tmux -L "$OUT" send-keys Escape
   check "real paddock: closed, its session is gone" wait_gone "agents"
   check "real paddock: and so is its session" test -z "$(t list-sessions -F '#{session_name}' | grep _paddock)"

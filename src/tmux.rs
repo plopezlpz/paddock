@@ -12,12 +12,16 @@ use std::time::Duration;
 pub enum Msg {
     /// Something changed on the server that a snapshot should reflect.
     Changed,
+    /// The refresh subscription's new value: a snapshot's text.
+    Rows(String),
     /// The control client exited (server gone, or our session killed last).
     Exit,
 }
 
 /// Separates the fields of one format's output.
 pub const SEP: char = '\u{1f}';
+/// Ends each row of a format that lists many in one line.
+pub const ROW: char = '\u{1e}';
 
 pub struct Control {
     child: Child,
@@ -136,11 +140,18 @@ impl Control {
     }
 }
 
+/// What tmux makes itself (ids, indexes, flags): no control characters,
+/// so `field` leaves them as they are (a regex per field and pane costs).
+const PLAIN: &[&str] = &["session_id", "window_id", "window_index", "window_active", "automatic-rename", "pane_id", "pane_index", "pane_active"];
+
 /// `#{NAME}` with control characters as spaces: tmux does not escape
 /// values in replies or notifications, so a newline in a path or option
-/// would forge control lines, and a SEP would shift the fields. NAME may
-/// carry modifiers (`E:name`).
+/// would forge control lines, and a SEP or ROW would shift the fields. NAME
+/// may carry modifiers (`E:name`).
 pub fn field(name: &str) -> String {
+    if PLAIN.contains(&name) {
+        return format!("#{{{name}}}");
+    }
     let (mods, key) = name.rsplit_once(':').map_or((String::new(), name), |(m, k)| (format!("{m};"), k));
     format!("#{{{mods}s/[\x01-\x1f]/ /:{key}}}")
 }
@@ -192,6 +203,11 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
             block = Some(Block { guard: guard.to_string(), ours: guard.ends_with(" 1"), lines: Vec::new() });
         } else if line == "%exit" || line.starts_with("%exit ") {
             break;
+        } else if let Some(change) = line.strip_prefix("%subscription-changed ") {
+            // `NAME $S - - - : VALUE`; the only subscription is the refresh one.
+            if let Some((_, value)) = change.split_once(" : ") {
+                events(Msg::Rows(value.to_string()));
+            }
         } else if is_change(&line) {
             events(Msg::Changed);
         }
@@ -205,7 +221,6 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
 /// Notifications that can change what the popup shows.
 fn is_change(line: &str) -> bool {
     const KINDS: &[&str] = &[
-        "%subscription-changed",
         "%sessions-changed",
         "%session-renamed",
         "%window-add",
@@ -244,10 +259,11 @@ mod tests {
             "%session-changed $0 a\n",
             "%begin 1 11 1\nhello\nworld\n%end 1 11 1\n",
             "%window-add @3\n",
+            "%subscription-changed panes $1 - - - : a : b\n",
             "%begin 1 12 1\nno such pane\n%error 1 12 1\n",
         ));
         assert_eq!(replies, vec![Ok(vec!["hello".to_string(), "world".to_string()]), Err("no such pane".to_string())]);
-        assert_eq!(events, vec![Msg::Changed, Msg::Exit]);
+        assert_eq!(events, vec![Msg::Changed, Msg::Rows("a : b".into()), Msg::Exit]);
     }
 
     #[test]

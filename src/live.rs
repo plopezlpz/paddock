@@ -37,15 +37,10 @@ impl Live {
             self.pane = pane.map(String::from);
             self.raw.clear();
             self.body = Text::default();
-            self.wake();
+            self.interval = FAST;
+            self.quiet = 0;
+            self.next = Instant::now();
         }
-    }
-
-    /// Capture soon at full speed (selection changed, pane may have changed).
-    pub fn wake(&mut self) {
-        self.interval = FAST;
-        self.quiet = 0;
-        self.next = Instant::now();
     }
 
     /// When the next capture is due, if there is a pane to capture.

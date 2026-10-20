@@ -1,8 +1,8 @@
 //! A snapshot of every session, window and pane, with the agent options a
-//! tool (such as agent-status.tmux) sets on panes, from a single
-//! `list-panes -a`; and the targets commands act on.
+//! tool (such as agent-status.tmux) sets on panes, from one format over the
+//! whole server; and the targets commands act on.
 
-use crate::tmux::{quote, Control, SESSION};
+use crate::tmux::{field, quote, Control, ROW, SEP, SESSION};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum State {
@@ -105,34 +105,42 @@ impl Target {
     }
 }
 
-/// The `list-panes -a` fields, by level. The refresh subscription (main.rs)
-/// watches the same ones.
-pub const SESSION_FIELDS: &[&str] = &["session_id", "session_name"];
-pub const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "window_active", "automatic-rename"];
-pub const PANE_FIELDS: &[&str] = &[
+/// A row's fields, in order: these, the pane title, AGENT_FIELDS, the path.
+const FIELDS: &[&str] = &[
+    "session_id",
+    "session_name",
+    "window_id",
+    "window_index",
+    "window_name",
+    "window_active",
+    "automatic-rename",
     "pane_id",
     "pane_index",
     "pane_active",
     "pane_current_command",
-    "pane_title",
-    "@agent-state",
-    "@agent-unseen",
-    "@agent-kind",
-    "@agent-auto-description",
-    "@agent-description",
-    "@agent-state-at",
-    "@agent-stale",
-    // Last: a test fixture's last field may hold its separator.
-    "pane_current_path",
 ];
+/// Read for agent panes (with an @agent-state) only.
+const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale"];
 
-pub fn fields() -> Vec<&'static str> {
-    [SESSION_FIELDS, WINDOW_FIELDS, PANE_FIELDS].concat()
+/// Every pane as a row of `field`s ended by ROW, in one line: sessions by
+/// name, windows and panes by index (as `list-panes -a` lists them). The
+/// refresh subscription (main.rs) watches the same text, so it can stand
+/// for a snapshot. Other panes leave the agent fields empty, and agents
+/// with an automatic title the pane title, which they would not show: a
+/// shell sets it at every prompt, an agent animates it.
+pub fn format() -> String {
+    let join = |names: &[&str]| names.iter().map(|n| field(n)).collect::<Vec<_>>().join(&SEP.to_string());
+    let agent = format!("#{{?@agent-auto-description,,{}}}{SEP}{}", field("pane_title"), join(AGENT_FIELDS));
+    let none = SEP.to_string().repeat(AGENT_FIELDS.len());
+    // The path last: a test fixture's last field may hold its separator.
+    let row = format!("{}{SEP}#{{?@agent-state,{agent},{none}}}{SEP}{}", join(FIELDS), field("pane_current_path"));
+    format!("#{{S/n:#{{W:#{{P/i:{row}{ROW}}}}}}}")
 }
 
-pub fn snapshot(tmux: &mut Control, host: &str) -> Result<Snapshot, String> {
-    let rows = tmux.fields("list-panes -a -F", &fields())?;
-    Ok(parse(&rows, host))
+/// The snapshot's text (`format()`), now.
+pub fn fetch(tmux: &mut Control) -> Result<String, String> {
+    let lines = tmux.cmd(&format!("display-message -p {}", quote(&format())))?;
+    Ok(lines.into_iter().next().unwrap_or_default())
 }
 
 /// A pane title as an agent title: none when it is tmux's default (the
@@ -146,30 +154,29 @@ fn title_of(pane_title: &str, host: &str) -> String {
     t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_string()
 }
 
-/// Build the tree from `list-panes -a` rows (`fields()`, in session and
-/// window order), without paddock's own session. HOST is the server's host
-/// name, tmux's default pane title.
-pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
+/// Build the tree from a snapshot's TEXT (`format()`), without paddock's
+/// own session. HOST is the server's host name, tmux's default pane title.
+pub fn parse(text: &str, host: &str) -> Snapshot {
+    let n = FIELDS.len() + AGENT_FIELDS.len() + 2;
     let mut sessions: Vec<Session> = Vec::new();
-    for row in rows {
-        let [sid, sname, wid, windex, wname, wactive, wauto, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] =
-            row.as_slice()
-        else {
+    for row in text.split_terminator(ROW) {
+        let row: Vec<&str> = row.splitn(n, SEP).collect();
+        let [sid, sname, wid, windex, wname, wactive, wauto, pid, pindex, pactive, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] = row[..] else {
             continue;
         };
         if sname == SESSION {
             continue;
         }
-        if sessions.last().is_none_or(|s| &s.id != sid) {
-            sessions.push(Session { id: sid.clone(), name: sname.clone(), windows: Vec::new() });
+        if sessions.last().is_none_or(|s| s.id != sid) {
+            sessions.push(Session { id: sid.to_string(), name: sname.to_string(), windows: Vec::new() });
         }
         let session = sessions.last_mut().unwrap();
         // The same window can be linked at two indexes of one session.
-        if session.windows.last().is_none_or(|w| &w.id != wid || &w.index != windex) {
+        if session.windows.last().is_none_or(|w| w.id != wid || w.index != windex) {
             session.windows.push(Window {
-                id: wid.clone(),
-                index: windex.clone(),
-                name: wname.clone(),
+                id: wid.to_string(),
+                index: windex.to_string(),
+                name: wname.to_string(),
                 active: wactive == "1",
                 auto: wauto == "1",
                 panes: Vec::new(),
@@ -180,7 +187,7 @@ pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
             let desc = desc.trim();
             Agent {
                 state,
-                kind: kind.clone(),
+                kind: kind.to_string(),
                 title: if desc.is_empty() { auto.clone() } else { desc.to_string() },
                 auto,
                 renamed: !desc.is_empty(),
@@ -189,11 +196,11 @@ pub fn parse(rows: &[Vec<String>], host: &str) -> Snapshot {
             }
         });
         session.windows.last_mut().unwrap().panes.push(Pane {
-            id: pid.clone(),
-            index: pindex.clone(),
+            id: pid.to_string(),
+            index: pindex.to_string(),
             active: pactive == "1",
-            command: command.clone(),
-            path: path.clone(),
+            command: command.to_string(),
+            path: path.to_string(),
             agent,
         });
     }
@@ -250,12 +257,12 @@ impl Snapshot {
     }
 }
 
-/// A snapshot from `|`-separated `fields()` lines (host "host").
+/// A snapshot from `|`-separated rows of `format()`'s fields (host "host").
 #[cfg(test)]
 pub fn fixture(lines: &[&str]) -> Snapshot {
-    let n = fields().len();
-    let rows: Vec<Vec<String>> = lines.iter().map(|l| l.splitn(n, '|').map(String::from).collect()).collect();
-    parse(&rows, "host")
+    let n = FIELDS.len() + AGENT_FIELDS.len() + 2;
+    let text: String = lines.iter().map(|l| format!("{}{ROW}", l.splitn(n, '|').collect::<Vec<_>>().join(&SEP.to_string()))).collect();
+    parse(&text, "host")
 }
 
 #[cfg(test)]
@@ -296,6 +303,17 @@ mod tests {
         let agents: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| (a.title.as_str(), a.stale)).collect();
         assert_eq!(agents, [("Fix the parser", true), ("", false), ("first prompt", false)], "status glyphs dropped; the host name is no title");
         assert_eq!(title_of("pmac", "pmac.local"), "", "the short host name too");
+    }
+
+    #[test]
+    fn rows_have_every_field_with_or_without_an_agent() {
+        // tmux expands one branch of `#{?@agent-state,AGENT,NONE}`.
+        let none = SEP.to_string().repeat(AGENT_FIELDS.len());
+        let f = format();
+        let (_, gated) = f.split_once("#{?@agent-state,").unwrap();
+        let (agent, _) = gated.split_once(&format!(",{none}}}")).unwrap();
+        // Not counting the SEP in `field`'s regex.
+        assert_eq!(agent.replace("[\x01-\x1f]", "").matches(SEP).count(), AGENT_FIELDS.len());
     }
 
     #[test]

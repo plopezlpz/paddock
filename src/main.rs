@@ -36,21 +36,19 @@ use ratatui::crossterm::execute;
 
 use app::{Action, App, Op, Tab, View};
 use live::Live;
-use model::{snapshot, Target, PANE_FIELDS, SESSION_FIELDS, WINDOW_FIELDS};
+use model::Target;
 use theme::Theme;
 use tmux::{field, quote, Control, Msg, SEP, SESSION};
 use ui::Preview;
 
-/// Refresh triggers, checked by tmux about once a second: every pane in
-/// every session (a control client's %* covers only its own session) with
-/// the fields a snapshot reads, so a title, state or name changing anywhere
-/// shows. Changes to windows in other sessions (added, closed, renamed) also
-/// arrive at once as notifications. Each value is a `field`, so a newline in
-/// it cannot end the notification line.
+/// Refresh, checked by tmux about once a second: the snapshot's text, so a
+/// title, state or name changing anywhere (a control client's %* covers only
+/// its own session) arrives with the new snapshot. Changes to windows in
+/// other sessions (added, closed, renamed) also arrive at once as
+/// notifications. Each value is a `field`, so a newline in it cannot end the
+/// notification line.
 fn subscription() -> String {
-    let f = |names: &[&str]| names.iter().map(|n| field(n)).collect::<String>();
-    let all = format!("panes::#{{S:{}#{{W:{}#{{P:{}}}}}}}", f(SESSION_FIELDS), f(WINDOW_FIELDS), f(PANE_FIELDS));
-    format!("refresh-client -B {}", quote(&all))
+    format!("refresh-client -B {}", quote(&format!("panes::{}", model::format())))
 }
 
 enum Ev {
@@ -460,7 +458,9 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let debug = std::env::var_os("PADDOCK_DEBUG").is_some();
     let can_suggest = !suggest_command.trim().is_empty();
-    let mut app = App::new(snapshot(&mut tmux, &host)?, tab, ctx.session.clone(), ctx.window.clone(), home, debug, can_suggest);
+    // The snapshot's text, to skip a refresh that changes nothing.
+    let mut shown = model::fetch(&mut tmux)?;
+    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, debug, can_suggest);
 
     let mut tui = Tui::new()?;
     let answers = tx.clone();
@@ -500,6 +500,7 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
 
             let deadline = [Some(minute), live.due(), suggestion.as_ref().map(|s| s.deadline)].into_iter().flatten().min().unwrap_or(minute);
             let mut stale = false;
+            let mut fresh = None;
             let mut ev = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -531,8 +532,11 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                                 if let Some(created) = app.ran(job, result) {
                                     return Ok(Some(created));
                                 }
-                                // Show the result now, not at the next subscription check.
+                                // Show the result now, not at the next subscription
+                                // check, even if nothing changed (a moved row is
+                                // followed then).
                                 stale = true;
+                                shown.clear();
                             }
                             Action::Suggest { pane, id } => match suggest(&suggest_command, &pane, id, answers.clone()) {
                                 Ok(s) => suggestion = Some(s),
@@ -550,6 +554,7 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                         dirty = true;
                     }
                     Ev::Tmux(Msg::Changed) => stale = true,
+                    Ev::Tmux(Msg::Rows(text)) => fresh = Some(text),
                     Ev::Tmux(Msg::Exit) => return Ok(None),
                 }
                 ev = rx.try_recv().ok();
@@ -566,10 +571,13 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
             if suggestion.as_ref().is_some_and(|s| app.suggesting() != Some(s.id)) {
                 suggestion = None;
             }
-            if stale {
-                // One snapshot for any burst of notifications.
-                app.set_snapshot(snapshot(&mut tmux, &host)?);
-                live.wake();
+            // One snapshot for any burst of notifications: the subscription's
+            // latest unless one is due now. The preview's pane is captured on
+            // its own schedule.
+            let text = if stale { Some(model::fetch(&mut tmux)?) } else { fresh };
+            if let Some(text) = text.filter(|t| *t != shown) {
+                app.set_snapshot(model::parse(&text, &host));
+                shown = text;
                 dirty = true;
             }
             if Instant::now() >= minute {
