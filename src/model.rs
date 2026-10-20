@@ -49,7 +49,8 @@ pub struct Agent {
     /// Whether the user set the title (@agent-description).
     pub renamed: bool,
     pub since: Option<u64>,
-    /// Nothing has confirmed this state recently.
+    /// Unconfirmed: the tool says so (@agent-stale), or the pane is back at
+    /// a shell, so the agent went without its exit hook (killed, crashed).
     pub stale: bool,
 }
 
@@ -156,6 +157,13 @@ fn title_of(pane_title: &str, host: &str) -> String {
     t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_string()
 }
 
+/// Whether COMMAND (pane_current_command) is a shell, which a pane shows at
+/// its prompt: login shells start with a dash.
+fn is_shell(command: &str) -> bool {
+    let name = command.rsplit('/').next().unwrap_or(command).trim_start_matches('-');
+    matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "mksh" | "tcsh" | "csh" | "nu")
+}
+
 /// Build the tree from a snapshot's TEXT (`format()`), without paddock's
 /// own session. HOST is the server's host name, tmux's default pane title.
 pub fn parse(text: &str, host: &str) -> Snapshot {
@@ -194,7 +202,7 @@ pub fn parse(text: &str, host: &str) -> Snapshot {
                 auto,
                 renamed: !desc.is_empty(),
                 since: at.parse().ok(),
-                stale: stale == "1",
+                stale: stale == "1" || is_shell(command),
             }
         });
         session.windows.last_mut().unwrap().panes.push(Pane {
@@ -303,13 +311,25 @@ mod tests {
     #[test]
     fn titles_fall_back_to_the_pane_title() {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|0|%1|0|1|zsh|✳ Fix the parser|working|0|claude||||1|/a",
-            "$1|s|@1|1|w|1|0|%2|1|0|zsh|host|working|0|pi|||||/a",
-            "$1|s|@1|1|w|1|0|%3|2|0|zsh|⠋ x|working|0|pi|first prompt||||/a",
+            "$1|s|@1|1|w|1|0|%1|0|1|claude|✳ Fix the parser|working|0|claude||||1|/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|pi|host|working|0|pi|||||/a",
+            "$1|s|@1|1|w|1|0|%3|2|0|pi|⠋ x|working|0|pi|first prompt||||/a",
         ]);
         let agents: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| (a.title.as_str(), a.stale)).collect();
         assert_eq!(agents, [("Fix the parser", true), ("", false), ("first prompt", false)], "status glyphs dropped; the host name is no title");
         assert_eq!(title_of("pmac", "pmac.local"), "", "the short host name too");
+    }
+
+    #[test]
+    fn an_agent_whose_pane_is_back_at_a_shell_is_unconfirmed() {
+        let snap = fixture(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|-zsh||working|0|claude|||||/a",
+            "$1|s|@1|1|w|1|0|%3|2|0|bash||idle|0|pi|||||/a",
+            "$1|s|@1|1|w|1|0|%4|3|0|node||asking|0|pi||||1|/a",
+        ]);
+        let stale: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| a.stale).collect();
+        assert_eq!(stale, [false, true, true, true], "killed without its exit hook, or the tool says so");
     }
 
     #[test]

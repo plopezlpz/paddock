@@ -290,7 +290,7 @@ Any tool can feed paddock by setting these options on the agent's pane
 |---|---|
 | `@agent-state` | `working`, `asking` or `idle` |
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
-| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`) |
+| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also marks an agent whose pane is back at a shell, killed without its exit hook |
 | `@agent-kind` | the agent's name, e.g. `claude` |
 | `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |

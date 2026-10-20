@@ -1735,10 +1735,10 @@ mod tests {
     /// Agents in two folders: header, card, card, header, card, card.
     fn agents_app() -> App {
         let snap = fixture(&[
-            "$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|one||||/a",
-            "$1|s|@1|1|w|1|0|%2|1|0|zsh||working|0|claude|two||||/a",
-            "$1|s|@2|2|w|0|0|%3|0|1|zsh||working|0|claude|three||||/b",
-            "$1|s|@2|2|w|0|0|%4|1|0|zsh||working|0|claude|four||||/b",
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|0|%3|0|1|claude||working|0|claude|three||||/b",
+            "$1|s|@2|2|w|0|0|%4|1|0|claude||working|0|claude|four||||/b",
         ]);
         let mut app = new(snap, Tab::Agents, "@1");
         app.group = Group::Folder;
@@ -1751,7 +1751,7 @@ mod tests {
             "$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a",
             "$1|work|@1|1|edit|1|0|%2|1|0|zsh|||||||||/h/a",
             "$1|work|@2|2|logs|0|0|%3|0|1|tail|||||||||/h/b",
-            "$2|play|@3|1|game|1|0|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
+            "$2|play|@3|1|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c",
         ]);
         new(snap, Tab::Sessions, window)
     }
@@ -1840,11 +1840,11 @@ mod tests {
     fn agents_open_on_the_agent_you_are_in() {
         let snap = || {
             fixture(&[
-                "$1|s|@1|1|w|1|0|%1|0|0|zsh||working|0|claude|one||||/a",
-                "$1|s|@1|1|w|1|0|%2|1|1|zsh||asking|0|claude|two||||/a",
+                "$1|s|@1|1|w|1|0|%1|0|0|claude||working|0|claude|one||||/a",
+                "$1|s|@1|1|w|1|0|%2|1|1|claude||asking|0|claude|two||||/a",
                 "$1|s|@2|2|w|0|0|%3|0|1|nvim|||||||||/b",
-                "$1|s|@2|2|w|0|0|%4|1|0|zsh||idle|0|codex|four||||/b",
-                "$1|s|@3|3|w|0|0|%5|0|1|zsh||working|0|claude|five||||/c",
+                "$1|s|@2|2|w|0|0|%4|1|0|codex||idle|0|codex|four||||/b",
+                "$1|s|@3|3|w|0|0|%5|0|1|claude||working|0|claude|five||||/c",
             ])
         };
         assert_eq!(selected_title(&new(snap(), Tab::Agents, "@1")), "two", "the active pane");
@@ -1881,17 +1881,17 @@ mod tests {
         let mut app = agents_app();
         app.selected = 4; // "three"
         app.set_snapshot(fixture(&[
-            "$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|one||||/a",
-            "$1|s|@1|1|w|1|0|%2|1|0|zsh||working|0|claude|two||||/a",
-            "$1|s|@2|2|w|0|0|%4|1|0|zsh||working|0|claude|four||||/b",
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/a",
+            "$1|s|@2|2|w|0|0|%4|1|0|claude||working|0|claude|four||||/b",
         ]));
         assert_eq!(selected_title(&app), "four");
     }
 
     #[test]
     fn the_selection_follows_an_agent_into_another_group() {
-        let line = |state: &str| format!("$1|s|@1|1|w|1|0|%2|1|0|zsh||{state}|0|claude|two||||/a");
-        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|one||||/a", &line(state)]);
+        let line = |state: &str| format!("$1|s|@1|1|w|1|0|%2|1|0|claude||{state}|0|claude|two||||/a");
+        let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a", &line(state)]);
         let mut app = new(snap("working"), Tab::Agents, "@1");
         app.move_by(1, false);
         assert_eq!(selected_title(&app), "two");
@@ -2124,7 +2124,7 @@ mod tests {
 
     #[test]
     fn clearing_a_set_title_goes_back_to_automatic_and_undo_restores_it() {
-        let snap = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|auto|mine|||/a"]);
+        let snap = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|auto|mine|||/a"]);
         let mut app = new(snap, Tab::Agents, "@1");
         ctrl(&mut app, 'r');
         assert_eq!(renaming(&app).map(|r| r.placeholder.as_str()), Some("auto"));
@@ -2149,7 +2149,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_title_is_not_saved_over_a_newer_one() {
-        let snap = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|auto|mine|||/a"]);
+        let snap = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|auto|mine|||/a"]);
         let mut app = new(snap, Tab::Agents, "@1");
         ctrl(&mut app, 'r');
         assert!(matches!(app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)), Action::None));
@@ -2166,8 +2166,8 @@ mod tests {
         let Action::Run(job) = app.on_key(key(KeyCode::Enter, KeyModifiers::NONE)) else { panic!() };
         app.ran(job, Ok(None));
         app.set_snapshot(fixture(&[
-            "$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|one||||/a",
-            "$1|s|@2|2|w|0|0|%3|0|1|zsh||working|0|claude|three|renamed|||/b",
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a",
+            "$1|s|@2|2|w|0|0|%3|0|1|claude||working|0|claude|three|renamed|||/b",
         ]));
         assert_eq!(selected_title(&app), "renamed", "it doesn't match \"three\" any more, but stays");
         type_(&mut app, "x");
@@ -2238,7 +2238,7 @@ mod tests {
     fn renaming_ends_when_the_agent_exits() {
         let mut app = agents_app();
         ctrl(&mut app, 'r');
-        app.set_snapshot(fixture(&["$1|s|@1|1|w|1|0|%2|1|0|zsh||working|0|claude|two||||/a"]));
+        app.set_snapshot(fixture(&["$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/a"]));
         assert!(field(&app).is_none());
         assert_eq!(app.status, Some(Status::Failed("that agent has exited".into())));
     }
@@ -2316,7 +2316,7 @@ mod tests {
 
     #[test]
     fn a_stale_state_is_marked_unconfirmed() {
-        let app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
+        let app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
         let lines = screen(&draw(&app, &mut View::new(), 120, 12));
         assert!(lines.iter().any(|l| l.contains("working?")), "{lines:#?}");
     }
@@ -2344,7 +2344,7 @@ mod tests {
         let rows: Vec<String> = (1..=12)
             .map(|i| {
                 let (state, unseen) = [("asking", "0"), ("working", "0"), ("idle", "1"), ("idle", "0")][i % 4];
-                format!("$1|s|@{i}|{i}|w|1|0|%{i}|0|1|zsh||{state}|{unseen}|claude|t{i}||||/a")
+                format!("$1|s|@{i}|{i}|w|1|0|%{i}|0|1|claude||{state}|{unseen}|claude|t{i}||||/a")
             })
             .collect();
         let app = new(fixture(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>()), Tab::Agents, "@1");
@@ -2659,13 +2659,13 @@ mod tests {
             "$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a",
             "$1|work|@1|1|edit|1|0|%2|1|0|zsh|||||||||/h/a",
             "$2|play|@2|1|logs|0|0|%3|0|1|tail|||||||||/h/b",
-            "$2|play|@3|2|game|1|0|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
+            "$2|play|@3|2|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c",
         ]));
         assert_eq!(app.selected_target(), Some(&window("$2", "@2")));
         // A pane that becomes a window of its own is selected as that window.
         let mut app = sessions_app("@1");
         app.follow = Some("%4".into());
-        app.set_snapshot(fixture(&["$2|play|@3|1|game|1|0|%4|0|1|zsh||asking|0|codex|deploy||||/h/c"]));
+        app.set_snapshot(fixture(&["$2|play|@3|1|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c"]));
         assert_eq!(app.selected_target(), Some(&window("$2", "@3")));
         let mut app = sessions_app("@1");
         select(&mut app, window("$1", "@2"));
@@ -2675,7 +2675,7 @@ mod tests {
             "$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a",
             "$1|work|@1|1|edit|1|0|%2|1|0|zsh|||||||||/h/a",
             "$2|play|@2|1|logs|0|0|%3|0|1|tail|||||||||/h/b",
-            "$2|play|@3|2|game|1|0|%4|0|1|zsh||asking|0|codex|deploy||||/h/c",
+            "$2|play|@3|2|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c",
         ]));
         // And ^z puts it back, following it again.
         let undo = job(ctrl(&mut app, 'z'));
