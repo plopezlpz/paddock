@@ -156,8 +156,10 @@ x86_64. Your config is `~/.tmux.conf` (or `~/.config/tmux/tmux.conf`).
 `prefix a` is the default key, unless your config already binds it; set
 `@paddock-key` to choose another. Hooked up a new agent later? Run
 `bash ~/.tmux/plugins/agent-status.tmux/manage-provider.sh install`.
-To update, press `prefix U`; the key then offers paddock's new version. TPM
-may keep plugins in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
+To update, press `prefix U`; the key then offers paddock's new version. Then
+run that `manage-provider.sh install` line again so your agents get the current
+hook commands (the old ones keep working until you do). TPM may keep plugins
+in `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/`.
 Outside tmux, `bash ~/.tmux/plugins/paddock/scripts/install.sh` downloads the
 binary.
 
@@ -191,8 +193,9 @@ binary.
 If tmux says `'paddock init' returned 127`, its `PATH` lacks Homebrew's: write
 out the full path, `/opt/homebrew/bin/paddock` (Apple silicon),
 `/usr/local/bin/paddock` (Intel Mac) or `/home/linuxbrew/.linuxbrew/bin/paddock`
-(Linux). To update, `brew upgrade` and reload tmux (until then the key says its
-bindings are for another version), and `git -C ~/.tmux/plugins/agent-status.tmux pull`.
+(Linux). To update, `brew upgrade`, `git -C ~/.tmux/plugins/agent-status.tmux pull`
+and reload tmux (until then the key says its bindings are for another version),
+then run step 3 again so your agents get the current hook commands.
 
 ### Notes
 
@@ -295,7 +298,7 @@ Any tool can feed paddock by setting these options on the agent's pane
 |---|---|
 | `@agent-state` | `working`, `asking` or `idle` |
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
-| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also shows a `?` while a shell is the pane's foreground command, as after an agent killed without its exit hook, so a wrapper script or launch command should `exec` the agent (not `agent; exec $SHELL`) |
+| `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also shows a `?` while a shell is the pane's foreground command, as after an agent killed without its exit hook, so a wrapper script or launch command should `exec` the agent, e.g. `exec claude 2>/dev/null` (bash runs a command with a redirection, and bash 3.2 one after `&&` or `;`, in a child), not `agent; exec $SHELL` |
 | `@agent-kind` | the agent's name, e.g. `claude` |
 | `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
@@ -329,8 +332,9 @@ becomes the "current client" of your sessions, it attaches to a session of its
 own, `_paddock` (one idle `cat`), which exists only while the popup is open.
 paddock hides it; `tmux ls` and `choose-tree` show it meanwhile.
 
-The `client-attached`, `client-detached` and other client hooks are emptied
-on that session, so yours don't run when the popup opens or closes. Global
+The client hooks (`client-attached`, `client-detached`, ...) and
+`pane-focus-in` (the attach focuses the session's pane) are emptied on that
+session, so yours don't run when the popup opens or closes. Global
 `client-created`, `session-created` and `session-closed` hooks still do.
 
 A tmux command run from outside tmux without `-c` or `-t` may still pick
