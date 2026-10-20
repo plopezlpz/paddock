@@ -32,8 +32,7 @@ fn bold() -> Style {
 
 fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     match s {
-        Some(State::Idle) => Span::styled("○", t.state(State::Idle)),
-        Some(s) => Span::styled("●", t.state(s)),
+        Some(s) => Span::styled(t.icon(s).to_string(), t.state(s)),
         None => Span::raw(" "),
     }
 }

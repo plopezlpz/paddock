@@ -1,9 +1,12 @@
 //! Colours. Each role resolves, in order: its @paddock-color-* option, the
 //! user's tmux theme (agent-status.tmux's @agent-color-*, the active pane
 //! border for the accent), then the terminal's own palette. Values use tmux
-//! colour syntax: red, brightred, colour214, #a2a970, default, terminal.
+//! colour syntax: red, brightred, colour214, #a2a970, default, terminal (not
+//! tmux's X11 names, such as orange, which fall through to the next).
+//! State dots are agent-status.tmux's @agent-icon-*, when one column wide.
 
 use ratatui::style::{Color, Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 use crate::model::State;
 use crate::tmux::Control;
@@ -15,6 +18,7 @@ pub struct Theme {
     muted: Option<Color>,
     border: Option<Color>,
     states: [Color; State::ALL.len()],
+    icons: [String; State::ALL.len()],
 }
 
 /// Roles read from tmux, in this order, in one display-message. E: expands
@@ -34,6 +38,10 @@ const OPTIONS: &[&str] = &[
     "E:@agent-color-working",
     "E:@agent-color-asking",
     "E:pane-active-border-style",
+    "@agent-icon-idle",
+    "@agent-icon-finished",
+    "@agent-icon-working",
+    "@agent-icon-asking",
 ];
 
 impl Theme {
@@ -56,12 +64,19 @@ impl Theme {
             let i = s as usize;
             parse_colour(v(4 + i)).or(parse_colour(v(8 + i))).unwrap_or(default(s))
         });
+        // @agent-icon-<state>, if it takes the dot's one column.
+        let icons = State::ALL.map(|s| match v(13 + s as usize) {
+            icon if icon.width() == 1 => icon.to_string(),
+            _ if s == State::Idle => "○".to_string(),
+            _ => "●".to_string(),
+        });
         Theme {
             accent: parse_colour(v(0)).or(style_fg(v(12))).unwrap_or(Color::Yellow),
             muted: parse_colour(v(1)),
             hint: parse_colour(v(2)).unwrap_or(Color::Blue),
             border: parse_colour(v(3)),
             states,
+            icons,
         }
     }
 
@@ -78,6 +93,11 @@ impl Theme {
 
     pub fn state(&self, s: State) -> Style {
         Style::new().fg(self.states[s as usize])
+    }
+
+    /// The dot that stands for S.
+    pub fn icon(&self, s: State) -> &str {
+        &self.icons[s as usize]
     }
 
     /// The current session's badge: the accent as background, the text in the
@@ -160,6 +180,7 @@ mod tests {
         assert_eq!(t.state(State::Working).fg, Some(Color::Yellow));
         assert_eq!(t.muted(), Style::new().add_modifier(Modifier::DIM));
         assert_eq!(t.border(), t.muted());
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "●", "●", "●"]);
     }
 
     #[test]
@@ -177,5 +198,14 @@ mod tests {
         assert_eq!(t.accent, Color::Magenta);
         assert_eq!(t.state(State::Working).fg, Some(Color::Indexed(1)));
         assert_eq!(t.muted(), Style::new().fg(Color::DarkGray));
+    }
+
+    #[test]
+    fn dots_follow_the_status_bar_icons_that_fit() {
+        let mut v = vec![""; OPTIONS.len()];
+        v[13] = "-"; // @agent-icon-idle
+        v[16] = "??"; // @agent-icon-asking: two columns
+        let t = Theme::from_values(&v);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "●", "●", "●"]);
     }
 }

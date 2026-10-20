@@ -272,6 +272,11 @@ of room, ⋯ opens the menu.
 | `@paddock-color-muted`, `-hint`, `-border` | dim, blue, muted | secondary text, key hints, frame |
 | `@paddock-color-asking`, `-working`, `-finished`, `-idle` | `@agent-color-*`, else red, yellow, cyan, green | agent dots |
 
+Colours are tmux colours: a name such as `red` or `brightred`, `colour214`,
+`#a2a970`, `default` or `terminal`. tmux's other names, such as `orange`,
+are not followed: set the `@paddock-color-*` to one of these to match. The
+dots are `@agent-icon-*` when one column wide, else `●` (`○` idle).
+
 ## Agent state
 
 paddock's companion plugin,
