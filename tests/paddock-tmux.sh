@@ -15,6 +15,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/paddock-tmux-test.XXXXXX")
 TMP=$(cd "$TMP" && pwd) # TMPDIR's trailing / would differ from the paths the plugin computes
 IN=paddock-test-in-$$
 OUT=paddock-test-out-$$
+EMPTY=paddock-test-empty-$$
 # The test servers' sockets go in a private dir: tmux 3.8 leaves socket files
 # behind on exit. Under /tmp, as socket paths are limited to 104 bytes on macOS.
 # Its path has no "paddock" in it, for a binary called something else.
@@ -24,6 +25,7 @@ cleanup() {
   chmod -R u+w "$TMP" 2>/dev/null # an interrupt inside the unwritable-dir check
   tmux -L "$OUT" kill-server 2>/dev/null
   tmux -L "$IN" kill-server 2>/dev/null
+  tmux -L "$EMPTY" kill-server 2>/dev/null
   rm -rf "$TMP" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
@@ -122,6 +124,18 @@ press 6d
 wait_opened
 expected="$TMP/plugin/target/release/paddock $client $(t display -p -t main '#{session_id} #{window_id}') --tab last"
 check "a click opens paddock for the clicking client" test "$(cat "$TMP/opened" 2>/dev/null)" = "$expected"
+
+# A config that empties the prefix table before paddock loads (unbind -a):
+# a missing table is no sign of an old tmux, and the keys are still bound.
+te() { tmux -L "$EMPTY" "$@"; }
+te -f /dev/null new -d 'sleep 600'
+te unbind -a \; set -g @paddock-click on \; set -g @paddock-key P
+te run-shell "$TMP/plugin/paddock.tmux"
+check "no prefix table: the click binds" has "$(te list-keys -T root MouseUp1StatusLeft 2>/dev/null)" "$TMP/plugin/target/release/paddock"
+check "no prefix table: the key binds" has "$(te list-keys -T prefix P 2>/dev/null)" "$TMP/plugin/target/release/paddock"
+te run-shell "$TMP/plugin/paddock.tmux"
+check "no prefix table: a reload binds the key once" test "$(te list-keys -N -T prefix | grep -c paddock)" -eq 1
+te kill-server
 
 # Reloads: switching the click off removes paddock's binding, never a user's.
 t set -gu @paddock-click

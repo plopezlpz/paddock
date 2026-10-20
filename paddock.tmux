@@ -52,8 +52,16 @@ if ! out=$(tmux set-option -gqo @paddock-popup-width '80%' \; \
     show-hooks -g client-closed \; \
     list-keys -aN -P prefix -T prefix \; \
     list-keys -aN -P root -T root 2>/dev/null); then
-  tmux display-message "paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
-  exit 0
+  case $'\n'$out in
+    # The hook was shown, so a key table failed: one with no keys does not
+    # exist (unbind -a empties prefix). The call stopped there, so the
+    # root table is listed now; it is empty if it was the one missing.
+    *$'\n'client-closed*) out+=$'\n'$(tmux list-keys -aN -P root -T root 2>/dev/null || true) ;;
+    *)
+      tmux display-message "paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
+      exit 0
+      ;;
+  esac
 fi
 
 # writes: the tmux commands this run sends, each followed by its ;.
