@@ -226,8 +226,9 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
                     expanded: many.then_some(listed),
                 },
                 preview: active.map(|p| p.id.clone()),
-                // A single pane's match is the window's.
-                score: if many { score } else { score.or(pane_scores[0]) },
+                // A single pane's match is the window's. (A window can have
+                // none: parse skips a malformed pane.)
+                score: if many { score } else { score.or_else(|| pane_scores.first().copied().flatten()) },
             };
             let mut panes = Vec::new();
             if many && listed {
@@ -441,6 +442,19 @@ mod tests {
         let none = HashSet::new();
         let rows = sessions(&snap, &mut filter("company"), &tree(&none, &none, None));
         assert!(matches!(&rows[1].kind, RowKind::Window { meta, .. } if meta == "…/service-name/deep"));
+    }
+
+    #[test]
+    fn a_window_without_panes_is_listed() {
+        // Its only pane line was malformed, so parse left it out.
+        let snap = fixture(&["$1|s|@1|1|w|1|0|broken", "$1|s|@2|2|v|0|0|%2|0|1|zsh|||||||||/h"]);
+        assert!(snap.sessions[0].windows[0].panes.is_empty());
+        let none = HashSet::new();
+        let rows = |q: &str| sessions(&snap, &mut filter(q), &tree(&none, &none, None));
+        assert_eq!(names(&rows("")), ["s", "  w", "  v"]);
+        assert_eq!(rows("")[1].preview, None, "no pane to preview");
+        assert_eq!(names(&rows("w")), ["s", "  w"]);
+        assert_eq!(names(&rows("zsh")), ["s", "  v"]);
     }
 
     #[test]

@@ -1903,6 +1903,19 @@ mod tests {
     }
 
     #[test]
+    fn a_window_without_panes_opens_and_draws() {
+        // Its only pane line was malformed, so parse left it out.
+        let snap = fixture(&["$1|s|@1|1|w|1|0|broken", "$1|s|@2|2|v|0|0|%2|0|1|claude||working|0|claude|two||||/a"]);
+        let mut app = new(snap, Tab::Sessions, "@1");
+        assert_eq!(app.selected_target(), Some(&Target::Window { session: "$1".into(), window: "@1".into() }));
+        assert_eq!(app.preview_pane(&View::new()), None);
+        app.expand(Some(true));
+        draw(&app, &mut View::new(), 80, 12);
+        app.run(Command::Tab(Tab::Agents));
+        draw(&app, &mut View::new(), 80, 12);
+    }
+
+    #[test]
     fn the_selection_follows_an_agent_into_another_group() {
         let line = |state: &str| format!("$1|s|@1|1|w|1|0|%2|1|0|claude||{state}|0|claude|two||||/a");
         let snap = |state: &str| fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a", &line(state)]);
