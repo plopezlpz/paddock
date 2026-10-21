@@ -290,19 +290,46 @@ fn refuge(op: &Op, current: &str, sessions: &[Place]) -> Option<String> {
     first.chain(sessions).find(|s| !s.ours && !closes(s)).map(|s| s.id.clone())
 }
 
-/// Before OP runs, move CLIENT out of the session it shows (now: it may
-/// have moved since the popup opened) if OP closes it; where it went.
-fn shelter(tmux: &mut Control, op: &Op, client: &str) -> Result<Option<String>, String> {
-    if !matches!(op, Op::Kill(_) | Op::MoveWindow { .. } | Op::JoinPane { .. } | Op::BreakPane { .. }) {
-        return Ok(None);
-    }
+/// Where `shelter` moved a client: out of session FROM, into TO.
+struct Sheltered {
+    from: String,
+    to: String,
+}
+
+/// CLIENT's session and every session, now.
+fn client_places(tmux: &mut Control, client: &str) -> Result<(String, Vec<Place>), String> {
     // Not display-message: its formats see paddock's own client, even with -c.
     let only = format!("#{{==:#{{client_name}},{client}}}");
     let line = tmux.cmd(&format!("list-clients -f {} -F {}", quote(&only), quote(&places_format())))?;
-    let (current, sessions) = places(line.first().map_or("", String::as_str));
-    let Some(dest) = refuge(op, &current, &sessions) else { return Ok(None) };
-    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&dest)))?;
-    Ok(Some(dest))
+    Ok(places(line.first().map_or("", String::as_str)))
+}
+
+/// Before OP runs, move CLIENT out of the session it shows (now: it may
+/// have moved since the popup opened) if OP closes it; where it went.
+fn shelter(tmux: &mut Control, op: &Op, client: &str) -> Result<Option<Sheltered>, String> {
+    if !matches!(op, Op::Kill(_) | Op::MoveWindow { .. } | Op::JoinPane { .. } | Op::BreakPane { .. }) {
+        return Ok(None);
+    }
+    let (current, sessions) = client_places(tmux, client)?;
+    let Some(to) = refuge(op, &current, &sessions) else { return Ok(None) };
+    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&to)))?;
+    Ok(Some(Sheltered { from: current, to }))
+}
+
+/// Where a client `shelter` moved goes back to once its op failed: the
+/// session it came from, if that is still there and the client still shows
+/// the refuge (CURRENT).
+fn homecoming(moved: &Sheltered, current: &str, sessions: &[Place]) -> Option<String> {
+    (current == moved.to && sessions.iter().any(|s| s.id == moved.from)).then(|| moved.from.clone())
+}
+
+/// After a failed op, put CLIENT back where `shelter` took it from; where
+/// it went. Best effort: the op's error is the one to report.
+fn unshelter(tmux: &mut Control, moved: &Sheltered, client: &str) -> Option<String> {
+    let (current, sessions) = client_places(tmux, client).ok()?;
+    let back = homecoming(moved, &current, &sessions)?;
+    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&back))).ok()?;
+    Some(back)
 }
 
 /// Make OP's change on the server; what it created, if anything. Moves and
@@ -534,10 +561,18 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
                             Action::Activate(t) => return Ok(Some(t)),
                             Action::Run(job) => {
                                 let result = shelter(&mut tmux, &job.op, &ctx.client).and_then(|moved| {
-                                    if let Some(session) = moved {
-                                        app.moved(&session);
+                                    if let Some(m) = &moved {
+                                        app.moved(&m.to);
                                     }
-                                    run_op(&mut tmux, &job.op)
+                                    let result = run_op(&mut tmux, &job.op);
+                                    // It failed: back to the session it was to close,
+                                    // if that still stands.
+                                    if result.is_err()
+                                        && let Some(back) = moved.and_then(|m| unshelter(&mut tmux, &m, &ctx.client))
+                                    {
+                                        app.moved(&back);
+                                    }
+                                    result
                                 });
                                 if let Some(created) = app.ran(job, result) {
                                     return Ok(Some(created));
@@ -718,6 +753,17 @@ mod tests {
         let break_ = |session: &str| Op::BreakPane { pane: "%0".into(), session: session.into() };
         assert_eq!(refuge(&break_("$2"), "$0", &sessions).as_deref(), Some("$2"));
         assert_eq!(refuge(&break_("$0"), "$0", &sessions), None, "a window of its own in the same session");
+    }
+
+    #[test]
+    fn a_failed_op_takes_the_client_back_from_its_refuge() {
+        let moved = Sheltered { from: "$0".into(), to: "$1".into() };
+        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 "]);
+        assert_eq!(homecoming(&moved, "$1", &sessions).as_deref(), Some("$0"));
+        assert_eq!(homecoming(&moved, "$2", &sessions), None, "it moved on since: left there");
+        assert_eq!(homecoming(&moved, "", &sessions), None, "the client is gone");
+        let (_, closed) = layout(&["", "$1 0 @1%1 ", "$2 0 @2%2 "]);
+        assert_eq!(homecoming(&moved, "$1", &closed), None, "the op closed it after all");
     }
 
     #[test]
