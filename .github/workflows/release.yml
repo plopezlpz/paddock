@@ -14,8 +14,11 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
+      master: ${{ steps.master.outputs.master }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Cargo.toml version matches the metadata and the tag
         id: v
         run: |
@@ -30,6 +33,17 @@ jobs:
             exit 1
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
+      # Before anything is published: a release that master cannot be
+      # fast-forwarded to would reach Homebrew but not TPM, which follows master.
+      # A backport (a version older than master's, from a release branch) leaves
+      # master alone; any other commit off master's line fails here. Pre-releases
+      # never move master.
+      - name: Master can be fast-forwarded to the tag
+        id: master
+        if: github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        run: |
+          m=$(bash scripts/advance-master.sh --check "$GITHUB_SHA")
+          echo "master=$m" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check
@@ -169,12 +183,13 @@ jobs:
   # Last: move master to the released commit (fast-forward only), so TPM, which
   # follows master, only ever sees a version whose release exists. Runs even if
   # the tap update failed: the release itself is out. Never for a pre-release:
-  # TPM users would be moved onto it. The workflow token cannot push commits that
-  # change .github/workflows, so those must reach master before the tag (RELEASING.md).
+  # TPM users would be moved onto it; nor for a backport (check said so). The
+  # workflow token cannot push commits that change .github/workflows, so those
+  # must reach master before the tag (RELEASING.md).
   # Its push starts no workflows either, so Pages is started by hand.
   master:
-    needs: [release, tap]
-    if: ${{ !cancelled() && needs.release.result == 'success' && github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    needs: [check, release, tap]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.check.outputs.master == 'advance' && github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -192,6 +207,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      # check looked before publishing, but master may have moved since: the
+      # script looks again, and pushes without --force.
       - name: Fast-forward master to the release
         run: bash scripts/advance-master.sh "$GITHUB_SHA"
       - name: Redeploy the site

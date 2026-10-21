@@ -14,6 +14,8 @@ exist yet. The Release workflow takes care of that: it moves master itself, last
    Never move a tag once pushed; the workflow refuses a tag that no longer
    names the commit it started from. If something is wrong, cut a new version.
 4. The Release workflow then, in order:
+   - checks that master can be fast-forwarded to the tag, so a commit pushed to
+     master after the version bump stops the release before anything is published;
    - builds the 4 targets and runs the full test suite (`ci.yml`); nothing is
      published unless both pass;
    - publishes the release with all 8 assets (4 tarballs, 4 `.sha256`).
@@ -34,6 +36,9 @@ exist yet. The Release workflow takes care of that: it moves master itself, last
 
 A pre-release tag (`vX.Y.Z-rc1`) is published as a pre-release, never becomes
 "Latest", and leaves the tap and master alone.
+
+A backport tag (a version older than master's, cut from a release branch) is
+published and leaves master alone; the tap keeps any newer version it has.
 
 If the UI changed, re-record the demos before the release: `cd site/tools && npm run record && node build-svg.mjs`,
 then commit `site/assets/frames` and `docs/brand`. (Re-record sparingly: every run adds blobs to every TPM clone.)

@@ -71,4 +71,35 @@ git checkout -q "$rel~1" && g commit -q --allow-empty -m side; side=$(git rev-pa
 check "master: a commit off master's line fails" sh -c "! bash $ROOT/scripts/advance-master.sh $side"
 check "master: ... and says to merge" sh -c "bash $ROOT/scripts/advance-master.sh $side 2>&1 | grep -q 'merge'"
 
+# ---- advance-master.sh --check (before publishing) ----
+git init -q --bare -b master "$TMP/check.git"
+git clone -q "$TMP/check.git" "$TMP/c" 2>/dev/null
+cd "$TMP/c" || exit 1
+ver() { # ver VERSION [BASE]: a new commit (on BASE) whose Cargo.toml has VERSION; prints its sha.
+  [ $# -lt 2 ] || git checkout -q "$2"
+  printf '[package]\nname = "paddock"\nversion = "%s"\n' "$1" > Cargo.toml
+  # Numbered: the same version on the same base in the same second is still a new commit.
+  n=$(($(cat "$TMP/n" 2>/dev/null || echo 0) + 1)) && echo "$n" > "$TMP/n"
+  git add Cargo.toml && g commit -q --allow-empty -m "$1 ($n)" && git rev-parse HEAD
+}
+on_master() { git push -q -f origin "$1:refs/heads/master"; }
+says() { [ "$(bash "$ROOT/scripts/advance-master.sh" --check "$1" 2>/dev/null)" = "$2" ]; }
+refused() { ! bash "$ROOT/scripts/advance-master.sh" --check "$1"; }
+base=$(ver 0.9.0); on_master "$base"
+bump=$(ver 0.10.0)
+check "check: a fast-forward advances" says "$bump" advance
+check "check: ... and moves nothing" test "$(git -C "$TMP/check.git" rev-parse master)" = "$base"
+on_master "$bump"
+check "check: a commit master has advances" says "$base" advance
+# A commit lands on master between the version bump and the tag.
+rel=$(ver 0.11.0 "$bump"); later=$(ver 0.10.0 "$bump"); on_master "$later"
+check "check: a newer version off master's line is refused" refused "$rel"
+check "check: ... and says to merge" sh -c "bash $ROOT/scripts/advance-master.sh --check $rel 2>&1 | grep -q 'merge'"
+check "check: the same version off master's line is refused" refused "$(ver 0.10.0 "$base")"
+check "check: an older version off master's line is a backport" says "$(ver 0.9.1 "$base")" backport
+on_master "$(ver 1.0.0-rc.10 "$later")"
+check "check: a backport is older than master's pre-release" says "$(ver 0.10.1 "$later")" backport
+check "check: ... a pre-release by its fields" says "$(ver 1.0.0-rc.2 "$later")" backport
+check "check: the release of master's pre-release is not a backport" refused "$(ver 1.0.0 "$later")"
+
 if [ "$fails" -eq 0 ]; then echo "all passed"; else echo "$fails failed"; exit 1; fi
