@@ -341,7 +341,8 @@ a shell command. paddock runs it with the pane id appended, in its own
 process group, and stops it when you cancel, type over it, or after 30
 seconds. It prints the title on stdout, or fails with the reason as the last
 line of stderr. agent-status.tmux's is `describe.sh suggest`, which asks pi
-from the agent's conversation.
+from the agent's conversation and screen; its README says what that sends
+to the model.
 
 ## The `_paddock` session
 

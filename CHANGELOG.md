@@ -6,6 +6,14 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-21
+
+### Fixed
+
+- A kill or move that fails no longer leaves you in the session paddock moved you to: it takes you back where you were.
+- A window whose panes paddock can't read no longer crashes the popup.
+- Releases: nothing is published unless master can move to the tagged commit, so Homebrew and TPM users never get different versions; a backport release leaves master alone.
+
 ## [0.3.0] - 2026-10-20
 
 Faster to open and lighter while open; a kill never drops you out of tmux.
@@ -97,7 +105,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/plopezlpz/paddock/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/plopezlpz/paddock/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/plopezlpz/paddock/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/plopezlpz/paddock/releases/tag/v0.1.0
