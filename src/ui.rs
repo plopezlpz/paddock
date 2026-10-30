@@ -14,7 +14,7 @@ use crate::app::{App, Command, Create, Hint, Menu, Mode, Rename, Status, Tab, Vi
 use crate::edit::LineEdit;
 use crate::model::State;
 use crate::rows::{short_path, New, Row, RowKind};
-use crate::theme::Theme;
+use crate::theme::{AgentIcons, Theme};
 
 /// Narrower than this (a phone), the compact layout.
 const COMPACT_BELOW: u16 = 80;
@@ -38,15 +38,19 @@ fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     }
 }
 
-/// Small text marks, not font-dependent logos. Unknown providers still get
-/// a neutral mark; the wide card and preview retain the agent's name.
-fn agent_icon(kind: &str) -> &'static str {
-    match kind {
-        "claude" => "✳",
-        "codex" => "›_",
-        "pi" => "π",
-        "opencode" => "◇",
-        "gemini" => "✦",
+/// Nerd Font marks are opt-in; Unicode needs no icon font. Unknown providers
+/// still get a neutral mark, and the preview retains the agent's name.
+fn agent_icon(kind: &str, mode: AgentIcons) -> &'static str {
+    match (mode, kind) {
+        (AgentIcons::Nerd, "claude") => "\u{ec82}", // cod-claude
+        (AgentIcons::Nerd, "codex") => "\u{ec81}", // cod-openai
+        (AgentIcons::Nerd, "gemini") => "\u{ec10}", // cod-sparkle
+        (AgentIcons::Nerd, "opencode") => "\u{f0763}", // md-square-outline
+        (_, "claude") => "✳",
+        (_, "codex") => "›_",
+        (_, "pi") => "π",
+        (_, "opencode") => "◇",
+        (_, "gemini") => "✦",
         _ => "▣",
     }
 }
@@ -401,7 +405,7 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
 /// mark and where it runs. Compact, SLOT (the rename field's status) ends line two.
 fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
     let RowKind::Agent { state, stale, kind, session, meta, age, .. } = &row.kind else { return vec![first] };
-    let icon = agent_icon(kind);
+    let icon = Span::styled(agent_icon(kind, t.agent_icons), t.agent());
     // A stale state is unconfirmed: "working?".
     let unsure = if *stale { "?" } else { "" };
     let mut second = vec![mark, Span::raw("   ")];
@@ -412,7 +416,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
         if !age.is_empty() || *stale {
             tail.extend([Span::styled(" · ", t.muted()), Span::styled(format!("{age}{unsure}"), t.state(*state))]);
         }
-        tail.push(Span::styled(format!(" {icon}"), t.muted()));
+        tail.extend([Span::raw(" "), icon]);
         let slot_w = slot.as_ref().map_or(0, |s| s.width() + 1);
         second.push(Span::styled(fit(session, width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
         second.extend(tail);
@@ -433,7 +437,8 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
     if !when.is_empty() {
         second.extend([Span::styled(when, t.state(*state)), Span::raw("  ")]);
     }
-    second.push(Span::styled(format!("{icon:<2} "), t.muted()));
+    let padding = 3usize.saturating_sub(icon.width());
+    second.extend([icon, Span::raw(" ".repeat(padding))]);
     second.push(Span::styled(fit(meta, width.saturating_sub(cols(&second))), t.muted()));
     vec![first, Line::from(second)]
 }
@@ -605,9 +610,11 @@ mod tests {
 
     #[test]
     fn agent_marks_follow_the_age_without_crowding_the_title() {
-        let t = Theme::from_values(&[]);
-        for (kind, icon) in [("claude", "✳"), ("codex", "›_"), ("pi", "π"), ("opencode", "◇"), ("gemini", "✦"), ("custom", "▣"), ("", "▣")] {
-            assert_eq!(agent_icon(kind), icon);
+        let cases = [("claude", "✳", "\u{ec82}"), ("codex", "›_", "\u{ec81}"), ("pi", "π", "π"), ("opencode", "◇", "\u{f0763}"), ("gemini", "✦", "\u{ec10}"), ("custom", "▣", "▣"), ("", "▣", "▣")];
+        for (mode, kind, icon) in cases.into_iter().flat_map(|(kind, unicode, nerd)| [(AgentIcons::Unicode, kind, unicode), (AgentIcons::Nerd, kind, nerd)]) {
+            let mut t = Theme::from_values(&[]);
+            t.agent_icons = mode;
+            assert_eq!(agent_icon(kind, mode), icon);
             assert!(icon.width() <= 2);
             for compact in [false, true] {
                 for age in ["", "<1m", "5m", "12d"] {
@@ -616,7 +623,7 @@ mod tests {
                             target: None,
                             kind: RowKind::Agent {
                                 state: State::Working, stale, kind: kind.into(), title: "task".into(),
-                                session: "a-long-session-name-日本語".into(), meta: "session › folder · agent · 1:0".into(), age: age.into(),
+                                session: "a-long-session-name-日本語".into(), meta: "session › folder · 1:0".into(), age: age.into(),
                             },
                             preview: None, score: None,
                         };
@@ -626,6 +633,8 @@ mod tests {
                             assert!(lines.iter().all(|l| l.width() <= width as usize), "{kind}: {lines:?}");
                             let detail = lines[1].to_string();
                             assert!(detail.contains(icon), "{detail}");
+                            let mark = lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap();
+                            assert_eq!(mark.style, Style::new().fg(Color::Reset), "{kind}: normal foreground, not brand, state or muted text");
                             if !age.is_empty() {
                                 assert!(detail.find(age).unwrap() < detail.find(icon).unwrap(), "{detail}");
                             }

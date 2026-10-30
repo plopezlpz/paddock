@@ -124,6 +124,8 @@ test('round trip: emit then parse gives the same cells', () => {
 test('glyph repertoire: ASCII and listed glyphs pass, others are named in the error', () => {
   assert.doesNotThrow(() => checkRepertoire('a ╭─╮ ●○ ▌ ‣'.replace('‣', '')));
   assert.doesNotThrow(() => checkRepertoire('✎ rename  ✦ suggesting…  ⇅ moving'), 'rename, suggest and move marks');
+  assert.doesNotThrow(() => checkRepertoire('✳ ›_ π ◇ ✦ ▣'), 'Unicode agent identity marks');
+  for (const glyph of '✳›_π◇✦▣') assert.equal(width(glyph), 1, `agent mark ${glyph}`);
   assert.throws(() => checkRepertoire('ok\n日'), /wide character/);
   assert.throws(() => checkRepertoire('é'), /combining/);
   assert.throws(() => checkRepertoire('☃'), /glyph repertoire/);

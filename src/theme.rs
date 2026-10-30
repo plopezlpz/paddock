@@ -11,7 +11,15 @@ use unicode_width::UnicodeWidthStr;
 use crate::model::State;
 use crate::tmux::Control;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentIcons {
+    Unicode,
+    Nerd,
+}
+
 pub struct Theme {
+    /// Explicit choice: terminal font coverage cannot be detected over tmux/SSH.
+    pub agent_icons: AgentIcons,
     pub accent: Color,
     pub hint: Color,
     /// Secondary text: a colour, or the terminal's dim attribute.
@@ -42,6 +50,7 @@ const OPTIONS: &[&str] = &[
     "@agent-icon-finished",
     "@agent-icon-working",
     "@agent-icon-asking",
+    "@paddock-agent-icons",
 ];
 
 impl Theme {
@@ -71,6 +80,7 @@ impl Theme {
             _ => "●".to_string(),
         });
         Theme {
+            agent_icons: if v(17) == "nerd" { AgentIcons::Nerd } else { AgentIcons::Unicode },
             accent: parse_colour(v(0)).or(style_fg(v(12))).unwrap_or(Color::Yellow),
             muted: parse_colour(v(1)),
             hint: parse_colour(v(2)).unwrap_or(Color::Blue),
@@ -93,6 +103,11 @@ impl Theme {
 
     pub fn state(&self, s: State) -> Style {
         Style::new().fg(self.states[s as usize])
+    }
+
+    /// All agent marks use the terminal foreground; colour is reserved for state.
+    pub fn agent(&self) -> Style {
+        Style::new().fg(Color::Reset)
     }
 
     /// The dot that stands for S.
@@ -198,6 +213,17 @@ mod tests {
         assert_eq!(t.accent, Color::Magenta);
         assert_eq!(t.state(State::Working).fg, Some(Color::Indexed(1)));
         assert_eq!(t.muted(), Style::new().fg(Color::DarkGray));
+    }
+
+    #[test]
+    fn agent_icons_are_explicit_and_default_to_unicode() {
+        assert_eq!(Theme::from_values(&[]).agent_icons, AgentIcons::Unicode);
+        let mut v = vec![""; OPTIONS.len()];
+        let option = OPTIONS.iter().position(|name| *name == "@paddock-agent-icons").unwrap();
+        for (value, expected) in [("nerd", AgentIcons::Nerd), ("unicode", AgentIcons::Unicode), ("", AgentIcons::Unicode), ("auto", AgentIcons::Unicode), ("glyphs", AgentIcons::Unicode), ("unknown", AgentIcons::Unicode)] {
+            v[option] = value;
+            assert_eq!(Theme::from_values(&v).agent_icons, expected, "{value}");
+        }
     }
 
     #[test]

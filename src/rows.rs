@@ -350,7 +350,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
                 kind: kind.to_string(),
                 title: a.title.clone(),
                 session: s.name.clone(),
-                meta: format!("{} › {folder} · {kind} · {}:{}", s.name, w.index, p.index),
+                meta: format!("{} › {folder} · {}:{}", s.name, w.index, p.index),
                 age: age(a.since, now),
             },
             preview: Some(p.id.clone()),
@@ -417,6 +417,17 @@ mod tests {
     fn sessions_for(q: &str) -> Vec<String> {
         let none = HashSet::new();
         names(&sessions(&snap(), &mut filter(q), &tree(&none, &none, None)))
+    }
+
+    #[test]
+    fn agent_kind_is_searchable_without_repeating_it_in_card_metadata() {
+        let snap = snap();
+        let rows = agents(&snap, &mut filter("claude"), Group::Flat, None, "/h", 0);
+        assert_eq!(rows.len(), 1);
+        let RowKind::Agent { kind, meta, .. } = &rows[0].kind else { panic!("expected an agent card") };
+        assert_eq!(kind, "claude");
+        assert_eq!(meta, "work › src · 1:1");
+        assert_eq!(pane_title(&snap, rows[0].preview.as_deref().unwrap()), "work:1.1 · claude");
     }
 
     #[test]

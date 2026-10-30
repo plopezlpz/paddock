@@ -6,9 +6,16 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-30
+
 ### Added
 
-- Agent cards show a small agent-type mark after the elapsed time, including in the compact layout and while renaming. Text glyphs need no Nerd Font; the state dot stays beside the title.
+- Agent cards show a small agent-type mark in the terminal's normal foreground after the elapsed time, including in the compact layout and while renaming. The default Unicode marks need no icon font; the state dot stays beside the title.
+- `@paddock-agent-icons nerd` opts into Nerd Font Claude/OpenAI logos, a Gemini sparkle, an OpenCode squared outline and plain π. `unicode` (the default, also used for unknown option values) keeps portable text marks. No font installation, image protocol or passthrough is required by Paddock; Nerd mode requires suitable glyphs in the local terminal's font.
+
+### Changed
+
+- Cards no longer repeat the agent name beside the icon; it remains searchable and appears in the preview header.
 
 ## [0.3.1] - 2026-10-21
 
@@ -109,7 +116,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/plopezlpz/paddock/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/plopezlpz/paddock/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/plopezlpz/paddock/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/plopezlpz/paddock/compare/v0.1.0...v0.2.0

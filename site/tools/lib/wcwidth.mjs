@@ -50,6 +50,7 @@ export const GLYPHS = new Set(
   [
     '─│├└┌┐┘╭╮╰╯┬┴┼', // box drawing: the popup frame and the tree
     '●○', // agent state dots
+    'π◇▣', // agent identity marks (other marks already appear below)
     '▌▏', // selection mark, filter cursor
     '›‹', // prompt, back
     '⎿', // tool output

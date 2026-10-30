@@ -2391,6 +2391,57 @@ mod tests {
     }
 
     #[test]
+    fn nerd_marks_follow_redraws_rename_filter_menu_and_resize() {
+        let mut app = agents_app();
+        let mut view = View::new();
+        let mut theme = Theme::from_values(&[]);
+        theme.agent_icons = crate::theme::AgentIcons::Nerd;
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let render = |term: &mut Terminal<TestBackend>, app: &App, view: &mut View| {
+            term.draw(|f| ui::draw(f, app, view, &Preview { title: "", body: &Text::default() }, &theme)).unwrap();
+        };
+        let icon = "\u{ec82}";
+        let count = |term: &Terminal<TestBackend>| term.backend().buffer().content.iter().filter(|c| c.symbol() == icon).count();
+        render(&mut term, &app, &mut view);
+        assert_eq!(count(&term), 4, "one glyph per card");
+        let (x, y) = find(&term, icon);
+        assert_eq!(term.backend().buffer()[(x, y)].fg, ratatui::style::Color::Reset);
+        assert!(screen(&term).iter().all(|l| !l.contains("claude")), "no duplicate provider name");
+
+        app.open_menu(Position::new(x, y), true);
+        render(&mut term, &app, &mut view);
+        let menu = view.menu.unwrap();
+        for row in menu.y..menu.bottom() {
+            for col in menu.x..menu.right() {
+                assert_ne!(term.backend().buffer()[(col, row)].symbol(), icon, "menu clears glyph cells");
+            }
+        }
+        app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        ctrl(&mut app, 'r');
+        render(&mut term, &app, &mut view);
+        assert_eq!(count(&term), 4, "renaming keeps the icon");
+        app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        type_(&mut app, "nothing-matches");
+        render(&mut term, &app, &mut view);
+        assert_eq!(count(&term), 0, "filtering removes old glyphs");
+        ctrl(&mut app, 'u');
+        for width in [24, 40, 120] {
+            term.backend_mut().resize(width, 12);
+            term.resize(ratatui::layout::Rect::new(0, 0, width, 12)).unwrap();
+            render(&mut term, &app, &mut view);
+            assert!(count(&term) > 0);
+            for y in 0..12 {
+                assert_ne!(term.backend().buffer()[(width - 1, y)].symbol(), icon, "no glyph outside the list");
+            }
+            app.move_by(1, false);
+            render(&mut term, &app, &mut view);
+        }
+        app.set_tab(Tab::Sessions);
+        render(&mut term, &app, &mut view);
+        assert_eq!(count(&term), 0, "changing tabs clears the glyphs");
+    }
+
+    #[test]
     fn agent_marks_survive_renaming_and_fall_back_to_the_command() {
         for (kind, command, icon) in [("claude", "node", "✳"), ("codex", "node", "›_"), ("", "pi", "π"), ("custom", "node", "▣")] {
             let mut app = new(fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|{command}||working|0|{kind}|task||||/a")]), Tab::Agents, "@1");

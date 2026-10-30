@@ -233,11 +233,34 @@ is not checked: keep it at the clone's version, and update the two together.
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
-Agent cards show a small agent-type mark after the elapsed time: `✳` Claude,
-`›_` Codex, `π` pi, `◇` OpenCode, `✦` Gemini, and `▣` for other agents.
-These are text glyphs, not logos; no Nerd Font is needed. The wide layout
-also keeps the agent's name. The colored dot beside the title still means
+Agent cards show a small agent mark in the terminal's normal foreground after
+the elapsed time, without repeating the agent name. The name remains searchable
+and appears in the preview header. The colored dot beside the title still means
 **state**, not agent type.
+
+The default `unicode` mode needs no icon font: `✳` Claude, `›_` Codex, `π` pi,
+`◇` OpenCode, `✦` Gemini, and `▣` for other agents. To use Nerd Font glyphs:
+
+```tmux
+set -g @paddock-agent-icons nerd
+```
+
+| Agent | Nerd Font mark |
+|---|---|
+| Claude | `cod-claude` (`U+EC82`) |
+| Codex | `cod-openai` (`U+EC81`), OpenAI logo |
+| Gemini | `cod-sparkle` (`U+EC10`), sparkle approximation |
+| pi | `π` (`U+03C0`) |
+| OpenCode | `md-square-outline` (`U+F0763`), squared-outline approximation |
+| Other agents | `▣` |
+
+These marks are available in Nerd Fonts 3.5.1; older fonts may lack the newer
+logos. Paddock does not install fonts, use image protocols, or require tmux
+passthrough. Your **local terminal** must use a font containing the glyphs,
+even when Paddock runs over SSH. Font coverage cannot be reliably detected
+from inside tmux, so the mode is explicit, not automatic. If you see missing
+characters, set `@paddock-agent-icons unicode`. Unset or unrecognized values
+also use Unicode. Changes apply the next time the popup opens.
 
 | Key | Action |
 |---|---|
@@ -282,6 +305,7 @@ of room, ⋯ opens the menu.
 | Option | Default | |
 |---|---|---|
 | `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
+| `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%` | may be a format, e.g. `#{?#{e\|<:#{client_width},140},100%,80%}` |
 | `@paddock-popup-style` | `bg=terminal,fg=terminal` | popup background and text |
