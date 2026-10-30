@@ -2391,6 +2391,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_marks_survive_renaming_and_fall_back_to_the_command() {
+        for (kind, command, icon) in [("claude", "node", "✳"), ("codex", "node", "›_"), ("", "pi", "π"), ("custom", "node", "▣")] {
+            let mut app = new(fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|{command}||working|0|{kind}|task||||/a")]), Tab::Agents, "@1");
+            for renaming in [false, true] {
+                if renaming {
+                    ctrl(&mut app, 'r');
+                }
+                for width in [40, 80, 120] {
+                    let lines = screen(&draw(&app, &mut View::new(), width, 12));
+                    let title = lines.iter().position(|l| l.contains("task")).unwrap();
+                    assert!(!lines[title].contains(icon), "{lines:#?}");
+                    assert!(lines[title + 1].contains(icon), "{lines:#?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_stale_state_is_marked_unconfirmed() {
         let app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
         let lines = screen(&draw(&app, &mut View::new(), 120, 12));

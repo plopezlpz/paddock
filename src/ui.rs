@@ -38,6 +38,19 @@ fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     }
 }
 
+/// Small text marks, not font-dependent logos. Unknown providers still get
+/// a neutral mark; the wide card and preview retain the agent's name.
+fn agent_icon(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "✳",
+        "codex" => "›_",
+        "pi" => "π",
+        "opencode" => "◇",
+        "gemini" => "✦",
+        _ => "▣",
+    }
+}
+
 /// S cut to MAX display columns, ending in … when cut.
 fn fit(s: &str, max: usize) -> String {
     if s.width() <= max {
@@ -384,10 +397,11 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
     vec![Line::from(line)]
 }
 
-/// An agent card: FIRST, then how long it has been in its state and where
-/// it runs. Compact, SLOT (the rename field's status) ends line two.
+/// An agent card: FIRST, then how long it has been in its state, its kind's
+/// mark and where it runs. Compact, SLOT (the rename field's status) ends line two.
 fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, stale, session, meta, age, .. } = &row.kind else { return vec![first] };
+    let RowKind::Agent { state, stale, kind, session, meta, age, .. } = &row.kind else { return vec![first] };
+    let icon = agent_icon(kind);
     // A stale state is unconfirmed: "working?".
     let unsure = if *stale { "?" } else { "" };
     let mut second = vec![mark, Span::raw("   ")];
@@ -398,6 +412,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
         if !age.is_empty() || *stale {
             tail.extend([Span::styled(" · ", t.muted()), Span::styled(format!("{age}{unsure}"), t.state(*state))]);
         }
+        tail.push(Span::styled(format!(" {icon}"), t.muted()));
         let slot_w = slot.as_ref().map_or(0, |s| s.width() + 1);
         second.push(Span::styled(fit(session, width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
         second.extend(tail);
@@ -418,6 +433,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
     if !when.is_empty() {
         second.extend([Span::styled(when, t.state(*state)), Span::raw("  ")]);
     }
+    second.push(Span::styled(format!("{icon:<2} "), t.muted()));
     second.push(Span::styled(fit(meta, width.saturating_sub(cols(&second))), t.muted()));
     vec![first, Line::from(second)]
 }
@@ -574,7 +590,7 @@ mod tests {
             RowKind::Session { name: "s".into(), windows: 2, current: true },
             RowKind::Window { index: "1".into(), name: "w".into(), meta: "~/a".into(), state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, stale: false, title: "t".into(), session: "s".into(), meta: "m".into(), age: "5m".into() },
+            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), session: "s".into(), meta: "m".into(), age: "5m".into() },
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
         ];
@@ -583,6 +599,47 @@ mod tests {
             let row = Row { target: None, kind, preview: None, score: None };
             for compact in [false, true] {
                 assert_eq!(row_lines(&row, true, compact, 40, &t).0.len(), row.height(compact) as usize, "compact: {compact}");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_marks_follow_the_age_without_crowding_the_title() {
+        let t = Theme::from_values(&[]);
+        for (kind, icon) in [("claude", "✳"), ("codex", "›_"), ("pi", "π"), ("opencode", "◇"), ("gemini", "✦"), ("custom", "▣"), ("", "▣")] {
+            assert_eq!(agent_icon(kind), icon);
+            assert!(icon.width() <= 2);
+            for compact in [false, true] {
+                for age in ["", "<1m", "5m", "12d"] {
+                    for stale in [false, true] {
+                        let row = Row {
+                            target: None,
+                            kind: RowKind::Agent {
+                                state: State::Working, stale, kind: kind.into(), title: "task".into(),
+                                session: "a-long-session-name-日本語".into(), meta: "session › folder · agent · 1:0".into(), age: age.into(),
+                            },
+                            preview: None, score: None,
+                        };
+                        for width in [24, 40, 72] {
+                            let (lines, _) = row_lines(&row, true, compact, width, &t);
+                            assert_eq!(lines[0].to_string(), "▌ ● task");
+                            assert!(lines.iter().all(|l| l.width() <= width as usize), "{kind}: {lines:?}");
+                            let detail = lines[1].to_string();
+                            assert!(detail.contains(icon), "{detail}");
+                            if !age.is_empty() {
+                                assert!(detail.find(age).unwrap() < detail.find(icon).unwrap(), "{detail}");
+                            }
+                            assert_eq!(detail.contains('?'), stale, "{detail}");
+                            // Compact rename feedback shares the detail line.
+                            if compact {
+                                let lines = card_lines(Line::raw("renaming"), Span::raw("▌"), &row, true, width as usize, &t, Some(Span::raw("error")));
+                                assert!(lines[1].width() <= width as usize, "{lines:?}");
+                                assert!(lines[1].to_string().contains(icon));
+                                assert!(lines[1].to_string().ends_with("error"));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

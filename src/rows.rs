@@ -60,7 +60,7 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, meta: String, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    Agent { state: State, stale: bool, title: String, session: String, meta: String, age: String },
+    Agent { state: State, stale: bool, kind: String, title: String, session: String, meta: String, age: String },
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
     /// The "+ new" row being named (App's create mode says what it is).
@@ -347,6 +347,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
             kind: RowKind::Agent {
                 state: a.state,
                 stale: a.stale,
+                kind: kind.to_string(),
                 title: a.title.clone(),
                 session: s.name.clone(),
                 meta: format!("{} › {folder} · {kind} · {}:{}", s.name, w.index, p.index),

@@ -233,6 +233,12 @@ is not checked: keep it at the clone's version, and update the two together.
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
+Agent cards show a small agent-type mark after the elapsed time: `✳` Claude,
+`›_` Codex, `π` pi, `◇` OpenCode, `✦` Gemini, and `▣` for other agents.
+These are text glyphs, not logos; no Nerd Font is needed. The wide layout
+also keeps the agent's name. The colored dot beside the title still means
+**state**, not agent type.
+
 | Key | Action |
 |---|---|
 | type | fuzzy filter on names, folders, commands, agent kinds and states (a waiting agent also matches `asking`, an unconfirmed one `stale`): `'exact`, `^prefix`, `suffix$`, `!not`; `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |

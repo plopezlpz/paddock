@@ -6,6 +6,10 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Agent cards show a small agent-type mark after the elapsed time, including in the compact layout and while renaming. Text glyphs need no Nerd Font; the state dot stays beside the title.
+
 ## [0.3.1] - 2026-10-21
 
 ### Fixed
