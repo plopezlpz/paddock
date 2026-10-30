@@ -61,6 +61,8 @@ pub enum Action {
 pub enum Op {
     /// Set PANE's @agent-description; None unsets it (back to automatic).
     SetTitle { pane: String, title: Option<String> },
+    SetHidden { pane: String, hidden: bool },
+    SetHiddenExpanded(bool),
     RenameSession { session: String, name: String },
     /// An empty NAME turns automatic naming back on.
     RenameWindow { window: String, name: String },
@@ -124,6 +126,10 @@ pub enum Command {
     Open,
     /// Expand or collapse the selected window's panes.
     Panes,
+    /// Toggle the Hidden section; unrelated to showing an individual agent.
+    Hidden,
+    Hide,
+    Show,
     Group,
     Preview,
     Close,
@@ -227,6 +233,7 @@ pub struct Carry {
 pub struct Menu {
     /// The row it was opened on: its items act on that row only.
     target: Option<Target>,
+    hidden: bool,
     pub items: Vec<Hint>,
     pub selected: usize,
     /// The screen cell it hangs from (the click, or the selected row).
@@ -299,6 +306,7 @@ enum Hit {
     Button(Command),
     /// A window's ▸/▾.
     Toggle(Target),
+    Hidden,
     MenuItem(usize),
 }
 
@@ -323,6 +331,7 @@ pub struct View {
     pub rows: Vec<(Rect, usize, Target)>,
     pub buttons: Vec<(Rect, Command)>,
     pub toggles: Vec<(Rect, Target)>,
+    pub hidden: Option<Rect>,
     /// The open menu's box and its items.
     pub menu: Option<Rect>,
     pub items: Vec<(Rect, usize)>,
@@ -337,6 +346,7 @@ impl View {
             rows: Vec::new(),
             buttons: Vec::new(),
             toggles: Vec::new(),
+            hidden: None,
             menu: None,
             items: Vec::new(),
         }
@@ -347,6 +357,7 @@ impl View {
         self.rows.clear();
         self.buttons.clear();
         self.toggles.clear();
+        self.hidden = None;
         self.menu = None;
         self.items.clear();
     }
@@ -380,6 +391,7 @@ impl View {
             return self.items.iter().find(|(r, _)| inside(r)).map(|&(_, i)| Hit::MenuItem(i)).filter(|_| inside(&menu));
         }
         (self.buttons.iter().find(|(r, _)| inside(r)).map(|&(_, c)| Hit::Button(c)))
+            .or_else(|| self.hidden.filter(inside).map(|_| Hit::Hidden))
             .or_else(|| self.toggles.iter().find(|(r, _)| inside(r)).map(|(_, t)| Hit::Toggle(t.clone())))
             .or_else(|| self.rows.iter().find(|(r, ..)| inside(r)).map(|(_, i, t)| Hit::Row(*i, t.clone())))
     }
@@ -389,6 +401,8 @@ pub struct App {
     pub(crate) snap: Snapshot,
     pub(crate) tab: Tab,
     pub(crate) group: Group,
+    /// Saved preference; searching only overrides the rendered expansion.
+    pub(crate) hidden_expanded: bool,
     pub(crate) query: LineEdit,
     pub(crate) rows: Vec<Row>,
     pub(crate) selected: usize,
@@ -417,11 +431,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, can_suggest: bool) -> App {
+    pub fn new(snap: Snapshot, tab: Tab, current_session: String, current_window: String, home: String, can_suggest: bool, hidden_expanded: bool) -> App {
         let mut app = App {
             snap,
             tab,
             group: Group::Status,
+            hidden_expanded,
             query: LineEdit::default(),
             rows: Vec::new(),
             selected: 0,
@@ -510,7 +525,7 @@ impl App {
         }
         // The menu's row went away: its items would act on the next one.
         if let Mode::Menu(m) = &self.mode
-            && m.target.as_ref() != self.selected_target()
+            && (m.target.as_ref() != self.selected_target() || m.hidden != self.hidden_selected())
         {
             self.mode = Mode::List;
             self.status = Some(Status::Failed("that row has gone".into()));
@@ -556,6 +571,7 @@ impl App {
     /// gone.
     fn rebuild(&mut self, fresh: bool) {
         let keep = self.selected_target().cloned();
+        let was_hidden = self.hidden_heading().is_some_and(|i| i <= self.selected);
         let old = self.selected;
         self.rows = match self.tab {
             Tab::Sessions => {
@@ -574,10 +590,12 @@ impl App {
             }
             Tab::Agents => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &self.home, now)
+                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &self.home, now, self.hidden_expanded)
             }
         };
-        let kept = keep.as_ref().and_then(|t| self.locate(t, old));
+        // When a search ends, a hidden card may fold away: keep the user on
+        // its heading rather than jumping to an unrelated visible agent.
+        let kept = keep.as_ref().and_then(|t| self.locate(t, old)).or_else(|| was_hidden.then(|| self.hidden_heading()).flatten());
         let pick = if fresh && self.filter.active() {
             // Best match, earliest on ties, but the selection stays when it
             // ties (a negation-only query scores every row the same).
@@ -631,7 +649,7 @@ impl App {
     }
 
     fn selectable(&self, i: usize) -> bool {
-        self.rows.get(i).is_some_and(|r| r.target.is_some())
+        self.rows.get(i).is_some_and(|r| r.target.is_some() || matches!(r.kind, RowKind::Hidden { .. }))
     }
 
     /// First selectable row from I (in bounds) walking FORWARD or back.
@@ -677,10 +695,32 @@ impl App {
         }
     }
 
-    /// Expand (Some(true)), collapse (Some(false)) or toggle (None) the
-    /// selected row's window; collapsing from a pane selects its window.
-    fn expand(&mut self, how: Option<bool>) {
-        let Some((window, open)) = self.selected_window() else { return };
+    fn hidden_heading(&self) -> Option<usize> {
+        self.rows.iter().position(|r| matches!(r.kind, RowKind::Hidden { .. }))
+    }
+
+    fn hidden_selected(&self) -> bool {
+        self.rows.get(self.selected).is_some_and(|r| matches!(r.kind, RowKind::Hidden { .. }))
+    }
+
+    fn selected_agent_hidden(&self) -> bool {
+        self.selected_agent().and_then(|(_, pane)| self.snap.agent(&pane)).is_some_and(|a| a.hidden)
+    }
+
+    /// Expand/collapse the Hidden section or the selected window's panes.
+    fn expand(&mut self, how: Option<bool>) -> Action {
+        if self.tab == Tab::Agents && (self.hidden_selected() || self.selected_agent_hidden()) {
+            if self.filter.active() {
+                self.note("hidden matches stay expanded while filtering");
+                return Action::None;
+            }
+            let expanded = how.unwrap_or(!self.hidden_expanded);
+            if expanded == self.hidden_expanded {
+                return Action::None;
+            }
+            return Action::Run(Job::new(Op::SetHiddenExpanded(expanded), if expanded { "hidden expanded" } else { "hidden collapsed" }));
+        }
+        let Some((window, open)) = self.selected_window() else { return Action::None };
         if how.unwrap_or(!open) {
             self.collapsed.remove(&window);
             self.expanded.insert(window);
@@ -693,6 +733,7 @@ impl App {
             self.collapsed.insert(window);
         }
         self.rebuild(false);
+        Action::None
     }
 
     fn edit_query(&mut self, key: KeyEvent) {
@@ -870,6 +911,16 @@ impl App {
     pub fn ran(&mut self, job: Job, result: Result<Option<Target>, String>) -> Option<Target> {
         match result {
             Ok(created) => {
+                if let Op::SetHiddenExpanded(expanded) = &job.op {
+                    self.hidden_expanded = *expanded;
+                    if !expanded && let Some(i) = self.hidden_heading() {
+                        self.selected = i;
+                    }
+                    self.rebuild(false);
+                }
+                if matches!(job.op, Op::SetHidden { .. }) {
+                    self.keep = None;
+                }
                 self.follow = job.follow;
                 if let Some(undo) = job.undo {
                     self.undo.push((undo, job.done.clone()));
@@ -1239,7 +1290,7 @@ impl App {
     fn open_menu(&mut self, anchor: Position, preview_fits: bool) {
         let items = self.menu_items(preview_fits);
         if !items.is_empty() {
-            self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), items, selected: 0, anchor });
+            self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), hidden: self.hidden_selected(), items, selected: 0, anchor });
         }
     }
 
@@ -1254,6 +1305,8 @@ impl App {
         match command {
             Command::Open | Command::Kill => self.selected_target().is_some(),
             Command::Panes => self.selected_window().is_some(),
+            Command::Hidden => self.hidden_selected() && !self.filter.active(),
+            Command::Hide | Command::Show => self.tab == Tab::Agents && self.selected_agent().is_some() && self.selected_agent_hidden() == (command == Command::Show),
             Command::Rename => self.renamable(),
             Command::RenameSuggest => self.can_suggest && self.selected_agent().is_some(),
             Command::Move | Command::MoveUp | Command::MoveDown => self.movable(),
@@ -1272,6 +1325,8 @@ impl App {
             Command::Tab(_) => "⇥",
             Command::Panes if self.selected_window().is_some_and(|(_, open)| open) => "←",
             Command::Panes => "→",
+            Command::Hidden => if self.hidden_expanded { "←" } else { "→" },
+            Command::Hide | Command::Show => "^e",
             Command::Group => "^g",
             Command::Preview => "^o",
             Command::Rename | Command::Suggest => "^r",
@@ -1304,6 +1359,9 @@ impl App {
             (Command::Panes, if open { "hide panes" } else { "show panes" }),
             (Command::Rename, "rename"),
             (Command::RenameSuggest, "suggest a title"),
+            (Command::Hide, "hide"),
+            (Command::Show, "show"),
+            (Command::Hidden, if self.hidden_expanded { "collapse hidden" } else { "expand hidden" }),
             (Command::Move, "move…"),
             (Command::MoveUp, "move up"),
             (Command::MoveDown, "move down"),
@@ -1352,6 +1410,9 @@ impl App {
             (Command::Panes, if open { "hide panes" } else { "panes" }, 4),
             (Command::Group, &group, 5),
             (Command::Rename, "rename", 1),
+            (Command::Hide, "hide", 4),
+            (Command::Show, "show", 4),
+            (Command::Hidden, if self.hidden_expanded { "collapse" } else { "expand" }, 0),
             (Command::Move, "move", 4),
             (Command::Kill, "kill", 5),
             (Command::NewWindow, "new", 7),
@@ -1413,8 +1474,21 @@ impl App {
         }
         match command {
             Command::Tab(tab) => self.set_tab(tab),
+            Command::Open if self.hidden_selected() => return self.expand(None),
             Command::Open => return self.selected_target().cloned().map_or(Action::None, Action::Activate),
-            Command::Panes => self.expand(None),
+            Command::Panes => return self.expand(None),
+            Command::Hidden => {
+                if let Some(i) = self.hidden_heading() {
+                    self.selected = i;
+                    return self.expand(None);
+                }
+            }
+            Command::Hide | Command::Show => {
+                if self.can(command, true) && let Some((_, pane)) = self.selected_agent() {
+                    let hidden = command == Command::Hide;
+                    return Action::Run(Job::new(Op::SetHidden { pane, hidden }, if hidden { "agent hidden (still running)" } else { "agent shown" }));
+                }
+            }
             Command::Group if self.tab == Tab::Agents => {
                 self.group = self.group.next();
                 self.rebuild(false);
@@ -1503,6 +1577,7 @@ impl App {
             KeyCode::Enter => return self.run(Command::Open),
             KeyCode::Tab | KeyCode::BackTab => return self.run(Command::Tab(self.tab.other())),
             KeyCode::Char('g') if ctrl => return self.run(Command::Group),
+            KeyCode::Char('e') if ctrl => return self.run(if self.selected_agent_hidden() { Command::Show } else { Command::Hide }),
             KeyCode::Char('r') if ctrl => return self.run(Command::Rename),
             KeyCode::Char('z') if ctrl => return self.run(Command::Undo),
             KeyCode::Char('x') if ctrl => return self.run(Command::Kill),
@@ -1520,8 +1595,8 @@ impl App {
             KeyCode::Char('n' | 'j') if ctrl => self.move_by(1, true),
             KeyCode::PageUp => self.move_by(-PAGE, false),
             KeyCode::PageDown => self.move_by(PAGE, false),
-            KeyCode::Right => self.expand(Some(true)),
-            KeyCode::Left => self.expand(Some(false)),
+            KeyCode::Right => return self.expand(Some(true)),
+            KeyCode::Left => return self.expand(Some(false)),
             // The query is typed at its end (←/→ belong to the tree): text,
             // Backspace (^h), ^w and ^u.
             KeyCode::Backspace => self.edit_query(key),
@@ -1588,6 +1663,13 @@ impl App {
                     }
                 }
                 let mut was_selected = false;
+                if hit == Some(Hit::Hidden) && let Some(i) = self.hidden_heading() {
+                    self.selected = i;
+                    if context {
+                        self.open_menu(Position::new(at.x.saturating_add(1), at.y), view.preview_fits);
+                        return Action::None;
+                    }
+                }
                 if let Some(Hit::Row(i, t)) = &hit
                     && let Some(i) = self.locate(t, *i)
                 {
@@ -1644,10 +1726,11 @@ impl App {
                     }
                     Some(Hit::Button(command)) => self.run(command),
                     Some(Hit::MenuItem(i)) => self.choose(i),
+                    Some(Hit::Hidden) => self.run(Command::Hidden),
                     Some(Hit::Toggle(target)) => {
                         if let Some(i) = self.position(&target) {
                             self.selected = i;
-                            self.expand(None);
+                            return self.expand(None);
                         }
                         Action::None
                     }
@@ -1738,7 +1821,7 @@ mod tests {
 
     /// An app opened from window WINDOW of session $1, with a suggest command.
     fn new(snap: Snapshot, tab: Tab, window: &str) -> App {
-        App::new(snap, tab, "$1".into(), window.into(), String::new(), true)
+        App::new(snap, tab, "$1".into(), window.into(), String::new(), true, false)
     }
 
     /// Agents in two folders: header, card, card, header, card, card.
@@ -1819,6 +1902,7 @@ mod tests {
             RowKind::Pane { command, .. } => command.clone(),
             RowKind::Session { name, .. } => name.clone(),
             RowKind::Header { .. } => "header".into(),
+            RowKind::Hidden { .. } => "hidden".into(),
             RowKind::New => "new".into(),
         }
     }
@@ -2406,6 +2490,7 @@ mod tests {
         assert_eq!(count(&term), 4, "one glyph per card");
         let (x, y) = find(&term, icon);
         assert_eq!(term.backend().buffer()[(x, y)].fg, ratatui::style::Color::Reset);
+        assert!(term.backend().buffer()[(x, y)].modifier.contains(Modifier::DIM), "glyph shares the metadata tone");
         assert!(screen(&term).iter().all(|l| !l.contains("claude")), "no duplicate provider name");
 
         app.open_menu(Position::new(x, y), true);
@@ -2439,6 +2524,157 @@ mod tests {
         app.set_tab(Tab::Sessions);
         render(&mut term, &app, &mut view);
         assert_eq!(count(&term), 0, "changing tabs clears the glyphs");
+    }
+
+    fn hidden_snapshot() -> Snapshot {
+        crate::model::fixture_hidden(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|visible||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|codex||asking|0|codex|parked question||||/b",
+            "$1|s|@2|2|w|0|0|%3|0|1|pi||idle|0|pi|parked rest||||/a",
+        ], &["%2", "%3"])
+    }
+
+    fn hidden_app(expanded: bool) -> App {
+        App::new(hidden_snapshot(), Tab::Agents, "$1".into(), "@1".into(), String::new(), true, expanded)
+    }
+
+    /// Simulate a successful tmux write and the following fresh snapshot.
+    fn complete_hidden(app: &mut App, action: Action) {
+        let job = job(action);
+        if let Op::SetHidden { pane, hidden } = &job.op {
+            for s in &mut app.snap.sessions {
+                for w in &mut s.windows {
+                    for p in &mut w.panes {
+                        if p.id == *pane && let Some(a) = &mut p.agent {
+                            a.hidden = *hidden;
+                        }
+                    }
+                }
+            }
+        }
+        app.ran(job, Ok(None));
+        app.refresh();
+    }
+
+    #[test]
+    fn hide_show_is_non_destructive_and_only_changes_after_success() {
+        let mut app = hidden_app(false);
+        assert!(app.menu_items(true).iter().any(|h| h.command == Command::Hide));
+        assert!(!app.menu_items(true).iter().any(|h| h.command == Command::Show));
+        let pending = job(ctrl(&mut app, 'e'));
+        assert_eq!(pending.op, Op::SetHidden { pane: "%1".into(), hidden: true });
+        assert!(!app.snap.agent("%1").unwrap().hidden, "no optimistic visibility change");
+        app.ran(pending, Err("write failed".into()));
+        assert_eq!(selected_title(&app), "visible");
+        assert!(matches!(app.status, Some(Status::Failed(_))));
+        let action = ctrl(&mut app, 'e');
+        complete_hidden(&mut app, action);
+        assert_eq!(app.rows.len(), 1, "all agents can be hidden");
+        assert!(app.hidden_selected());
+        assert_eq!(app.snap.unique_panes().count(), 3, "no pane closed");
+        assert_eq!(app.snap.agent("%1").unwrap().state, crate::model::State::Working);
+        assert!(matches!(app.run(Command::Kill), Action::None));
+        assert!(matches!(app.mode, Mode::List), "heading is never a kill target");
+        type_(&mut app, "visible");
+        assert_eq!(selected_title(&app), "visible");
+        assert!(app.menu_items(true).iter().any(|h| h.command == Command::Show));
+        assert!(matches!(enter(&mut app), Action::Activate(Target::Pane { pane, .. }) if pane == "%1"));
+        assert!(app.snap.agent("%1").unwrap().hidden, "opening does not show");
+        let action = ctrl(&mut app, 'e');
+        assert!(matches!(&action, Action::Run(j) if j.op == Op::SetHidden { pane: "%1".into(), hidden: false }));
+        complete_hidden(&mut app, action);
+        assert_eq!(selected_title(&app), "visible");
+        assert!(!app.snap.agent("%1").unwrap().hidden);
+        assert!(app.snap.agent("%2").unwrap().hidden);
+        ctrl(&mut app, 'u');
+        app.set_tab(Tab::Sessions);
+        assert!(!app.can(Command::Hide, true));
+        assert!(app.rows.iter().any(|r| matches!(&r.target, Some(Target::Window { window, .. }) if window == "@2")));
+    }
+
+    #[test]
+    fn hidden_expansion_is_selectable_and_committed_only_after_success() {
+        let mut app = hidden_app(false);
+        app.move_by(1, false);
+        assert!(app.hidden_selected(), "navigation reaches the collapsed heading");
+        assert_eq!(app.preview_pane(&View::new()), None);
+        let pending = job(enter(&mut app));
+        assert_eq!(pending.op, Op::SetHiddenExpanded(true));
+        assert!(!app.hidden_expanded);
+        app.ran(pending, Err("write failed".into()));
+        assert!(!app.hidden_expanded);
+        let action = app.on_key(key(KeyCode::Right, KeyModifiers::NONE));
+        complete_hidden(&mut app, action);
+        assert!(app.hidden_expanded);
+        assert!(app.hidden_selected(), "heading remains selected when expanded");
+        app.move_by(1, false);
+        assert_eq!(selected_title(&app), "parked question");
+        assert_eq!(app.preview_pane(&View::new()), Some("%2"));
+        ctrl(&mut app, 'r');
+        assert!(renaming(&app).is_some(), "hidden cards still support renaming");
+        app.run(Command::Cancel);
+        let action = app.on_key(key(KeyCode::Left, KeyModifiers::NONE));
+        complete_hidden(&mut app, action);
+        assert!(!app.hidden_expanded);
+        assert!(app.hidden_selected(), "collapsing from a hidden card selects the heading");
+        let mut snapshot = hidden_snapshot();
+        snapshot.sessions[0].windows[0].panes[1].agent.as_mut().unwrap().state = crate::model::State::Working;
+        app.set_snapshot(snapshot);
+        assert!(app.hidden_selected());
+        assert!(app.snap.agent("%2").unwrap().hidden, "state changes never unhide");
+        assert!(!app.hidden_expanded);
+        app.open_menu(Position::default(), true);
+        app.set_snapshot(fixture(&[]));
+        assert!(matches!(app.mode, Mode::List), "a vanished heading closes its menu");
+    }
+
+    #[test]
+    fn searching_hidden_cards_never_changes_the_saved_expansion() {
+        for expanded in [false, true] {
+            let mut app = hidden_app(expanded);
+            type_(&mut app, "parked");
+            assert!(matches!(app.rows[0].kind, RowKind::Hidden { expanded: true, count: 2, .. }));
+            assert_eq!(app.rows.len(), 3);
+            assert_eq!(selected_title(&app), "parked question");
+            assert!(matches!(app.on_key(key(KeyCode::Left, KeyModifiers::NONE)), Action::None));
+            assert_eq!(app.hidden_expanded, expanded);
+            assert_eq!(app.rows.len(), 3);
+            app.run(Command::Group);
+            assert_eq!(app.hidden_expanded, expanded);
+            assert!(app.rows[1..].iter().all(|r| matches!(r.kind, RowKind::Agent { .. })));
+            ctrl(&mut app, 'u');
+            let heading = app.hidden_heading().unwrap();
+            assert!(matches!(app.rows[heading].kind, RowKind::Hidden { expanded: open, count: 2, .. } if open == expanded));
+            if !expanded { assert!(app.hidden_selected()); }
+            app.set_tab(Tab::Sessions);
+            app.set_tab(Tab::Agents);
+            assert_eq!(app.hidden_expanded, expanded);
+        }
+    }
+
+    #[test]
+    fn hidden_heading_clicks_toggle_only_the_heading_not_its_spacer() {
+        for width in [24, 40, 120] {
+            let mut app = hidden_app(false);
+            let mut view = View::new();
+            let term = draw(&app, &mut view, width, 14);
+            let rect = view.hidden.unwrap();
+            assert!(screen(&term)[rect.y as usize].contains("hidden · 2"));
+            if !view.compact {
+                assert!(view.hit(Position::new(rect.x, rect.y - 1)).is_none(), "blank line above the heading is not clickable");
+            }
+            let action = click(&mut app, &view, MouseButton::Left, (rect.x + 3, rect.y));
+            complete_hidden(&mut app, action);
+            let term = draw(&app, &mut view, width, 14);
+            assert!(app.hidden_expanded);
+            assert!(screen(&term).iter().any(|l| l.contains("parked question")));
+            let rect = view.hidden.unwrap();
+            let action = click(&mut app, &view, MouseButton::Left, (rect.x + 3, rect.y));
+            complete_hidden(&mut app, action);
+            assert!(!app.hidden_expanded);
+            let term = draw(&app, &mut view, width, 14);
+            assert!(screen(&term).iter().all(|l| !l.contains("parked")));
+        }
     }
 
     #[test]

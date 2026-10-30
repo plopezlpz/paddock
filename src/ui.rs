@@ -367,6 +367,11 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
             ]);
             (if *gap && !compact { vec![Line::raw(""), line] } else { vec![line] }, None)
         }
+        RowKind::Hidden { count, expanded, gap } => {
+            let label = format!(" {} hidden · {count}", if *expanded { "▾" } else { "▸" });
+            let line = Line::from(vec![mark, Span::styled(fit(&label, width.saturating_sub(1)), sel(t.muted().add_modifier(Modifier::BOLD)))]);
+            (if *gap && !compact { vec![Line::raw(""), line] } else { vec![line] }, None)
+        }
         // Only listed while it is being named: see create_lines.
         RowKind::New => (vec![Line::from(vec![mark, Span::raw(" "), Span::styled("+ new", Style::new().fg(t.accent))])], None),
     }
@@ -405,7 +410,7 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
 /// mark and where it runs. Compact, SLOT (the rename field's status) ends line two.
 fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
     let RowKind::Agent { state, stale, kind, session, meta, age, .. } = &row.kind else { return vec![first] };
-    let icon = Span::styled(agent_icon(kind, t.agent_icons), t.agent());
+    let icon = Span::styled(agent_icon(kind, t.agent_icons), t.muted());
     // A stale state is unconfirmed: "working?".
     let unsure = if *stale { "?" } else { "" };
     let mut second = vec![mark, Span::raw("   ")];
@@ -498,6 +503,13 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         if let Some(target) = &row.target {
             // A row cut off at the bottom is only clickable where it shows.
             view.rows.push((Rect::new(area.x, y, area.width, h.min(area.bottom() - y)), i, target.clone()));
+        }
+        if let RowKind::Hidden { gap, .. } = row.kind {
+            // The blank spacer above the heading is not a click target.
+            let head_y = y + u16::from(gap && !view.compact);
+            if head_y < area.bottom() {
+                view.hidden = Some(Rect::new(area.x, head_y, area.width, 1));
+            }
         }
         let (mut drawn, toggle) = match (&app.mode, renaming.filter(|r| row.target.as_ref() == Some(&r.target))) {
             (_, Some(r)) => (rename_lines(row, r, view.compact, area.width, t), None),
@@ -598,6 +610,8 @@ mod tests {
             RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), session: "s".into(), meta: "m".into(), age: "5m".into() },
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
+            RowKind::Hidden { count: 2, expanded: false, gap: false },
+            RowKind::Hidden { count: 2, expanded: true, gap: true },
         ];
         let t = Theme::from_values(&[]);
         for kind in kinds {
@@ -612,7 +626,7 @@ mod tests {
     fn agent_marks_follow_the_age_without_crowding_the_title() {
         let cases = [("claude", "✳", "\u{ec82}"), ("codex", "›_", "\u{ec81}"), ("pi", "π", "π"), ("opencode", "◇", "\u{f0763}"), ("gemini", "✦", "\u{ec10}"), ("custom", "▣", "▣"), ("", "▣", "▣")];
         for (mode, kind, icon) in cases.into_iter().flat_map(|(kind, unicode, nerd)| [(AgentIcons::Unicode, kind, unicode), (AgentIcons::Nerd, kind, nerd)]) {
-            let mut t = Theme::from_values(&[]);
+            let mut t = Theme::from_values(&["", if mode == AgentIcons::Nerd { "colour8" } else { "" }]);
             t.agent_icons = mode;
             assert_eq!(agent_icon(kind, mode), icon);
             assert!(icon.width() <= 2);
@@ -634,7 +648,7 @@ mod tests {
                             let detail = lines[1].to_string();
                             assert!(detail.contains(icon), "{detail}");
                             let mark = lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap();
-                            assert_eq!(mark.style, Style::new().fg(Color::Reset), "{kind}: normal foreground, not brand, state or muted text");
+                            assert_eq!(mark.style, t.muted(), "{kind}: same tone as session/window metadata");
                             if !age.is_empty() {
                                 assert!(detail.find(age).unwrap() < detail.find(icon).unwrap(), "{detail}");
                             }
@@ -644,6 +658,7 @@ mod tests {
                                 let lines = card_lines(Line::raw("renaming"), Span::raw("▌"), &row, true, width as usize, &t, Some(Span::raw("error")));
                                 assert!(lines[1].width() <= width as usize, "{lines:?}");
                                 assert!(lines[1].to_string().contains(icon));
+                                assert_eq!(lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap().style, t.muted());
                                 assert!(lines[1].to_string().ends_with("error"));
                             }
                         }

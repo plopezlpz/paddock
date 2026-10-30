@@ -340,6 +340,8 @@ fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
     let line = match op {
         Op::SetTitle { pane, title: Some(title) } => format!("set-option -p -t {} @agent-description {}", q(pane), q(title)),
         Op::SetTitle { pane, title: None } => format!("set-option -p -u -t {} @agent-description", q(pane)),
+        Op::SetHidden { pane, hidden } => format!("set-option -p -t {} @paddock-hidden {}", q(pane), u8::from(*hidden)),
+        Op::SetHiddenExpanded(expanded) => format!("set-option -g {HIDDEN_EXPANDED} {}", u8::from(*expanded)),
         Op::RenameSession { session, name } => format!("rename-session -t {} -- {}", q(session), literal(name)),
         Op::RenameWindow { window, name } if name.is_empty() => format!("set-window-option -t {} automatic-rename on", q(window)),
         Op::RenameWindow { window, name } => format!("rename-window -t {} -- {}", q(window), literal(name)),
@@ -479,6 +481,7 @@ fn connect(tx: &Sender<Ev>) -> Result<Control, String> {
 
 /// Global option holding the tab paddock was last closed on.
 const LAST_TAB: &str = "@paddock-last-tab";
+const HIDDEN_EXPANDED: &str = "@paddock-hidden-expanded";
 
 fn run(tab: Option<Tab>) -> Result<(), String> {
     let ctx = context()?;
@@ -497,7 +500,8 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
     let mut shown = model::fetch(&mut tmux)?;
     // Notifications tmux sent before the last fetch's reply are in it.
     let mut fetched = tmux.replied();
-    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, can_suggest);
+    let hidden_expanded = tmux.cmd(&format!("show-option -gqv {HIDDEN_EXPANDED}"))?.first().is_some_and(|v| v == "1");
+    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, can_suggest, hidden_expanded);
 
     let mut tui = Tui::new()?;
     let answers = tx.clone();

@@ -6,6 +6,17 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-30
+
+### Added
+
+- Hide/Show agent cards from their menu or with `ctrl-e`, without stopping agents or closing panes. Hidden cards live under one collapsible Hidden section, follow the visible list's grouping/order without nested headings, and retain their state indicators.
+- Hidden visibility and explicit expansion persist across popup opens. Search reveals hidden matches without changing either preference; opening a result does not unhide it.
+
+### Changed
+
+- Agent glyphs use the same muted tone as session/window metadata; state indicators keep their colors.
+
 ## [0.4.0] - 2026-10-30
 
 ### Added
@@ -116,7 +127,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/plopezlpz/paddock/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/plopezlpz/paddock/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/plopezlpz/paddock/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/plopezlpz/paddock/compare/v0.2.0...v0.3.0

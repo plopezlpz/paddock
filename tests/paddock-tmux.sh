@@ -301,6 +301,52 @@ if [ -x "$PB" ]; then
   check "real paddock: an agent shows with its pane title" wait_screen "from the pane"
   t set -p -t main @agent-auto-description 'from the tool'
   check "real paddock: then with the tool's title" wait_screen "from the tool"
+  # Hide is only a per-pane preference: no process/pane lifecycle changes.
+  agent_pid=$(t display -p -t main '#{pane_pid}')
+  tmux -L "$OUT" send-keys C-e
+  check "real paddock: hide folds the card into Hidden" wait_screen "hidden · 1"
+  check "real paddock: hidden card leaves the visible list" wait_gone "from the tool"
+  check "real paddock: hide stores the pane preference" test "$(t show-option -pqv -t main @paddock-hidden)" = 1
+  check "real paddock: hide leaves the process running" test "$(t display -p -t main '#{pane_pid}')" = "$agent_pid"
+  tmux -L "$OUT" send-keys Escape
+  check "real paddock: closes after hiding" wait_gone "agents"
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: hidden preference survives reopening" wait_screen "hidden · 1"
+  check "real paddock: Hidden starts collapsed" wait_gone "from the tool"
+  tmux -L "$OUT" send-keys Right
+  check "real paddock: keyboard expands Hidden" wait_screen "from the tool"
+  check "real paddock: expansion is persisted" test "$(t show-option -gqv @paddock-hidden-expanded)" = 1
+  tmux -L "$OUT" send-keys Escape
+  check "real paddock: closes after expanding" wait_gone "agents"
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: expansion survives reopening" wait_screen "from the tool"
+  tmux -L "$OUT" send-keys Left
+  check "real paddock: Left collapses from a hidden card" wait_gone "from the tool"
+  check "real paddock: collapse is persisted" test "$(t show-option -gqv @paddock-hidden-expanded)" = 0
+  t set -p -t main @agent-state asking
+  check "real paddock: state changes stay hidden" wait_screen "hidden · 1"
+  check "real paddock: state change does not expand Hidden" wait_gone "from the tool"
+  t set -pu -t main @agent-state
+  check "real paddock: an exited hidden agent leaves the section" wait_gone "hidden · 1"
+  check "real paddock: exit preserves the pane preference" test "$(t show-option -pqv -t main @paddock-hidden)" = 1
+  t set -p -t main @agent-state working
+  check "real paddock: a new agent in the same pane stays hidden" wait_screen "hidden · 1"
+  check "real paddock: restarted agent remains collapsed" wait_gone "from the tool"
+  tmux -L "$OUT" send-keys -l 'from the tool'
+  check "real paddock: search reveals hidden matches" wait_screen "from the tool"
+  check "real paddock: search keeps the saved collapse preference" test "$(t show-option -gqv @paddock-hidden-expanded)" = 0
+  tmux -L "$OUT" send-keys Enter
+  check "real paddock: a hidden search result opens its pane" wait_gone "agents"
+  check "real paddock: opening never unhides the pane" test "$(t show-option -pqv -t main @paddock-hidden)" = 1
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: search expansion was not saved" wait_screen "hidden · 1"
+  check "real paddock: reopened Hidden is collapsed again" wait_gone "from the tool"
+  tmux -L "$OUT" send-keys -l 'from the tool'
+  check "real paddock: search finds the hidden card again" wait_screen "from the tool"
+  tmux -L "$OUT" send-keys C-e
+  check "real paddock: Show removes the last Hidden section" wait_gone "hidden · 1"
+  check "real paddock: Show clears the pane preference" test "$(t show-option -pqv -t main @paddock-hidden)" = 0
+  tmux -L "$OUT" send-keys C-u
   t set -pu -t main @agent-state \; set -pu -t main @agent-auto-description
   check "real paddock: and goes when it ends" wait_gone "from the tool"
   # Two ⇧↓ in one read walk the window down two places: the second waits

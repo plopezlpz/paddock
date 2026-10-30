@@ -105,11 +105,6 @@ impl Theme {
         Style::new().fg(self.states[s as usize])
     }
 
-    /// All agent marks use the terminal foreground; colour is reserved for state.
-    pub fn agent(&self) -> Style {
-        Style::new().fg(Color::Reset)
-    }
-
     /// The dot that stands for S.
     pub fn icon(&self, s: State) -> &str {
         &self.icons[s as usize]

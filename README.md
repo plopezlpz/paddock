@@ -233,8 +233,8 @@ is not checked: keep it at the clone's version, and update the two together.
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
-Agent cards show a small agent mark in the terminal's normal foreground after
-the elapsed time, without repeating the agent name. The name remains searchable
+Agent cards show a small agent mark in the same muted tone as the session/window
+metadata after the elapsed time, without repeating the agent name. The name remains searchable
 and appears in the preview header. The colored dot beside the title still means
 **state**, not agent type.
 
@@ -262,13 +262,35 @@ from inside tmux, so the mode is explicit, not automatic. If you see missing
 characters, set `@paddock-agent-icons unicode`. Unset or unrecognized values
 also use Unicode. Changes apply the next time the popup opens.
 
+### Hide and show agents
+
+Use **Hide** in an agent card's menu, or `ctrl-e`, to move it into **Hidden · N**
+at the bottom of the Agents list. **Show** (also `ctrl-e` on a hidden card)
+returns it to its normal group. This never closes a pane, stops an agent, or
+changes its state. Sessions, overall state counts and notifications are unchanged.
+
+Hidden starts collapsed. Click its heading or select it with the arrows and
+press `Enter` to toggle it; `→` expands and `←` collapses. The expansion choice
+is remembered across popup opens. Inside Hidden, cards follow the same current
+grouping/order as the visible list (`ctrl-g`), without nested section headings.
+
+Search includes hidden agents even when collapsed: matching cards appear under
+Hidden, temporarily expanded. Clearing the search restores the saved expansion
+choice. Opening a hidden result jumps to its pane **without showing it again**;
+only Show changes its visibility. State changes and new output do not unhide it.
+
+Visibility is stored per pane in `@paddock-hidden` (`1` hidden, `0` shown), so it
+also follows a moved pane and remains if another agent starts in that same pane.
+The section's saved expansion uses the global `@paddock-hidden-expanded` option.
+
 | Key | Action |
 |---|---|
 | type | fuzzy filter on names, folders, commands, agent kinds and states (a waiting agent also matches `asking`, an unconfirmed one `stale`): `'exact`, `^prefix`, `suffix$`, `!not`; `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |
 | `↑` `↓`, `ctrl-p` `ctrl-n` (`ctrl-k` `ctrl-j`), PageUp/PageDown | move |
-| `Enter` | jump there (a zoomed window stays zoomed) |
+| `Enter` | jump there (a zoomed window stays zoomed); toggle a selected Hidden heading |
 | `Tab` | switch tabs |
-| `→` / `←` | show or hide a window's panes |
+| `→` / `←` | show or hide a window's panes; expand/collapse Hidden when its heading or a hidden card is selected (outside a search) |
+| `ctrl-e` | hide/show the selected agent card (while renaming, still moves to the end of the name) |
 | `ctrl-r` | rename the selected session, window or agent, in place |
 | `shift-↑` `shift-↓` | move the selected window or pane past its neighbour (at the ends, into the next session or window) |
 | `ctrl-t` | move the selected window or pane: pick a spot (arrows or the filter), `Enter` drops it there |

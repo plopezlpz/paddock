@@ -49,6 +49,8 @@ pub struct Agent {
     /// Whether the user set the title (@agent-description).
     pub renamed: bool,
     pub since: Option<u64>,
+    /// Paddock's per-pane visibility preference, independent of agent state.
+    pub hidden: bool,
     /// Unconfirmed: the tool says so (@agent-stale), or a shell is the
     /// pane's foreground command, as after the agent went without its exit
     /// hook (killed, crashed). That also holds while a shell runs the agent
@@ -112,7 +114,7 @@ const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "wi
 /// A pane's fields, in order: these, the pane title, AGENT_FIELDS, the path.
 const PANE_FIELDS: &[&str] = &["pane_id", "pane_index", "pane_active", "pane_current_command"];
 /// Read for agent panes (with an @agent-state) only.
-const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale"];
+const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale", "@paddock-hidden"];
 
 /// What starts a session, a window and a pane in a snapshot's text
 /// (`field` keeps them out of the values).
@@ -181,7 +183,7 @@ pub fn parse(text: &str, host: &str) -> Snapshot {
             let mut window = Window { id: id.to_string(), index: index.to_string(), name: name.to_string(), active: active == "1", auto: auto == "1", panes: Vec::new() };
             for pane in panes {
                 let f: Vec<&str> = pane.splitn(n, SEP).collect();
-                let [id, index, active, command, pane_title, state, unseen, kind, auto, desc, at, stale, path] = f[..] else {
+                let [id, index, active, command, pane_title, state, unseen, kind, auto, desc, at, stale, hidden, path] = f[..] else {
                     continue;
                 };
                 let agent = State::parse(state, unseen).map(|state| {
@@ -194,6 +196,7 @@ pub fn parse(text: &str, host: &str) -> Snapshot {
                         auto,
                         renamed: !desc.is_empty(),
                         since: at.parse().ok(),
+                        hidden: hidden == "1",
                         stale: stale == "1" || is_shell(command),
                     }
                 });
@@ -266,8 +269,14 @@ impl Snapshot {
 /// a session and window is a pane of the one before.
 #[cfg(test)]
 pub fn fixture(lines: &[&str]) -> Snapshot {
+    fixture_hidden(lines, &[])
+}
+
+/// The legacy fixture columns, with HIDDEN pane IDs marked hidden.
+#[cfg(test)]
+pub fn fixture_hidden(lines: &[&str], hidden: &[&str]) -> Snapshot {
     let (s, w) = (SESSION_FIELDS.len(), SESSION_FIELDS.len() + WINDOW_FIELDS.len());
-    let n = w + PANE_FIELDS.len() + AGENT_FIELDS.len() + 2;
+    let n = w + PANE_FIELDS.len() + AGENT_FIELDS.len() + 1;
     let sep = SEP.to_string();
     let mut text = String::new();
     let mut last: Vec<&str> = Vec::new();
@@ -284,7 +293,10 @@ pub fn fixture(lines: &[&str]) -> Snapshot {
             pane = &f[w..];
             last = f.clone();
         }
-        text += &format!("{PANE_MARK}{}", pane.join(&sep));
+        if let Some((path, rest)) = pane.split_last() {
+            let flag = if rest.first().is_some_and(|id| hidden.contains(id)) { "1" } else { "" };
+            text += &format!("{PANE_MARK}{}{SEP}{flag}{SEP}{path}", rest.join(&sep));
+        }
     }
     parse(&text, "host")
 }
@@ -316,6 +328,27 @@ mod tests {
         assert_eq!(w[2].panes[0].path, "/w|with|bars", "the last field keeps separators");
         assert_eq!(w[2].panes.len(), 1, "a broken pane is skipped");
         assert!(w[0].panes[0].agent.is_none());
+    }
+
+    #[test]
+    fn hidden_is_a_pane_preference_not_an_agent_state() {
+        let lines = [
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||100||/a|with|bars",
+            "$2|t|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||100||/a|with|bars",
+            "$2|t|@2|2|v|0|0|%2|0|1|pi||idle|0|pi|other||||/b",
+        ];
+        let snap = fixture_hidden(&lines, &["%1"]);
+        let a = snap.agent("%1").unwrap();
+        assert!(a.hidden);
+        assert_eq!((a.state, a.title.as_str(), a.since), (State::Working, "task", Some(100)));
+        assert_eq!(snap.pane("%1").unwrap().2.path, "/a|with|bars");
+        assert_eq!(snap.pane("%1").unwrap().2.command, "claude");
+        assert!(snap.sessions[1].windows[0].panes[0].agent.as_ref().unwrap().hidden, "linked pane shares its flag");
+        assert!(!snap.agent("%2").unwrap().hidden);
+        assert_eq!(snap.counts, [1, 0, 1, 0], "overall counts still include hidden agents, once");
+        assert_eq!(snap.sessions[0].windows[0].state(), Some(State::Working));
+        assert!(!fixture(&lines).agent("%1").unwrap().hidden, "unset is visible");
+        assert!(format().contains("@paddock-hidden"), "visibility changes trigger the snapshot subscription");
     }
 
     #[test]

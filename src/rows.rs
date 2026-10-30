@@ -39,8 +39,8 @@ impl Group {
 }
 
 pub struct Row {
-    /// None for group headers, which cannot be selected, and the "+ new"
-    /// row, which names nothing on the server yet.
+    /// None for headers (only Hidden is selectable) and the "+ new" row,
+    /// which names nothing on the server yet.
     pub target: Option<Target>,
     pub kind: RowKind,
     /// Pane shown in the preview.
@@ -63,6 +63,8 @@ pub enum RowKind {
     Agent { state: State, stale: bool, kind: String, title: String, session: String, meta: String, age: String },
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
+    /// One selectable heading for all hidden cards, without internal headers.
+    Hidden { count: usize, expanded: bool, gap: bool },
     /// The "+ new" row being named (App's create mode says what it is).
     New,
 }
@@ -83,7 +85,7 @@ impl Row {
         match self.kind {
             RowKind::Agent { .. } => 2,
             RowKind::Window { .. } if compact => 2,
-            RowKind::Header { gap: true, .. } if !compact => 2,
+            RowKind::Header { gap: true, .. } | RowKind::Hidden { gap: true, .. } if !compact => 2,
             _ => 1,
         }
     }
@@ -322,9 +324,12 @@ type GroupItem = (GroupKey, String, (State, Option<u64>), Row);
 /// One card per agent pane, grouped under headers (none for Group::Flat);
 /// inside a group the most urgent state comes first, then the agent that
 /// entered it most recently.
+/// Hidden cards have the same ordering, under one collapsible heading without
+/// internal group headers. Search reveals them without changing the preference.
 /// KEEP is listed whatever the filter says (see `Tree::keep`).
-pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64) -> Vec<Row> {
+pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64, hidden_expanded: bool) -> Vec<Row> {
     let mut items: Vec<GroupItem> = Vec::new();
+    let mut hidden: Vec<GroupItem> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
         let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
@@ -356,10 +361,14 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
             preview: Some(p.id.clone()),
             score,
         };
-        items.push((key, label, (a.state, a.since), row));
+        let into = if a.hidden { &mut hidden } else { &mut items };
+        into.push((key, label, (a.state, a.since), row));
     }
-    // Descending: no time (None) sorts last; equal times keep tmux's order.
-    items.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+    // Both lists use the same order. Descending: no time (None) sorts last;
+    // equal times keep tmux's order.
+    for list in [&mut items, &mut hidden] {
+        list.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+    }
     let mut out = Vec::new();
     let mut items = items.into_iter().peekable();
     while let Some((key, label, _, row)) = items.next() {
@@ -371,6 +380,14 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
             out.push(Row { target: None, kind: RowKind::Header { label, count: group_rows.len(), gap: !out.is_empty() }, preview: None, score: None });
         }
         out.extend(group_rows);
+    }
+    if !hidden.is_empty() {
+        // Searching reveals matches without changing the saved preference.
+        let expanded = hidden_expanded || filter.active();
+        out.push(Row { target: None, kind: RowKind::Hidden { count: hidden.len(), expanded, gap: !out.is_empty() }, preview: None, score: None });
+        if expanded {
+            out.extend(hidden.into_iter().map(|it| it.3));
+        }
     }
     out
 }
@@ -405,6 +422,7 @@ mod tests {
                 RowKind::Pane { command, .. } => format!("    {command}"),
                 RowKind::Agent { title, .. } => format!("  {title}"),
                 RowKind::Header { label, count, .. } => format!("{label} ({count})"),
+                RowKind::Hidden { count, .. } => format!("hidden ({count})"),
                 RowKind::New => "new".into(),
             })
             .collect()
@@ -422,7 +440,7 @@ mod tests {
     #[test]
     fn agent_kind_is_searchable_without_repeating_it_in_card_metadata() {
         let snap = snap();
-        let rows = agents(&snap, &mut filter("claude"), Group::Flat, None, "/h", 0);
+        let rows = agents(&snap, &mut filter("claude"), Group::Flat, None, "/h", 0, false);
         assert_eq!(rows.len(), 1);
         let RowKind::Agent { kind, meta, .. } = &rows[0].kind else { panic!("expected an agent card") };
         assert_eq!(kind, "claude");
@@ -478,17 +496,65 @@ mod tests {
 
     #[test]
     fn agents_group_by_full_folder_and_count_linked_panes_once() {
-        let rows = agents(&snap(), &mut filter(""), Group::Folder, None, "/h", 0);
+        let rows = agents(&snap(), &mut filter(""), Group::Folder, None, "/h", 0, false);
         assert_eq!(names(&rows), ["~/a/src (1)", "  fix parser", "~/b/src (1)", "  deploy"]);
-        let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0);
+        let rows = agents(&snap(), &mut filter(""), Group::Status, None, "/h", 0, false);
         assert_eq!(names(&rows), ["waiting (1)", "  deploy", "working (1)", "  fix parser"]);
         assert_eq!(snap().counts, [0, 0, 1, 1]);
     }
 
     #[test]
+    fn hidden_cards_follow_every_group_order_without_nested_headers() {
+        let lines = [
+            "$1|a|@1|1|w|1|0|%1|0|1|claude||idle|0|claude|rest||100||/z",
+            "$1|a|@1|1|w|1|0|%2|1|0|codex||working|0|codex|build||200||/b",
+            "$2|b|@2|1|w|1|0|%3|0|1|pi||asking|0|pi|question||50||/a",
+            "$2|b|@2|1|w|1|0|%4|1|0|claude||idle|1|claude|done||300||/z",
+            // The same hidden pane linked into another session is counted once.
+            "$3|c|@1|1|w|1|0|%1|0|1|claude||idle|0|claude|rest||100||/z",
+        ];
+        let hidden_ids = ["%1", "%3", "%4"];
+        let mixed = crate::model::fixture_hidden(&lines, &hidden_ids);
+        let plain = fixture(&lines);
+        let ids = |rows: &[Row]| rows.iter().filter_map(|r| r.preview.clone()).collect::<Vec<_>>();
+        for group in [Group::Status, Group::Session, Group::Folder, Group::Flat] {
+            let baseline = ids(&agents(&plain, &mut filter(""), group, None, "", 400, false));
+            let rows = agents(&mixed, &mut filter(""), group, None, "", 400, true);
+            let heading = rows.iter().position(|r| matches!(r.kind, RowKind::Hidden { .. })).unwrap();
+            assert_eq!(ids(&rows[..heading]), baseline.iter().filter(|id| !hidden_ids.contains(&id.as_str())).cloned().collect::<Vec<_>>());
+            assert_eq!(ids(&rows[heading + 1..]), baseline.iter().filter(|id| hidden_ids.contains(&id.as_str())).cloned().collect::<Vec<_>>());
+            assert!(matches!(rows[heading].kind, RowKind::Hidden { count: 3, expanded: true, gap: true }));
+            assert!(rows[heading + 1..].iter().all(|r| matches!(r.kind, RowKind::Agent { .. })));
+            let closed = agents(&mixed, &mut filter(""), group, None, "", 400, false);
+            assert_eq!(ids(&closed), ["%2"]);
+            assert!(matches!(closed.last().unwrap().kind, RowKind::Hidden { count: 3, expanded: false, .. }));
+        }
+        let none = HashSet::new();
+        assert_eq!(names(&sessions(&mixed, &mut filter(""), &tree(&none, &none, None))), names(&sessions(&plain, &mut filter(""), &tree(&none, &none, None))), "Sessions is unchanged");
+    }
+
+    #[test]
+    fn all_hidden_and_hidden_search_results_stay_accessible() {
+        let snap = crate::model::fixture_hidden(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|parser||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|pi||asking|0|pi|deploy||||/b",
+        ], &["%1", "%2"]);
+        let rows = agents(&snap, &mut filter(""), Group::Status, None, "", 0, false);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].kind, RowKind::Hidden { count: 2, expanded: false, gap: false }));
+        for q in ["parser", "claude", "working", "!deploy"] {
+            let rows = agents(&snap, &mut filter(q), Group::Status, None, "", 0, false);
+            assert_eq!(names(&rows), ["hidden (1)", "  parser"], "{q}");
+            assert!(matches!(rows[0].kind, RowKind::Hidden { expanded: true, .. }));
+        }
+        assert!(agents(&snap, &mut filter("nothing-matches"), Group::Status, None, "", 0, true).is_empty());
+        assert!(matches!(agents(&snap, &mut filter("   "), Group::Status, None, "", 0, false)[0].kind, RowKind::Hidden { expanded: false, .. }), "blank query is not a search");
+    }
+
+    #[test]
     fn a_waiting_agent_is_found_by_the_tools_word_too() {
         for q in ["waiting", "asking"] {
-            assert!(names(&agents(&snap(), &mut filter(q), Group::Flat, None, "/h", 0)).contains(&"  deploy".to_string()), "{q}");
+            assert!(names(&agents(&snap(), &mut filter(q), Group::Flat, None, "/h", 0, false)).contains(&"  deploy".to_string()), "{q}");
         }
     }
 
@@ -501,7 +567,7 @@ mod tests {
             "$1|s|@4|4|w|0|0|%4|0|1|claude||asking|0|claude|asks||50||/a",
             "$1|s|@5|5|w|0|0|%5|0|1|claude||idle|1|claude|mid||200||/a",
         ]);
-        let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 400);
+        let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 400, false);
         assert_eq!(names(&rows), ["/a (5)", "  asks", "  new", "  mid", "  old", "  unknown"]);
     }
 
@@ -556,7 +622,7 @@ mod tests {
     fn a_kept_row_survives_the_filter() {
         let none = HashSet::new();
         let pane = Target::Pane { session: "$1".into(), window: "@1".into(), pane: "%2".into() };
-        let rows = agents(&snap(), &mut filter("zzz"), Group::Flat, Some(&pane), "/h", 0);
+        let rows = agents(&snap(), &mut filter("zzz"), Group::Flat, Some(&pane), "/h", 0, false);
         assert_eq!(names(&rows), ["  fix parser"]);
         assert!(rows[0].score.is_none(), "kept, not a match");
         let rows = sessions(&snap(), &mut filter("zzz"), &tree(&none, &none, Some(&pane)));
