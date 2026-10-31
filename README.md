@@ -233,10 +233,29 @@ is not checked: keep it at the clone's version, and update the two together.
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
-Agent cards show a small agent mark in the same muted tone as the session/window
-metadata after the elapsed time, without repeating the agent name. The name remains searchable
+Agent cards show a small agent mark and the working-directory path after the
+elapsed time, without repeating the agent name. The name remains searchable
 and appears in the preview header. The colored dot beside the title still means
 **state**, not agent type.
+
+Paths are anchored at a worktree's main Git repository when it can be located;
+otherwise, at the first enclosing Git repository from filesystem root toward
+the directory. Linked worktrees always show `myrepo/…/topic`, using Git to find
+the main repo and the worktree root rather than recognizing container folder
+names. Directories inside the worktree retain their suffix, for example
+`myrepo/…/topic/src`. The `…` separates the main repo from the worktree name;
+this is a compact label, not a literal path. Long labels shorten further to fit.
+Non-repository paths keep the usual `~/…` abbreviation. Repository discovery is
+cached until the popup closes.
+
+Cards append the checked-out branch in parentheses, for example
+`myrepo/…/topic (feature/cart)`, unless it exactly matches the final directory
+name. Detached HEAD shows a short commit ID instead. This uses the nearest
+repository's HEAD, including for nested repos and submodules; it is reread when
+the agent list rebuilds. No full-path heading is displayed below the filter.
+Filtering searches the absolute and `~/…` paths, repo label, full branch name,
+and full detached commit ID, even when shortened, omitted as a duplicate, or
+hidden. Sessions keeps its existing path display.
 
 The default `unicode` mode needs no icon font: `✳` Claude, `›_` Codex, `π` pi,
 `◇` OpenCode, `✦` Gemini, and `▣` for other agents. To use Nerd Font glyphs:

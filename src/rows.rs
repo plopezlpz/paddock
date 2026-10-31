@@ -8,6 +8,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::model::{Snapshot, State, Target};
+use crate::paths::{AgentPath, PathCache};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -60,7 +61,7 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, meta: String, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    Agent { state: State, stale: bool, kind: String, title: String, session: String, meta: String, age: String },
+    Agent { state: State, stale: bool, kind: String, title: String, path: AgentPath, age: String },
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
     /// One selectable heading for all hidden cards, without internal headers.
@@ -123,7 +124,7 @@ impl Filter {
 }
 
 /// PATH relative to HOME as `~`.
-fn home_path(path: &str, home: &str) -> String {
+pub fn home_path(path: &str, home: &str) -> String {
     match path.strip_prefix(home) {
         Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
         _ => path.to_string(),
@@ -327,24 +328,24 @@ type GroupItem = (GroupKey, String, (State, Option<u64>), Row);
 /// Hidden cards have the same ordering, under one collapsible heading without
 /// internal group headers. Search reveals them without changing the preference.
 /// KEEP is listed whatever the filter says (see `Tree::keep`).
-pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64, hidden_expanded: bool) -> Vec<Row> {
+pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, paths: &mut PathCache, now: u64, hidden_expanded: bool) -> Vec<Row> {
     let mut items: Vec<GroupItem> = Vec::new();
     let mut hidden: Vec<GroupItem> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
         let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
-        let folder = p.path.rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or(&p.path);
+        let path = paths.get(&p.path);
         let kind = p.label();
         // The state as shown, and asking as tools and notifications say it.
         let asking = if a.state == State::Asking { " asking" } else { "" };
-        let score = filter.score(&format!("{} {} {} {} {}{asking}{}", a.title, s.name, folder, kind, a.state.label(), if a.stale { " stale" } else { "" }));
+        let score = filter.score(&format!("{} {} {} {} {} {} {}{asking}{}", a.title, s.name, p.path, path.full, path.search_text(), kind, a.state.label(), if a.stale { " stale" } else { "" }));
         if score.is_none() && keep != Some(&target) {
             continue;
         }
         let (key, label) = match group {
             Group::Status => (GroupKey::Status(Reverse(a.state)), a.state.label().to_string()),
             Group::Session => (GroupKey::Name(s.name.clone()), s.name.clone()),
-            Group::Folder => (GroupKey::Name(p.path.clone()), short_path(&p.path, home)),
+            Group::Folder => (GroupKey::Name(p.path.clone()), short_path(&p.path, paths.home())),
             Group::Flat => (GroupKey::All, String::new()),
         };
         let row = Row {
@@ -354,8 +355,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
                 stale: a.stale,
                 kind: kind.to_string(),
                 title: a.title.clone(),
-                session: s.name.clone(),
-                meta: format!("{} › {folder} · {}:{}", s.name, w.index, p.index),
+                path,
                 age: age(a.since, now),
             },
             preview: Some(p.id.clone()),
@@ -408,6 +408,10 @@ mod tests {
         ])
     }
 
+    fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64, hidden_expanded: bool) -> Vec<Row> {
+        super::agents(snap, filter, group, keep, &mut PathCache::new(home.into()), now, hidden_expanded)
+    }
+
     fn filter(q: &str) -> Filter {
         let mut f = Filter::new();
         f.set(q);
@@ -442,10 +446,26 @@ mod tests {
         let snap = snap();
         let rows = agents(&snap, &mut filter("claude"), Group::Flat, None, "/h", 0, false);
         assert_eq!(rows.len(), 1);
-        let RowKind::Agent { kind, meta, .. } = &rows[0].kind else { panic!("expected an agent card") };
+        let RowKind::Agent { kind, path, .. } = &rows[0].kind else { panic!("expected an agent card") };
         assert_eq!(kind, "claude");
-        assert_eq!(meta, "work › src · 1:1");
+        assert_eq!(path.display(80), "~/a/src");
         assert_eq!(pane_title(&snap, rows[0].preview.as_deref().unwrap()), "work:1.1 · claude");
+    }
+
+    #[test]
+    fn agents_match_absolute_and_home_paths_even_when_shortened_or_hidden() {
+        let line = "$1|session|@1|1|window|1|0|%1|0|1|claude||working|0|claude|task||||/h/source/company/main-repo/worktrees/topic/src";
+        for hidden in [false, true] {
+            let snap = if hidden { crate::model::fixture_hidden(&[line], &["%1"]) } else { fixture(&[line]) };
+            for query in ["company", "'/h/source/company", "'~/source/company", "main-repo", "worktrees/topic", "session", "claude", "working", "task"] {
+                let rows = agents(&snap, &mut filter(query), Group::Flat, None, "/h", 0, false);
+                assert_eq!(rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).count(), 1, "{query}, hidden={hidden}");
+                let path = rows.iter().find_map(|r| match &r.kind { RowKind::Agent { path, .. } => Some(path), _ => None }).unwrap();
+                assert_eq!(path.full, "~/source/company/main-repo/worktrees/topic/src");
+                assert_eq!(path.display(30), "…/topic/src");
+            }
+            assert!(agents(&snap, &mut filter("!company"), Group::Flat, None, "/h", 0, false).is_empty());
+        }
     }
 
     #[test]

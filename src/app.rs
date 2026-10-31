@@ -418,6 +418,7 @@ pub struct App {
     /// Listed whatever the filter says until the query changes (just renamed).
     keep: Option<Target>,
     filter: Filter,
+    paths: crate::paths::PathCache,
     home: String,
     /// The last suggestion asked for.
     suggestions: u64,
@@ -450,6 +451,7 @@ impl App {
             collapsed: HashSet::new(),
             keep: None,
             filter: Filter::new(),
+            paths: crate::paths::PathCache::new(home.clone()),
             home,
             suggestions: 0,
             undo: Vec::new(),
@@ -590,7 +592,7 @@ impl App {
             }
             Tab::Agents => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &self.home, now, self.hidden_expanded)
+                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &mut self.paths, now, self.hidden_expanded)
             }
         };
         // When a search ends, a hidden card may fold away: keep the user on
@@ -2214,6 +2216,55 @@ mod tests {
     }
 
     #[test]
+    fn selected_agent_does_not_expose_its_full_path_below_the_filter() {
+        let snap = fixture(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/h/source/company/main-repo/worktrees/topic/src",
+            "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/h/other",
+        ]);
+        let mut app = App::new(snap, Tab::Agents, "$1".into(), "@1".into(), "/h".into(), false, false);
+        let mut view = View::new();
+        let full = "~/source/company/main-repo/worktrees/topic/src";
+        for width in [30, 46, 90, 120] {
+            let term = draw(&app, &mut view, width, 24);
+            let lines = screen(&term);
+            assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "{width}: no path heading: {lines:#?}");
+            assert!(!lines.iter().any(|line| line.contains(full)), "{width}: {lines:#?}");
+        }
+        ctrl(&mut app, 'n');
+        let lines = screen(&draw(&app, &mut view, 46, 24));
+        assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "selection keeps the blank separator: {lines:#?}");
+        app.run(Command::Tab(Tab::Sessions));
+        let lines = screen(&draw(&app, &mut view, 46, 24));
+        assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "Sessions keeps its blank separator: {lines:#?}");
+    }
+
+    #[test]
+    fn selecting_a_long_path_does_not_move_mouse_targets_between_press_and_release() {
+        for width in [46, 90] {
+            let long = format!("/h/{}topic", "long-intermediate-folder/".repeat(8));
+            let snap = fixture(&[
+                "$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|first-task||||/h/short",
+                &format!("$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|second-task||||{long}"),
+            ]);
+            let mut app = new(snap, Tab::Agents, "@1");
+            let mut view = View::new();
+            let term = draw(&app, &mut view, width, 24);
+            let at = find(&term, "second-task");
+            let now = Instant::now();
+            mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, now);
+            let term = draw(&app, &mut view, width, 24);
+            assert_eq!(find(&term, "second-task"), at, "{width}: selection must not shift the list");
+            assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), at, now), Action::None));
+            assert!(app.last_click.is_some(), "the release still hits the pressed row");
+            let later = now + Duration::from_millis(50);
+            mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, later);
+            draw(&app, &mut view, width, 24);
+            let action = mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), at, later);
+            assert!(matches!(action, Action::Activate(Target::Pane { pane, .. }) if pane == "%2"));
+        }
+    }
+
+    #[test]
     fn compact_rows_take_two_lines_with_less_detail() {
         let mut app = sessions_app("@1");
         let mut view = View::new();
@@ -2225,7 +2276,8 @@ mod tests {
         app.run(Command::Tab(Tab::Agents));
         let lines = screen(&draw(&app, &mut view, 46, 20));
         let at = lines.iter().position(|l| l.contains("deploy")).unwrap();
-        assert!(lines[at + 1].contains("play"), "{lines:#?}");
+        assert!(lines[at + 1].contains("/h/c"), "{lines:#?}");
+        assert!(!lines[at + 1].contains("play"), "no tmux location: {lines:#?}");
         assert!(!lines[at + 1].contains("codex"), "no kind on a phone");
     }
 

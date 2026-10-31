@@ -6,6 +6,19 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-31
+
+### Added
+
+- Agent cards show the checked-out Git branch in parentheses, or a short commit ID for detached HEAD. A branch matching the final directory name is omitted to avoid repetition.
+- Agent filtering searches full absolute and home-abbreviated paths, repository labels, full branch names and detached commit IDs, including hidden cards and text shortened on screen.
+
+### Changed
+
+- Agent cards show the working directory instead of tmux session/window/pane coordinates, in both wide and compact layouts. Sessions is unchanged.
+- Git-aware labels keep the main repository identifiable: linked worktrees show `repo/…/worktree`, with any subdirectory suffix, regardless of where the worktree is stored. Otherwise labels start at the first enclosing repository from the filesystem root; non-repository paths keep their usual abbreviation.
+- Directory labels and branches share the existing muted metadata line; the filter keeps its blank separator rather than displaying a full-path heading.
+
 ## [0.5.0] - 2026-10-30
 
 ### Added
@@ -127,7 +140,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/plopezlpz/paddock/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/plopezlpz/paddock/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/plopezlpz/paddock/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/plopezlpz/paddock/compare/v0.3.0...v0.3.1

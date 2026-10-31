@@ -409,7 +409,7 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
 /// An agent card: FIRST, then how long it has been in its state, its kind's
 /// mark and where it runs. Compact, SLOT (the rename field's status) ends line two.
 fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, stale, kind, session, meta, age, .. } = &row.kind else { return vec![first] };
+    let RowKind::Agent { state, stale, kind, path, age, .. } = &row.kind else { return vec![first] };
     let icon = Span::styled(agent_icon(kind, t.agent_icons), t.muted());
     // A stale state is unconfirmed: "working?".
     let unsure = if *stale { "?" } else { "" };
@@ -423,7 +423,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
         }
         tail.extend([Span::raw(" "), icon]);
         let slot_w = slot.as_ref().map_or(0, |s| s.width() + 1);
-        second.push(Span::styled(fit(session, width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
+        second.push(Span::styled(path.display(width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
         second.extend(tail);
         if let Some(slot) = slot {
             push_right(&mut second, slot, width);
@@ -444,7 +444,7 @@ fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: boo
     }
     let padding = 3usize.saturating_sub(icon.width());
     second.extend([icon, Span::raw(" ".repeat(padding))]);
-    second.push(Span::styled(fit(meta, width.saturating_sub(cols(&second))), t.muted()));
+    second.push(Span::styled(path.display(width.saturating_sub(cols(&second))), t.muted()));
     vec![first, Line::from(second)]
 }
 
@@ -607,7 +607,7 @@ mod tests {
             RowKind::Session { name: "s".into(), windows: 2, current: true },
             RowKind::Window { index: "1".into(), name: "w".into(), meta: "~/a".into(), state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), session: "s".into(), meta: "m".into(), age: "5m".into() },
+            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into() },
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
             RowKind::Hidden { count: 2, expanded: false, gap: false },
@@ -637,7 +637,7 @@ mod tests {
                             target: None,
                             kind: RowKind::Agent {
                                 state: State::Working, stale, kind: kind.into(), title: "task".into(),
-                                session: "a-long-session-name-日本語".into(), meta: "session › folder · 1:0".into(), age: age.into(),
+                                path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(),
                             },
                             preview: None, score: None,
                         };
@@ -648,7 +648,10 @@ mod tests {
                             let detail = lines[1].to_string();
                             assert!(detail.contains(icon), "{detail}");
                             let mark = lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap();
-                            assert_eq!(mark.style, t.muted(), "{kind}: same tone as session/window metadata");
+                            assert_eq!(mark.style, t.muted(), "{kind}: same tone as path metadata");
+                            if width == 72 {
+                                assert!(detail.contains("~/a-long-project-path-日本語"), "{detail}");
+                            }
                             if !age.is_empty() {
                                 assert!(detail.find(age).unwrap() < detail.find(icon).unwrap(), "{detail}");
                             }

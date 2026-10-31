@@ -1,7 +1,7 @@
 window.PADDOCK_FRAMES = window.PADDOCK_FRAMES || {};
 window.PADDOCK_FRAMES["feat-manage"] = {
 v: 1, name: "feat-manage", cols: 132, rows: 36,
-source: {"paddock":"0.5.0","commit":"be017b2-dirty","sha256":"935bde6d7b97fdc9105b2658e10926d2008a596e9fafb5046d680396389c3c44","tmux":"3.8","recorded":"2026-10-30","conf":"gruber.conf","cols":132,"rows":36},
+source: {"paddock":"0.6.0","commit":"7778f2f-dirty","sha256":"b279833e6d82ccd583c9de503656c9deaf4784b660c2b6c6ad74e87edf49e352","tmux":"3.8","recorded":"2026-10-31","conf":"gruber.conf","cols":132,"rows":36},
 styles: [
 {},
 {"b":1},

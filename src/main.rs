@@ -14,6 +14,7 @@ mod app;
 mod edit;
 mod live;
 mod model;
+mod paths;
 mod rows;
 mod theme;
 mod tmux;
