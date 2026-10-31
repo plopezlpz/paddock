@@ -6,10 +6,10 @@
 # the ones the recorder's fake sessions get (feat-rename checks them).
 sleep 0.8
 case "$1" in
-  %0) echo "Token-bucket rate limiter for checkout" ;;
-  %2) echo "Payment element on the cart page" ;;
-  %3) echo "Staging onto the new VPC module" ;;
-  %5) echo "Cosine LR schedule with warmup" ;;
-  %6) echo "Rewrite the getting-started guide" ;;
+  %0) echo "Rate limiting" ;;
+  %2) echo "Cart payments" ;;
+  %3) echo "Staging network" ;;
+  %5) echo "Learning schedule" ;;
+  %6) echo "Getting started" ;;
   *) echo "no demo title for $1" >&2; exit 1 ;;
 esac

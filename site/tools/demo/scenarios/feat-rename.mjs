@@ -7,7 +7,7 @@ import { sessions, startAgents } from './common.mjs';
 
 const stub = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'suggest.sh');
 const TITLE = 'add rate limiting to the checkout API';
-const SUGGESTED = 'Token-bucket rate limiter for checkout';
+const SUGGESTED = 'Rate limiting';
 
 export default {
   name: 'feat-rename',

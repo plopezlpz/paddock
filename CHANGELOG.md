@@ -6,6 +6,17 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-31
+
+### Added
+
+- A standalone `paddock notification STATE KIND PATH [unicode|nerd]` formatter prints an icon/state title and the same compact path/branch label as agent cards, for optional desktop-notification integrations. Unicode is the portable default; no notification is sent by this command.
+
+### Changed
+
+- Agent cards put the bright status dot, provider icon and directory/branch on the first line, with state-colored elapsed time and a muted topic label below. The topic editor stays on that second line; card heights and Sessions are unchanged.
+- Git branch suffixes remain visible when the branch and directory names match. Detached HEAD is explicitly labeled `(detached abc1234)`.
+
 ## [0.6.0] - 2026-10-31
 
 ### Added
@@ -140,7 +151,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/plopezlpz/paddock/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/plopezlpz/paddock/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/plopezlpz/paddock/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/plopezlpz/paddock/compare/v0.3.1...v0.4.0

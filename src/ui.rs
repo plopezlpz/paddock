@@ -14,7 +14,9 @@ use crate::app::{App, Command, Create, Hint, Menu, Mode, Rename, Status, Tab, Vi
 use crate::edit::LineEdit;
 use crate::model::State;
 use crate::rows::{short_path, New, Row, RowKind};
-use crate::theme::{AgentIcons, Theme};
+use crate::theme::{agent_icon, Theme};
+#[cfg(test)]
+use crate::theme::AgentIcons;
 
 /// Narrower than this (a phone), the compact layout.
 const COMPACT_BELOW: u16 = 80;
@@ -35,23 +37,6 @@ fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     match s {
         Some(s) => Span::styled(t.icon(s).to_string(), t.state(s)),
         None => Span::raw(" "),
-    }
-}
-
-/// Nerd Font marks are opt-in; Unicode needs no icon font. Unknown providers
-/// still get a neutral mark, and the preview retains the agent's name.
-fn agent_icon(kind: &str, mode: AgentIcons) -> &'static str {
-    match (mode, kind) {
-        (AgentIcons::Nerd, "claude") => "\u{ec82}", // cod-claude
-        (AgentIcons::Nerd, "codex") => "\u{ec81}", // cod-openai
-        (AgentIcons::Nerd, "gemini") => "\u{ec10}", // cod-sparkle
-        (AgentIcons::Nerd, "opencode") => "\u{f0763}", // md-square-outline
-        (_, "claude") => "✳",
-        (_, "codex") => "›_",
-        (_, "pi") => "π",
-        (_, "opencode") => "◇",
-        (_, "gemini") => "✦",
-        _ => "▣",
     }
 }
 
@@ -351,14 +336,15 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
             ])],
             None,
         ),
-        RowKind::Agent { state, title, .. } => {
-            let mut first = vec![mark.clone(), Span::raw(" "), dot(t, Some(*state)), Span::raw(" ")];
-            first.push(if title.is_empty() {
-                Span::styled("untitled", t.muted().add_modifier(Modifier::ITALIC))
+        RowKind::Agent { title, .. } => {
+            let mut second = agent_detail_prefix(row, mark.clone(), t);
+            let room = width.saturating_sub(cols(&second));
+            second.push(if title.is_empty() {
+                Span::styled(fit("untitled", room), t.muted().add_modifier(Modifier::ITALIC))
             } else {
-                Span::styled(fit(title, width.saturating_sub(cols(&first))), sel(bold()))
+                Span::styled(fit(title, room), t.muted())
             });
-            (card_lines(Line::from(first), mark, row, compact, width, t, None), None)
+            (card_lines(Line::from(second), mark, row, width, t), None)
         }
         RowKind::Header { label, count, gap } => {
             let line = Line::from(vec![
@@ -406,51 +392,36 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) ->
     vec![Line::from(line)]
 }
 
-/// An agent card: FIRST, then how long it has been in its state, its kind's
-/// mark and where it runs. Compact, SLOT (the rename field's status) ends line two.
-fn card_lines(first: Line<'static>, mark: Span<'static>, row: &Row, compact: bool, width: usize, t: &Theme, slot: Option<Span<'static>>) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, stale, kind, path, age, .. } = &row.kind else { return vec![first] };
-    let icon = Span::styled(agent_icon(kind, t.agent_icons), t.muted());
-    // A stale state is unconfirmed: "working?".
-    let unsure = if *stale { "?" } else { "" };
+/// The second line starts with state-colored elapsed time. Unconfirmed states keep
+/// their explicit question mark, including when there is no timestamp.
+fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
     let mut second = vec![mark, Span::raw("   ")];
-    if compact {
-        // Compact: where and how long; the group header or the dot says the
-        // state.
-        let mut tail = Vec::new();
-        if !age.is_empty() || *stale {
-            tail.extend([Span::styled(" · ", t.muted()), Span::styled(format!("{age}{unsure}"), t.state(*state))]);
-        }
-        tail.extend([Span::raw(" "), icon]);
-        let slot_w = slot.as_ref().map_or(0, |s| s.width() + 1);
-        second.push(Span::styled(path.display(width.saturating_sub(cols(&second) + cols(&tail) + slot_w)), t.muted()));
-        second.extend(tail);
-        if let Some(slot) = slot {
-            push_right(&mut second, slot, width);
-        }
-        return vec![first, Line::from(second)];
-    }
-    // Wide: the age in its state's colour, padded so the places line up
-    // (ages are at most three columns); the group header or the dot says
-    // the state, spelled out only when it is unconfirmed.
+    let RowKind::Agent { state, stale, age, .. } = &row.kind else { return second };
     let when = match (*stale, age.is_empty()) {
         (true, true) => format!("{}?", state.label()),
-        (true, false) => format!("{}? {age}", state.label()),
+        (true, false) => format!("{age} {}?", state.label()),
         (false, true) => String::new(),
         (false, false) => format!("{age:<3}"),
     };
     if !when.is_empty() {
         second.extend([Span::styled(when, t.state(*state)), Span::raw("  ")]);
     }
-    let padding = 3usize.saturating_sub(icon.width());
-    second.extend([icon, Span::raw(" ".repeat(padding))]);
-    second.push(Span::styled(path.display(width.saturating_sub(cols(&second))), t.muted()));
-    vec![first, Line::from(second)]
+    second
 }
 
-/// The row being renamed: its name or title is the field, with the
-/// suggestion's progress or the reason it failed (wide: on that line;
-/// compact cards: at the end of the next). Its other lines are as usual.
+/// Directory-first cards stay two lines in both layouts. SECOND is either
+/// the topic label or its editor; the bright identity line never moves.
+fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usize, t: &Theme) -> Vec<Line<'static>> {
+    let RowKind::Agent { state, kind, path, .. } = &row.kind else { return vec![second] };
+    let icon = Span::styled(agent_icon(kind, t.agent_icons), bold());
+    let padding = 3usize.saturating_sub(icon.width());
+    let mut first = vec![mark, Span::raw(" "), dot(t, Some(*state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))];
+    first.push(Span::styled(path.display(width.saturating_sub(cols(&first))), bold()));
+    vec![Line::from(first), second]
+}
+
+/// The row being renamed: the field replaces the name/topic on its usual
+/// line, alongside suggestion progress or an error. Other lines stay put.
 fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> Vec<Line<'static>> {
     let w = width as usize;
     let mark = Span::styled("▌", Style::new().fg(t.accent));
@@ -460,7 +431,21 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
         (None, None) if r.field.is_empty() && !r.placeholder.is_empty() => Some(Span::styled("automatic", t.muted())),
         _ => None,
     };
-    let card = matches!(row.kind, RowKind::Agent { .. });
+    if matches!(row.kind, RowKind::Agent { .. }) {
+        let mut second = agent_detail_prefix(row, mark.clone(), t);
+        second.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
+        // Age/stale metadata takes space too. Reserve a usable editor before
+        // fitting feedback, rather than letting a long error overflow the row.
+        let feedback_room = w.saturating_sub(cols(&second) + 6 + 2);
+        let slot = slot.filter(|_| feedback_room > 0)
+            .map(|s| Span::styled(fit(&s.content, feedback_room), s.style));
+        let room = w.saturating_sub(cols(&second) + slot.as_ref().map_or(0, |s| s.width() + 2));
+        second.extend(field_spans(&r.field, &r.placeholder, room, t));
+        if let Some(slot) = slot {
+            push_right(&mut second, slot, w);
+        }
+        return card_lines(Line::from(second), mark, row, w, t);
+    }
     // What comes before the name, as the row draws it.
     let (mut first, rest) = match &row.kind {
         RowKind::Window { .. } => {
@@ -473,14 +458,10 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
         _ => (vec![mark.clone(), Span::raw(" ")], Vec::new()),
     };
     first.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
-    let wide_slot = if compact && card { None } else { slot.clone() };
-    let room = w.saturating_sub(cols(&first) + wide_slot.as_ref().map_or(0, |s| s.width() + 2));
+    let room = w.saturating_sub(cols(&first) + slot.as_ref().map_or(0, |s| s.width() + 2));
     first.extend(field_spans(&r.field, &r.placeholder, room, t));
-    if let Some(slot) = wide_slot {
+    if let Some(slot) = slot {
         push_right(&mut first, slot, w);
-    }
-    if card {
-        return card_lines(Line::from(first), mark, row, compact, w, t, if compact { slot } else { None });
     }
     let mut lines = vec![Line::from(first)];
     lines.extend(rest);
@@ -623,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_marks_follow_the_age_without_crowding_the_title() {
+    fn agent_cards_put_bright_identity_above_muted_age_and_topic() {
         let cases = [("claude", "✳", "\u{ec82}"), ("codex", "›_", "\u{ec81}"), ("pi", "π", "π"), ("opencode", "◇", "\u{f0763}"), ("gemini", "✦", "\u{ec10}"), ("custom", "▣", "▣"), ("", "▣", "▣")];
         for (mode, kind, icon) in cases.into_iter().flat_map(|(kind, unicode, nerd)| [(AgentIcons::Unicode, kind, unicode), (AgentIcons::Nerd, kind, nerd)]) {
             let mut t = Theme::from_values(&["", if mode == AgentIcons::Nerd { "colour8" } else { "" }]);
@@ -643,30 +624,66 @@ mod tests {
                         };
                         for width in [24, 40, 72] {
                             let (lines, _) = row_lines(&row, true, compact, width, &t);
-                            assert_eq!(lines[0].to_string(), "▌ ● task");
                             assert!(lines.iter().all(|l| l.width() <= width as usize), "{kind}: {lines:?}");
+                            let identity = lines[0].to_string();
                             let detail = lines[1].to_string();
-                            assert!(detail.contains(icon), "{detail}");
-                            let mark = lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap();
-                            assert_eq!(mark.style, t.muted(), "{kind}: same tone as path metadata");
+                            assert!(identity.starts_with(&format!("▌ ● {icon}")), "{identity}");
+                            assert!(!identity.contains("task"), "{identity}");
+                            let mark = lines[0].spans.iter().find(|s| s.content == icon).unwrap();
+                            assert_eq!(mark.style, bold(), "{kind}: bright provider icon");
+                            assert_eq!(lines[0].spans.last().unwrap().style, bold(), "bright path");
+                            assert_eq!(lines[1].spans.last().unwrap().style, t.muted(), "muted topic");
+                            assert!(detail.ends_with("task"), "{detail}");
                             if width == 72 {
-                                assert!(detail.contains("~/a-long-project-path-日本語"), "{detail}");
+                                assert!(identity.contains("~/a-long-project-path-日本語"), "{identity}");
                             }
                             if !age.is_empty() {
-                                assert!(detail.find(age).unwrap() < detail.find(icon).unwrap(), "{detail}");
+                                assert!(detail.find(age).unwrap() < detail.find("task").unwrap(), "{detail}");
                             }
                             assert_eq!(detail.contains('?'), stale, "{detail}");
-                            // Compact rename feedback shares the detail line.
-                            if compact {
-                                let lines = card_lines(Line::raw("renaming"), Span::raw("▌"), &row, true, width as usize, &t, Some(Span::raw("error")));
-                                assert!(lines[1].width() <= width as usize, "{lines:?}");
-                                assert!(lines[1].to_string().contains(icon));
-                                assert_eq!(lines[1].spans.iter().find(|s| s.content.contains(icon)).unwrap().style, t.muted());
-                                assert!(lines[1].to_string().ends_with("error"));
-                            }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn elapsed_time_matches_the_state_while_the_topic_stays_muted() {
+        let t = Theme::from_values(&[]);
+        for state in State::ALL {
+            let row = Row {
+                target: None, preview: None, score: None,
+                kind: RowKind::Agent { state, stale: false, kind: "pi".into(),
+                    title: "Branch labels".into(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into() },
+            };
+            for compact in [false, true] {
+                let lines = row_lines(&row, false, compact, 40, &t).0;
+                let age = lines[1].spans.iter().find(|s| s.content.contains("5m")).unwrap();
+                assert_eq!(age.style, t.state(state));
+                assert_eq!(lines[1].spans.last().unwrap().style, t.muted());
+            }
+        }
+    }
+
+    #[test]
+    fn compact_agent_editor_fits_long_errors_after_stale_metadata() {
+        let snap = crate::model::fixture(&["$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|one||||/a"]);
+        let mut app = App::new(snap, Tab::Agents, "$1".into(), "@1".into(), String::new(), true, false);
+        if let RowKind::Agent { age, stale, .. } = &mut app.rows[app.selected].kind {
+            *age = "5m".into(); *stale = true;
+        }
+        app.run(Command::Rename);
+        let Mode::Rename(r) = &mut app.mode else { panic!("not renaming") };
+        r.error = Some("pi timed out after 30s".into());
+        let t = Theme::from_values(&[]);
+        for width in [24, 36, 40, 72] {
+            let lines = rename_lines(&app.rows[app.selected], r, true, width, &t);
+            assert!(lines.iter().all(|l| l.width() <= width as usize), "{width}: {lines:?}");
+            assert!(lines[1].to_string().contains("✎ one"), "editor remains usable");
+            if width == 36 {
+                assert!(lines[1].to_string().contains("✗ pi"));
+                assert!(lines[1].to_string().ends_with('…'), "visible error truncation");
             }
         }
     }

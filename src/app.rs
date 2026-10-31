@@ -2110,7 +2110,10 @@ mod tests {
         // 8 list lines: header, card, card, blank and header, then a card cut off after one line.
         let term = draw(&app, &mut view, 120, 13);
         assert!(view.preview_fits);
-        let (x, y) = find(&term, "three");
+        let (rect, _, _) = view.rows.iter().find(|(_, _, target)| *target == pane("$1", "@2", "%3")).unwrap();
+        let (x, y) = (rect.x + 4, rect.y);
+        assert!(screen(&term)[y as usize].contains("/b"), "only the identity line fits");
+        assert!(!screen(&term).iter().any(|l| l.contains("three")), "the topic is below the list");
         let before = app.selected;
         click(&mut app, &view, MouseButton::Left, (x, y - 1));
         assert_eq!(app.selected, before, "headers are not selectable");
@@ -2276,9 +2279,9 @@ mod tests {
         app.run(Command::Tab(Tab::Agents));
         let lines = screen(&draw(&app, &mut view, 46, 20));
         let at = lines.iter().position(|l| l.contains("deploy")).unwrap();
-        assert!(lines[at + 1].contains("/h/c"), "{lines:#?}");
-        assert!(!lines[at + 1].contains("play"), "no tmux location: {lines:#?}");
-        assert!(!lines[at + 1].contains("codex"), "no kind on a phone");
+        assert!(lines[at - 1].contains("/h/c"), "directory above the topic: {lines:#?}");
+        assert!(!lines[at - 1].contains("play"), "no tmux location: {lines:#?}");
+        assert!(!lines[at - 1].contains("codex"), "icon instead of provider name");
     }
 
     #[test]
@@ -2441,13 +2444,46 @@ mod tests {
     }
 
     #[test]
+    fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
+        for width in [40, 80, 120] {
+            let mut app = agents_app();
+            for row in &mut app.rows {
+                if let RowKind::Agent { age, stale, .. } = &mut row.kind {
+                    *age = "5m".into();
+                    *stale = true;
+                }
+            }
+            let mut view = View::new();
+            let before = draw(&app, &mut view, width, 24);
+            let (_, y) = find(&before, "one");
+            let identity = screen(&before)[y as usize - 1].clone();
+            let targets = view.rows.clone();
+            ctrl(&mut app, 'r');
+            ctrl(&mut app, 'r');
+            for failed in [false, true] {
+                if failed { app.suggested(1, Err("pi timed out after 30s".into())); }
+                let term = draw(&app, &mut view, width, 24);
+                let lines = screen(&term);
+                assert_eq!(lines[y as usize - 1], identity, "{width}: identity stays on line one");
+                assert!(lines[y as usize].contains("5m working?"), "age and stale state stay on line two: {lines:#?}");
+                assert!(lines[y as usize].contains("✎ "), "editor on the topic line: {lines:#?}");
+                assert_eq!(field(&app), Some("one"), "narrow editors scroll without changing the title");
+                if width >= 80 { assert!(lines[y as usize].contains("✎ one")); }
+                assert!(lines[y as usize].contains(if failed { "✗ pi" } else { "✦ sugg" }), "feedback on the topic line: {lines:#?}");
+                if width == 40 { assert!(lines[y as usize].contains('…'), "feedback truncation stays visible"); }
+                assert_eq!(view.rows, targets, "{width}: editing never moves mouse targets");
+            }
+        }
+    }
+
+    #[test]
     fn the_title_is_edited_on_its_card() {
         let mut app = agents_app();
         type_(&mut app, "on");
         ctrl(&mut app, 'r');
         let lines = screen(&draw(&app, &mut View::new(), 120, 14));
         assert!(lines.iter().any(|l| l.contains("› on") && l.contains("renaming")), "the filter stays in view: {lines:#?}");
-        assert!(lines.iter().any(|l| l.contains("▌ ✎ one")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("▌   ✎ one")), "{lines:#?}");
         ctrl(&mut app, 'u');
         let lines = screen(&draw(&app, &mut View::new(), 120, 14));
         assert!(lines.iter().any(|l| l.contains("✎ ▏one") && l.contains("automatic")), "the automatic title as a placeholder: {lines:#?}");
@@ -2542,7 +2578,8 @@ mod tests {
         assert_eq!(count(&term), 4, "one glyph per card");
         let (x, y) = find(&term, icon);
         assert_eq!(term.backend().buffer()[(x, y)].fg, ratatui::style::Color::Reset);
-        assert!(term.backend().buffer()[(x, y)].modifier.contains(Modifier::DIM), "glyph shares the metadata tone");
+        assert!(term.backend().buffer()[(x, y)].modifier.contains(Modifier::BOLD), "glyph is part of the bright identity");
+        assert!(!term.backend().buffer()[(x, y)].modifier.contains(Modifier::DIM));
         assert!(screen(&term).iter().all(|l| !l.contains("claude")), "no duplicate provider name");
 
         app.open_menu(Position::new(x, y), true);
@@ -2741,7 +2778,7 @@ mod tests {
                     let lines = screen(&draw(&app, &mut View::new(), width, 12));
                     let title = lines.iter().position(|l| l.contains("task")).unwrap();
                     assert!(!lines[title].contains(icon), "{lines:#?}");
-                    assert!(lines[title + 1].contains(icon), "{lines:#?}");
+                    assert!(lines[title - 1].contains(icon), "{lines:#?}");
                 }
             }
         }

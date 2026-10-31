@@ -17,6 +17,23 @@ pub enum AgentIcons {
     Nerd,
 }
 
+/// Shared by agent cards and plain-text notifications. Nerd Font marks are
+/// opt-in: desktop notification fonts may not contain their private glyphs.
+pub fn agent_icon(kind: &str, mode: AgentIcons) -> &'static str {
+    match (mode, kind) {
+        (AgentIcons::Nerd, "claude") => "\u{ec82}", // cod-claude
+        (AgentIcons::Nerd, "codex") => "\u{ec81}", // cod-openai
+        (AgentIcons::Nerd, "gemini") => "\u{ec10}", // cod-sparkle
+        (AgentIcons::Nerd, "opencode") => "\u{f0763}", // md-square-outline
+        (_, "claude") => "✳",
+        (_, "codex") => "›_",
+        (_, "pi") => "π",
+        (_, "opencode") => "◇",
+        (_, "gemini") => "✦",
+        _ => "▣",
+    }
+}
+
 pub struct Theme {
     /// Explicit choice: terminal font coverage cannot be detected over tmux/SSH.
     pub agent_icons: AgentIcons,

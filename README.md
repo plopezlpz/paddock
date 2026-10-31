@@ -233,10 +233,17 @@ is not checked: keep it at the clone's version, and update the two together.
   columns wide.
 - **Phones**: under 80 columns, a compact two-line layout with tappable words.
 
-Agent cards show a small agent mark and the working-directory path after the
-elapsed time, without repeating the agent name. The name remains searchable
-and appears in the preview header. The colored dot beside the title still means
-**state**, not agent type.
+Agent cards use two lines: a bright state dot, agent mark and directory/branch
+identity above state-colored elapsed time and a muted topic label. The colored dot means
+**state**, not agent type. The provider name remains searchable and appears in
+the preview header, without repeating it on the card. Editing the topic keeps
+the directory on the first line.
+
+Title suggestions from agent-status.tmux request stable one- or two-word topics
+such as `Branch labels` or `Token expiry`. Existing titles are preserved, not
+cut to their first two words: use `ctrl-r` twice to suggest a short replacement,
+then Enter to keep it (or Escape to cancel). Filtering still uses the full stored
+title, even when it is visually truncated.
 
 Paths are anchored at a worktree's main Git repository when it can be located;
 otherwise, at the first enclosing Git repository from filesystem root toward
@@ -249,13 +256,28 @@ Non-repository paths keep the usual `~/…` abbreviation. Repository discovery i
 cached until the popup closes.
 
 Cards append the checked-out branch in parentheses, for example
-`myrepo/…/topic (feature/cart)`, unless it exactly matches the final directory
-name. Detached HEAD shows a short commit ID instead. This uses the nearest
+`myrepo/…/topic (feature/cart)`, even when the branch matches the final directory
+name. Detached HEAD shows `(detached abc1234)` instead. This uses the nearest
 repository's HEAD, including for nested repos and submodules; it is reread when
 the agent list rebuilds. No full-path heading is displayed below the filter.
 Filtering searches the absolute and `~/…` paths, repo label, full branch name,
-and full detached commit ID, even when shortened, omitted as a duplicate, or
-hidden. Sessions keeps its existing path display.
+and full detached commit ID, even when shortened or hidden. Sessions keeps its
+existing path display.
+
+### Notification formatting
+
+`paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]`
+prints exactly two plain-text lines: an agent icon and state, then the same
+compact directory/branch label used by cards. It does not open tmux or send a
+notification. `asking` is displayed as `waiting`; Unicode is the default because
+native notification fonts may not contain Nerd Font glyphs.
+
+With agent-status.tmux 0.7.0 or later, opt in by setting
+`@agent-notify-paddock` to the Paddock executable path (one path, not a shell
+command). `@agent-notify-icons nerd` selects Nerd glyphs independently of the
+terminal's `@paddock-agent-icons` setting. The notifier keeps its existing
+standalone text if formatting is unavailable or fails. In compact mode the body
+is the directory/branch, not the provider's prompt/error message.
 
 The default `unicode` mode needs no icon font: `✳` Claude, `›_` Codex, `π` pi,
 `◇` OpenCode, `✦` Gemini, and `▣` for other agents. To use Nerd Font glyphs:

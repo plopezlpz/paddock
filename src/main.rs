@@ -14,6 +14,7 @@ mod app;
 mod edit;
 mod live;
 mod model;
+mod notification;
 mod paths;
 mod rows;
 mod theme;
@@ -86,7 +87,7 @@ fn context() -> Result<Context, String> {
 
 /// Without --tab (or with --tab last), paddock opens on the tab it was last
 /// closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init | paddock --version";
+const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init | paddock --version\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]";
 
 /// For `paddock init`: a binary installed without the plugin checkout
 /// (Homebrew) still binds the keys, by running this script itself.
@@ -95,6 +96,7 @@ const PLUGIN: &str = include_str!("../paddock.tmux");
 enum Cmd {
     Run(Option<Tab>),
     Init,
+    Notification { state: String, kind: String, path: String, icons: theme::AgentIcons },
     Version,
     Help,
 }
@@ -105,6 +107,12 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
         ["--tab", "sessions"] => Ok(Cmd::Run(Some(Tab::Sessions))),
         ["--tab", "agents"] => Ok(Cmd::Run(Some(Tab::Agents))),
         ["init"] => Ok(Cmd::Init),
+        ["notification", state @ ("finished" | "asking" | "waiting" | "failed"), kind, path] => {
+            Ok(Cmd::Notification { state: (*state).into(), kind: (*kind).into(), path: (*path).into(), icons: theme::AgentIcons::Unicode })
+        }
+        ["notification", state @ ("finished" | "asking" | "waiting" | "failed"), kind, path, mode @ ("unicode" | "nerd")] => {
+            Ok(Cmd::Notification { state: (*state).into(), kind: (*kind).into(), path: (*path).into(), icons: if *mode == "nerd" { theme::AgentIcons::Nerd } else { theme::AgentIcons::Unicode } })
+        }
         ["--version" | "-V"] => Ok(Cmd::Version),
         ["--help" | "-h"] => Ok(Cmd::Help),
         _ => Err(USAGE.to_string()),
@@ -133,7 +141,7 @@ fn version_mismatch(plugin: Option<&str>, ours: &str) -> Option<String> {
 /// may pass flags this binary does not know, and the version is what to fix.
 fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
     let cmd = parse(args);
-    if matches!(cmd, Ok(Cmd::Init | Cmd::Version | Cmd::Help)) {
+    if matches!(cmd, Ok(Cmd::Init | Cmd::Version | Cmd::Help | Cmd::Notification { .. })) {
         return cmd;
     }
     version_mismatch(plugin, ours).map_or(cmd, Err)
@@ -196,6 +204,10 @@ fn main() {
     let result = command(&args, plugin.as_deref(), env!("CARGO_PKG_VERSION")).and_then(|cmd| match cmd {
         Cmd::Run(tab) => run(tab),
         Cmd::Init => init(),
+        Cmd::Notification { state, kind, path, icons } => {
+            println!("{}", notification::format(&state, &kind, &path, &env::var("HOME").unwrap_or_default(), icons));
+            Ok(())
+        }
         Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -203,6 +215,7 @@ fn main() {
         Cmd::Help => {
             println!("{USAGE}");
             println!("init: bind the keys from ~/.tmux.conf with run-shell 'paddock init' (no plugin checkout needed)");
+            println!("notification: print two plain-text lines (title, path/branch); sends nothing and needs no tmux connection");
             Ok(())
         }
     });
@@ -785,6 +798,18 @@ mod tests {
         assert!(matches!(parse(&["--help"]), Ok(Cmd::Help)));
         assert!(matches!(parse(&["-h"]), Ok(Cmd::Help)));
         assert_eq!(parse(&["bogus"]).err().as_deref(), Some(USAGE));
+    }
+
+    #[test]
+    fn notification_command_is_validated_and_needs_no_popup_bindings() {
+        for state in ["finished", "asking", "waiting", "failed"] {
+            assert!(matches!(command(&["notification", state, "claude", "/tmp/project"], Some("old"), "new"), Ok(Cmd::Notification { icons: theme::AgentIcons::Unicode, .. })));
+            assert!(matches!(parse(&["notification", state, "codex", "/tmp/project", "nerd"]), Ok(Cmd::Notification { icons: theme::AgentIcons::Nerd, .. })));
+        }
+        assert!(parse(&["notification", "invented", "pi", "/tmp"]).is_err());
+        assert!(parse(&["notification", "finished", "pi", "/tmp", "invented"]).is_err());
+        assert!(parse(&["notification", "finished", "pi"]).is_err());
+        assert!(matches!(parse(&["notification", "finished", "pi", "-literal-path"]), Ok(Cmd::Notification { .. })));
     }
 
     #[test]

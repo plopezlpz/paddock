@@ -26,8 +26,8 @@ struct GitHead {
 }
 
 impl GitHead {
-    fn label(&self) -> &str {
-        if self.detached { &self.name[..7] } else { &self.name }
+    fn label(&self) -> String {
+        if self.detached { format!("detached {}", &self.name[..7]) } else { self.name.clone() }
     }
 }
 
@@ -36,25 +36,24 @@ impl AgentPath {
         Self { full: home_path(path, home), label: short_path(path, home), anchored: false, head: None }
     }
 
-    /// Search never depends on truncation or duplicate-label suppression.
+    /// Search never depends on display truncation.
     pub fn search_text(&self) -> String {
         format!("{} {}", self.label, self.head.as_ref().map_or("", |head| head.name.as_str()))
     }
 
     pub fn display(&self, width: usize) -> String {
         let Some(head) = &self.head else { return self.display_path(width) };
-        if !head.detached && self.label.rsplit('/').next() == Some(head.name.as_str()) {
-            return self.display_path(width);
+        let label = head.label();
+        if self.label.width() + label.width() + 3 <= width {
+            return format!("{} ({label})", self.label);
         }
-        if self.label.width() + head.label().width() + 3 <= width {
-            return format!("{} ({})", self.label, head.label());
-        }
-        // Keep at least two thirds of narrow cards for the directory, and
-        // never shorten the repo anchor merely to squeeze in a branch label.
+        // Keep the Git suffix even when branch and directory names match.
+        // Prefer the repo anchor and give the branch up to a third of a narrow
+        // card; below five columns there is no room for both path and suffix.
+        if width < 5 { return self.display_path(width); }
         let anchor = self.label.split('/').next().unwrap_or("").width();
-        let room = (width / 3).min(width.saturating_sub(anchor + 3));
-        if room < 4 { return self.display_path(width); }
-        let branch = prefix(head.label(), room - 3);
+        let room = (width / 3).max(4).min(width.saturating_sub(anchor).max(4));
+        let branch = prefix(&label, room - 3);
         let suffix = format!(" ({branch})");
         format!("{}{suffix}", self.display_path(width.saturating_sub(suffix.width())))
     }
@@ -284,7 +283,7 @@ mod tests {
             let mut cache = PathCache::new(f.0.to_str().unwrap().into());
             let at_root = cache.get(root.to_str().unwrap());
             let label = expected.strip_suffix("/src").unwrap();
-            let display = if root.file_name().unwrap() == branch { label.to_string() } else { format!("{label} ({branch})") };
+            let display = format!("{label} ({branch})");
             assert_eq!(at_root.display(200), display, "collapse even with plenty of room");
             assert_eq!(at_root.full, home_path(root.to_str().unwrap(), f.0.to_str().unwrap()), "inspection keeps the real path");
         }
@@ -364,6 +363,7 @@ mod tests {
         assert_eq!(cache.get(root).display(80), "project (main)");
         f.git(&["-C", root, "checkout", "-b", "feature/searchable-branch"]);
         assert_eq!(cache.get(root).display(80), "project (feature/searchable-branch)", "HEAD is refreshed even when discovery is cached");
+        assert_eq!(crate::notification::format("finished", "claude", root, "", crate::theme::AgentIcons::Unicode), "✳ finished\nproject (feature/searchable-branch)");
         let line = format!("$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||||{root}");
         let mut filter = crate::rows::Filter::new();
         for hidden in [false, true] {
@@ -378,14 +378,14 @@ mod tests {
         let path = cache.get(root);
         let head = path.head.as_ref().unwrap();
         assert!(head.detached);
-        assert_eq!(path.display(80), format!("project ({})", &head.name[..7]));
+        assert_eq!(path.display(80), format!("project (detached {})", &head.name[..7]));
         assert!(path.search_text().contains(&head.name));
         filter.set(&head.name[..12]);
         assert!(filter.score(&path.search_text()).is_some(), "more than the displayed hash is searchable");
     }
 
     #[test]
-    fn branch_names_use_the_nearest_repos_head_and_duplicate_names_are_omitted() {
+    fn branch_names_use_the_nearest_repos_head_even_when_directory_names_match() {
         let f = Fixture::new();
         let repo = f.0.join("project");
         let nested = repo.join("nested");
@@ -396,9 +396,10 @@ mod tests {
         assert_eq!(cache.get(nested.to_str().unwrap()).display(80), "project/nested (child-branch)");
         f.git(&["-C", nested.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/nested"]);
         let path = cache.get(nested.to_str().unwrap());
-        assert_eq!(path.display(80), "project/nested");
+        assert_eq!(path.display(80), "project/nested (nested)");
+        assert_eq!(crate::notification::format("asking", "pi", nested.to_str().unwrap(), "", crate::theme::AgentIcons::Unicode), "π waiting\nproject/nested (nested)");
         assert_eq!(path.head.as_ref().unwrap().name, "nested");
-        assert!(path.search_text().ends_with(" nested"), "search retains even an omitted branch");
+        assert!(path.search_text().ends_with(" nested"));
         std::fs::write(nested.join(".git/HEAD"), "not a valid HEAD\n").unwrap();
         assert_eq!(cache.get(nested.to_str().unwrap()).display(80), "project/nested");
     }
@@ -413,7 +414,8 @@ mod tests {
         for width in 0..100 {
             let label = path.display(width);
             assert!(label.width() <= width, "{width}: {label}");
-            if width >= 7 { assert!(label.starts_with("project"), "{width}: {label}"); }
+            if width >= 11 { assert!(label.starts_with("project"), "{width}: {label}"); }
+            if width >= 5 { assert!(label.contains('('), "{width}: Git suffix stays visible: {label}"); }
             if label.contains('(') { assert!(label.ends_with(')'), "{width}: {label}"); }
         }
     }
