@@ -325,6 +325,14 @@ from inside tmux, so the mode is explicit, not automatic. If you see missing
 characters, set `@paddock-agent-icons unicode`. Unset or unrecognized values
 also use Unicode. Changes apply the next time the popup opens.
 
+The option is a format, expanded for the client the popup opens in, so
+terminals with and without the font can share a server. For Nerd Font marks
+in Ghostty only (a phone's terminal gets Unicode):
+
+```tmux
+set -g @paddock-agent-icons '#{?#{m:ghostty*,#{client_termtype}},nerd,unicode}'
+```
+
 ### Hide and show agents
 
 Use **Hide** in an agent card's menu, or `ctrl-e`, to move it into **Hidden · N**
@@ -392,7 +400,7 @@ of room, its menu (`ctrl-a`) has the rest.
 | Option | Default | |
 |---|---|---|
 | `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
-| `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open |
+| `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open; a format, expanded for the popup's client |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%`, or `100%` on a terminal under 128 columns (30 rows) | may be a format, as the defaults are: `#{?#{e\|<:#{client_width},128},100%,80%}` |
 | `@paddock-popup-style` | `bg=terminal,fg=terminal` | popup background and text |

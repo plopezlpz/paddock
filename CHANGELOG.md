@@ -6,6 +6,10 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `@paddock-agent-icons` is a format, expanded for the client the popup opens in: a terminal without a Nerd Font (a phone's) can get Unicode marks while another gets Nerd Font logos, e.g. `'#{?#{m:ghostty*,#{client_termtype}},nerd,unicode}'`.
+
 ## [0.8.0] - 2026-11-16
 
 ### Added

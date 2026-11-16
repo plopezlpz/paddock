@@ -129,7 +129,13 @@ impl Control {
     /// another field count (a notification inside the reply, before tmux
     /// 3.8) is no row.
     pub fn row(&mut self, target: &str, names: &[&str]) -> Vec<String> {
-        let lines = self.cmd(&format!("display-message -p -t {} {}", quote(target), quote(&fields(names)))).unwrap_or_default();
+        self.row_for(None, target, names)
+    }
+
+    /// `row`, with CLIENT's formats (`client_termtype`…) if one is given.
+    pub fn row_for(&mut self, client: Option<&str>, target: &str, names: &[&str]) -> Vec<String> {
+        let client = client.map_or_else(String::new, |c| format!(" -c {}", quote(c)));
+        let lines = self.cmd(&format!("display-message -p{client} -t {} {}", quote(target), quote(&fields(names)))).unwrap_or_default();
         lines.iter().map(|l| l.split(SEP).map(String::from).collect::<Vec<_>>()).find(|f| f.len() == names.len()).unwrap_or_default()
     }
 }

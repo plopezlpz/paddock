@@ -256,7 +256,9 @@ const COLOURS: &[(&str, &str)] = &[
 ];
 /// agent-status.tmux's state marks, in State order.
 const MARKS: [&str; 4] = ["@agent-icon-idle", "@agent-icon-finished", "@agent-icon-working", "@agent-icon-asking"];
-const AGENT_ICONS: &str = "@paddock-agent-icons";
+/// A format, so that it can choose by client: a phone's terminal may lack
+/// the Nerd Font a desktop's has.
+const AGENT_ICONS: &str = "E:@paddock-agent-icons";
 
 /// The theme from the options' values (VALUE of each name).
 fn theme<'a>(value: impl Fn(&str) -> &'a str) -> Theme {
@@ -294,7 +296,9 @@ pub fn connect(events: impl Fn(u64, Msg) + Send + 'static) -> Result<(Tmux, Star
     // Options as the invoking window sees them, not paddock's own session.
     let suggest_command = tmux.row(&ctx.window, &["@agent-suggest-command"]).pop().unwrap_or_default();
     let names: Vec<&str> = COLOURS.iter().map(|(option, _)| *option).chain(MARKS).chain([AGENT_ICONS]).collect();
-    let row = tmux.row(&ctx.window, &names);
+    // As the client the popup opened in sees them (formats may ask which it
+    // is); as any client does if that fails.
+    let row = Some(tmux.row_for(Some(&ctx.client), &ctx.window, &names)).filter(|r| !r.is_empty()).unwrap_or_else(|| tmux.row(&ctx.window, &names));
     let theme = theme(|name| names.iter().position(|n| *n == name).and_then(|i| row.get(i)).map_or("", String::as_str));
     let hidden_expanded = tmux.cmd(&format!("show-option -gqv {HIDDEN_EXPANDED}"))?.first().is_some_and(|v| v == "1");
     let start = Start { last_tab, theme, suggest_command, hidden_expanded, session: ctx.session, window: ctx.window };
