@@ -6,6 +6,8 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-16
+
 ### Changed
 
 - State marks are circles again, told apart by colour: `○` idle, `●` the others (or agent-status.tmux's `@agent-icon-*`, whatever they are), not 0.8.0's `!`, `◐`, `✓`.
@@ -194,7 +196,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/plopezlpz/paddock/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/plopezlpz/paddock/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/plopezlpz/paddock/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/plopezlpz/paddock/compare/v0.5.0...v0.6.0
