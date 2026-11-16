@@ -35,6 +35,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+      # The Rex scripts are compiled in too, and run only on a Rex server,
+      # whose Lua is 5.1 (GopherLua): check their syntax against that.
+      - name: Lua syntax
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y lua5.1
+          for f in rex/*.lua; do [ ! -e "$f" ] || luac5.1 -p "$f"; done
       # paddock.tmux is compiled in (include_str!), so this keeps the crate publishable.
       - name: Package
         if: runner.os == 'Linux'
