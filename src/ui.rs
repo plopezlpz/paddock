@@ -7,22 +7,28 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Command, Create, Hint, Menu, Mode, Rename, Status, Tab, View};
 use crate::edit::LineEdit;
 use crate::model::State;
-use crate::rows::{short_path, New, Row, RowKind};
+use crate::paths::AgentPath;
+use crate::rows::{fit, short_path, split_host, Filter, New, Row, RowKind};
 use crate::theme::{agent_icon, Theme};
 #[cfg(test)]
 use crate::theme::AgentIcons;
 
 /// Narrower than this (a phone), the compact layout.
 const COMPACT_BELOW: u16 = 80;
-/// The preview shows from this many inner columns (list and preview
-/// together), i.e. a popup at least 102 wide.
+/// Narrower than this, footer hints are words alone, to tap.
+const WORDS_BELOW: u16 = 60;
+/// The preview shows beside the list from this many inner columns (list and
+/// preview together), i.e. a popup at least 102 wide.
 const PREVIEW_FROM: u16 = 100;
+/// Narrower, it shows below the list in a popup this many rows high.
+const PREVIEW_BELOW_FROM: u16 = 24;
 /// Beside the preview, the list takes half the width, up to this: rows are
 /// rarely longer, and the rest serves the preview better.
 const LIST_MAX: u16 = 72;
@@ -40,25 +46,22 @@ fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     }
 }
 
-/// S cut to MAX display columns, ending in … when cut.
-fn fit(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
+/// TEXT in STYLE, as ROW shows it: the characters FILTER matched marked,
+/// if the row matches (not one listed for context).
+fn hl(text: String, style: Style, row: &Row, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
+    let hits = filter.filter(|_| row.score.is_some()).map(|f| f.hits(&text)).unwrap_or_default();
+    if hits.is_empty() {
+        return vec![Span::styled(text, style)];
     }
-    let mut out = String::new();
-    let mut w = 0;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw + 1 > max {
-            break;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, g) in text.graphemes(true).enumerate() {
+        let s = if hits.binary_search(&(i as u32)).is_ok() { style.patch(t.matched()) } else { style };
+        match spans.last_mut() {
+            Some(last) if last.style == s => last.content.to_mut().push_str(g),
+            _ => spans.push(Span::styled(g.to_string(), s)),
         }
-        out.push(c);
-        w += cw;
     }
-    if max > 0 {
-        out.push('…');
-    }
-    out
+    spans
 }
 
 /// Display columns SPANS take.
@@ -70,6 +73,30 @@ fn cols(spans: &[Span]) -> usize {
 fn push_right(line: &mut Vec<Span<'static>>, slot: Span<'static>, width: usize) {
     line.push(Span::raw(" ".repeat(width.saturating_sub(cols(line) + slot.width()))));
     line.push(slot);
+}
+
+/// SPANS cut to MAX columns, whole graphemes, each keeping its style.
+fn cut(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for s in spans {
+        if used + s.width() <= max {
+            used += s.width();
+            out.push(s);
+            continue;
+        }
+        let mut text = String::new();
+        for g in s.content.graphemes(true) {
+            if used + g.width() > max {
+                break;
+            }
+            used += g.width();
+            text.push_str(g);
+        }
+        out.push(Span::styled(text, s.style));
+        break;
+    }
+    out
 }
 
 /// A name being typed, in ROOM columns: bold around the cursor; empty, the
@@ -106,32 +133,38 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         x += name.len() as u16 + 2;
     }
     let counts = app.snap.counts;
-    let mut groups: Vec<[Span; 3]> = State::ALL
-        .into_iter()
-        .rev()
-        .filter(|&s| counts[s as usize] > 0)
-        .map(|s| [Span::raw(" "), dot(t, Some(s)), Span::raw(format!(" {}", counts[s as usize]))])
-        .collect();
-    // Drawn over the tabs where they meet: the least urgent states go
-    // first, so no count is left without its dot.
+    // Named, each ends in a space: a wider gap to the next.
+    let group = |s: State, named: bool| {
+        let n = counts[s as usize];
+        [Span::raw(" "), dot(t, Some(s)), Span::raw(if named { format!(" {n} {} ", s.label()) } else { format!(" {n}") })]
+    };
+    let urgent = State::ALL.into_iter().rev().filter(|&s| counts[s as usize] > 0);
     let fits = |g: &[[Span; 3]]| g.is_empty() || cols(&title) + g.iter().map(|g| cols(g)).sum::<usize>() + 4 <= area.width as usize;
+    // Named when they all fit; else the least urgent states go first, so no
+    // count is left without its mark.
+    let mut groups: Vec<[Span; 3]> = urgent.clone().map(|s| group(s, true)).collect();
+    if !fits(&groups) {
+        groups = urgent.map(|s| group(s, false)).collect();
+    }
     while !fits(&groups) {
         groups.pop();
     }
     let mut tally: Vec<Span> = groups.into_iter().flatten().collect();
-    if !tally.is_empty() {
+    if tally.last().is_some_and(|s| !s.content.ends_with(' ')) {
         tally.push(Span::raw(" "));
     }
     let mut frame = Block::new()
         .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
+        .border_set(if t.frame { border::ROUNDED } else { border::EMPTY })
         .border_style(t.border())
         // Titles are drawn over the border and would keep its dim or
         // colour: start from the terminal's plain text.
         .title_style(Style::new().fg(Color::Reset).remove_modifier(Modifier::DIM))
         .title(Line::from(title))
         .title(Line::from(tally).right_aligned());
-    if let Some(status) = &app.status {
+    // A server's trouble stays, under whatever is said meanwhile.
+    let trouble = app.trouble.clone().map(Status::Failed);
+    if let Some(status) = app.status.as_ref().or(trouble.as_ref()) {
         frame = frame.title_bottom(status_line(status, area.width.saturating_sub(4) as usize, t));
     }
     let inner = frame.inner(area);
@@ -144,26 +177,42 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
 
     draw_input(f, app, view.compact, pad(input), t);
 
-    view.preview_fits = body.width >= PREVIEW_FROM;
-    let (list, side) = if app.preview_on && view.preview_fits {
+    let beside = body.width >= PREVIEW_FROM;
+    view.preview_fits = beside || area.height >= PREVIEW_BELOW_FROM;
+    // Nothing listed: no preview either, and the list's hint has the room.
+    let (list, side) = if !(app.preview_on && view.preview_fits) || app.rows.is_empty() {
+        (body, None)
+    } else if beside {
         let [l, r] = Layout::horizontal([Constraint::Length((body.width / 2).min(LIST_MAX)), Constraint::Fill(1)]).areas(body);
         (l, Some(r))
     } else {
-        (body, None)
+        let [l, r] = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(body);
+        (l, Some(r))
     };
     draw_rows(f, app, view, pad(list), t);
     if let Some(side) = side {
-        let block = Block::new().borders(Borders::LEFT).border_style(t.border());
+        // Beside: a rule on its left and a title line over the screen; below:
+        // the title on the rule above it.
+        let (block, side, head) = if beside {
+            (Block::new().borders(Borders::LEFT), side, 2)
+        } else {
+            let title = fit(preview.title, (side.width as usize).saturating_sub(4));
+            let title = if title.is_empty() { title } else { format!(" {title} ") };
+            (Block::new().borders(Borders::TOP).title(Line::styled(title, t.muted())), pad(side), 0)
+        };
+        let block = block.border_style(t.border());
         let inner = pad(block.inner(side));
         f.render_widget(block, side);
-        let [head, text] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(inner);
-        f.render_widget(Paragraph::new(Line::styled(preview.title, t.muted())), head);
-        // Bottom-align the tail of the pane, like the end of a terminal.
+        let [head, text] = Layout::vertical([Constraint::Length(head), Constraint::Fill(1)]).areas(inner);
+        f.render_widget(Paragraph::new(Line::styled(fit(preview.title, head.width as usize), t.muted())), head);
+        // Bottom-align the tail of the pane, like the end of a terminal: the
+        // lines that show, by reference.
         let skip = preview.body.lines.len().saturating_sub(text.height as usize);
-        f.render_widget(Paragraph::new(preview.body.lines[skip..].to_vec()), text);
+        let tail = preview.body.lines[skip..].iter().map(|l| Line { spans: l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)).collect(), ..*l });
+        f.render_widget(Paragraph::new(tail.collect::<Vec<_>>()), text);
     }
 
-    draw_footer(f, app, view, pad(footer), t);
+    draw_footer(f, app, view, area.width < WORDS_BELOW, pad(footer), t);
     if let Mode::Menu(menu) = &app.mode {
         draw_menu(f, menu, app.selected, view, area, t);
     }
@@ -199,9 +248,12 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
     let right = if renaming {
         Span::styled("✎ renaming", Style::new().fg(t.accent))
     } else if let Mode::Create(c) = &app.mode {
-        Span::styled(if matches!(c.new, New::Window { .. }) { "+ new window" } else { "+ new session" }, Style::new().fg(t.accent))
+        Span::styled(format!("+ new {}", if matches!(c.new, New::Window { .. }) { app.caps.window() } else { "session" }), Style::new().fg(t.accent))
     } else if let Mode::Move(c) = &app.mode {
-        Span::styled(if compact { "⇅ moving".to_string() } else { format!("⇅ moving {}", c.label) }, Style::new().fg(t.accent))
+        // What is carried, in up to half the line: the query keeps the rest.
+        let room = (area.width as usize / 2).saturating_sub("⇅ moving ".width());
+        let text = if compact || room < 4 { "⇅ moving".to_string() } else { format!("⇅ moving {}", fit(&c.label, room)) };
+        Span::styled(text, Style::new().fg(t.accent))
     } else if !app.query.is_empty() {
         Span::styled(app.rows.iter().filter(|r| r.target.is_some() && r.score.is_some()).count().to_string(), t.muted())
     } else {
@@ -222,36 +274,33 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
     f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), side);
 }
 
-/// Key hints that are also buttons; compact (a phone, tapped) they are
-/// words alone. The last (close, cancel) keeps the right edge; when the rest
-/// doesn't fit, the least needed fold into a ⋯ that opens the row's menu.
-fn draw_footer(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
-    let compact = view.compact;
+/// Key hints that are also buttons; very narrow (a phone, tapped) they are
+/// words alone (WORDS). The last (close, cancel) keeps the right edge; when
+/// the rest doesn't fit, the least needed go (the list's menu, always
+/// shown, has them all).
+fn draw_footer(f: &mut Frame, app: &App, view: &mut View, words: bool, area: Rect, t: &Theme) {
     let (hints, last) = app.hints(view);
-    let text = |h: &Hint| if compact { h.label.clone() } else { format!("{} {}", h.key, h.label) };
+    let text = |h: &Hint| if words { h.label.clone() } else { format!("{} {}", h.key, h.label) };
     let room = (area.width as usize).saturating_sub(text(&last).width() + GAP.len());
-    // Columns the SHOWN hints take, with a ⋯ after them if MORE.
-    let total = |shown: &[bool], more: bool| {
+    // Columns the SHOWN hints take.
+    let total = |shown: &[bool]| {
         let widths: Vec<usize> = hints.iter().zip(shown).filter(|(_, s)| **s).map(|(h, _)| text(h).width()).collect();
-        let n = widths.len() + usize::from(more);
-        widths.iter().sum::<usize>() + usize::from(more) + n.saturating_sub(1) * GAP.len()
+        widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * GAP.len()
     };
     let mut shown = vec![true; hints.len()];
-    // Only the list has a menu to fold into.
-    let more = matches!(app.mode, Mode::List) && total(&shown, false) > room;
-    if total(&shown, false) > room {
+    if total(&shown) > room {
         shown = vec![false; hints.len()];
         let mut order: Vec<usize> = (0..hints.len()).collect();
         order.sort_by_key(|&i| hints[i].rank);
         for i in order {
             shown[i] = true;
-            if total(&shown, more) > room {
+            if total(&shown) > room {
                 shown[i] = false;
             }
         }
     }
     let style = |h: &Hint| -> Vec<Span<'static>> {
-        if compact {
+        if words {
             vec![Span::styled(h.label.clone(), Style::new().fg(t.hint))]
         } else {
             vec![Span::styled(h.key, Style::new().fg(t.hint)), Span::styled(format!(" {}", h.label), t.muted())]
@@ -269,82 +318,138 @@ fn draw_footer(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme)
         spans.extend(style(h));
         x += w;
     }
-    if more {
-        if !spans.is_empty() {
-            spans.push(Span::raw(GAP));
-            x += GAP.len() as u16;
-        }
-        // The ⋯ is a wider target than its one column.
-        view.buttons.push((Rect::new(x.saturating_sub(1), area.y, 3.min(area.right().saturating_sub(x) + 1), 1), Command::Menu));
-        spans.push(Span::styled("⋯", Style::new().fg(t.hint)));
-    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     let w = (text(&last).width() as u16).min(area.width);
     view.buttons.push((Rect::new(area.right() - w, area.y, w, 1), last.command));
     f.render_widget(Paragraph::new(Line::from(style(&last))).right_aligned(), area);
 }
 
-/// A row's lines, and the column of its ▸/▾ (a window with panes).
-fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) -> (Vec<Line<'static>>, Option<u16>) {
+/// Keep the same width-aware path/branch formatter in both tabs. Pane counts
+/// remain supplemental: omit them when they would crowd out the Git suffix.
+fn window_detail(path: &AgentPath, panes: usize, width: usize) -> String {
+    let label = path.display(width);
+    if panes > 1 {
+        let count = format!(" · {panes} panes");
+        if label.width() + count.width() <= width {
+            return format!("{label}{count}");
+        }
+        if width >= count.width() + 5 {
+            return format!("{}{count}", path.display(width - count.width()));
+        }
+    }
+    label
+}
+
+/// A row's lines, and the column of its ▸/▾ (a window with panes). The
+/// selected row's main text is bold in the accent; FILTER marks matches.
+/// WIN: what a window is called.
+fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Option<&Filter>, win: &str, t: &Theme) -> (Vec<Line<'static>>, Option<u16>) {
     let width = width as usize;
     let mark = if selected { Span::styled("▌", Style::new().fg(t.accent)) } else { Span::raw(" ") };
-    let sel = |s: Style| if selected { s.add_modifier(Modifier::BOLD) } else { s };
+    let main = |s: Style| if selected { t.selected() } else { s };
+    let marked = |text: String, style: Style| hl(text, style, row, filter, t);
     let tree = |s: &str| Span::styled(s.to_string(), t.muted());
     match &row.kind {
-        RowKind::Session { name, windows, current } => {
-            // The badge's padding stands in for the gap, so names line up.
-            let mut line = if *current {
-                vec![mark, Span::styled(format!(" {name} "), t.badge())]
-            } else {
-                vec![mark, Span::raw(" "), Span::styled(name.clone(), sel(bold()))]
+        RowKind::Session { name, host, away, windows, current } => {
+            let mut line = vec![mark, Span::raw(" ")];
+            let room = width.saturating_sub(cols(&line) + usize::from(*current));
+            // Where it is, and that its server is failing (the status line
+            // says why): the row is then the last it said.
+            let at = if host.is_empty() { String::new() } else { format!("  @{host}") };
+            let failing = match (away, host.is_empty()) {
+                (false, _) => "",
+                (true, true) => "  not answering",
+                (true, false) => " · away",
             };
-            if !compact {
-                let n = if *windows == 1 { "1 window".to_string() } else { format!("{windows} windows") };
-                line.push(Span::styled(format!("  {n}"), t.muted()));
+            // Said whole or not at all: cut, only its colour would say it.
+            let failing = if failing.width() + 4 > room { "" } else { failing };
+            let n = if *windows == 1 { format!("1 {win}") } else { format!("{windows} {win}s") };
+            // A long name drops the count first, then cuts the host down to
+            // what leaves the name half the line.
+            let count = if compact || name.width() + at.width() + failing.width() + n.width() + 2 > room { String::new() } else { format!("  {n}") };
+            let at_room = at.width().min(room.saturating_sub(failing.width() + name.width().min(room / 2)));
+            let at = if at_room < at.width().min(5) { String::new() } else { fit(&at, at_room) };
+            line.extend(marked(fit(name, room.saturating_sub(at.width() + failing.width() + count.width())), main(Style::new())));
+            // The one the client shows, as tmux marks its current window.
+            if *current {
+                line.push(Span::styled("*", Style::new().fg(t.accent)));
+            }
+            if !at.is_empty() {
+                line.extend(marked(at, if *away { t.state(State::Asking) } else { Style::new().fg(t.hint) }));
+            }
+            // No name to match: never underlined as one.
+            if !failing.is_empty() {
+                line.push(Span::styled(failing, t.state(State::Asking)));
+            }
+            if !count.is_empty() {
+                line.push(Span::styled(count, t.muted()));
             }
             (vec![Line::from(line)], None)
         }
-        RowKind::Window { index, name, meta, state, active, last, expanded } => {
+        RowKind::Window { index, name, path, panes, state, active, last, expanded } => {
             let idx = if *active { Style::new().fg(t.accent) } else { t.muted() };
             let mut first = vec![mark.clone(), tree(if *last { " └─ " } else { " ├─ " }), Span::styled(format!("{index} "), idx), dot(t, *state), Span::raw(" ")];
             let indent = cols(&first);
-            first.push(Span::styled(name.clone(), sel(Style::new())));
+            // The name gets what the toggle and the folder leave; when both
+            // are long, the folder keeps half (compact, it has its own line).
+            let room = width.saturating_sub(indent + if expanded.is_some() { 2 } else { 0 });
+            let detail = if compact { 0 } else { Some(window_detail(path, *panes, usize::MAX).width()).filter(|w| *w > 0).map_or(0, |w| w + 2) };
+            let name_room = name.width().min(room.saturating_sub(detail).max(if compact { room } else { room / 2 }));
+            first.extend(marked(fit(name, name_room), main(Style::new())));
             let toggle = expanded.map(|open| {
                 let at = cols(&first) + 1;
                 first.push(Span::styled(if open { " ▾" } else { " ▸" }, t.muted()));
                 at as u16
             });
             if !compact {
-                first.push(Span::styled(format!("  {meta}"), t.muted()));
+                let detail = window_detail(path, *panes, width.saturating_sub(cols(&first) + 2));
+                if !detail.is_empty() {
+                    first.extend(marked(format!("  {detail}"), t.muted()));
+                }
                 return (vec![Line::from(first)], toggle);
             }
             // Compact: the folder under the name.
             let mut second = vec![mark, tree(if *last { "    " } else { " │  " })];
             second.push(Span::raw(" ".repeat(indent.saturating_sub(cols(&second)))));
-            second.push(Span::styled(fit(meta, width.saturating_sub(indent)), t.muted()));
+            second.extend(marked(window_detail(path, *panes, width.saturating_sub(indent)), t.muted()));
             (vec![Line::from(first), Line::from(second)], toggle)
         }
-        RowKind::Pane { index, command, state, last, parent_last } => (
-            vec![Line::from(vec![
+        RowKind::Pane { index, command, state, last, parent_last } => {
+            let mut line = vec![
                 mark,
                 tree(if *parent_last { "    " } else { " │  " }),
                 tree(if *last { "└─ " } else { "├─ " }),
                 Span::styled(format!(".{index} "), t.muted()),
                 dot(t, *state),
                 Span::raw(" "),
-                Span::styled(command.clone(), sel(Style::new())),
-            ])],
-            None,
-        ),
-        RowKind::Agent { title, .. } => {
+            ];
+            line.extend(marked(command.clone(), main(Style::new())));
+            (vec![Line::from(line)], None)
+        }
+        RowKind::Agent { title, note, state, .. } => {
             let mut second = agent_detail_prefix(row, mark.clone(), t);
             let room = width.saturating_sub(cols(&second));
-            second.push(if title.is_empty() {
-                Span::styled(fit("untitled", room), t.muted().add_modifier(Modifier::ITALIC))
+            if title.is_empty() && !note.is_empty() {
+                // No title: the note has the line, not "untitled".
+                second.extend(marked(fit(note, room), t.state(*state)));
             } else {
-                Span::styled(fit(title, room), t.muted())
-            });
-            (card_lines(Line::from(second), mark, row, width, t), None)
+                // The note (on a waiting agent, what it waits for) gets what
+                // the title leaves, and half the line when both are long.
+                let title_w = if title.is_empty() { "untitled".width() } else { title.width() };
+                let note_w = if note.is_empty() { 0 } else { note.width() + 3 };
+                let note_room = note_w.min(room.saturating_sub(title_w).max(room / 2));
+                let title_room = room.saturating_sub(note_room);
+                if title.is_empty() {
+                    second.push(Span::styled(fit("untitled", title_room), t.muted().add_modifier(Modifier::ITALIC)));
+                } else {
+                    second.extend(marked(fit(title, title_room), t.muted()));
+                }
+                if note_room > 3 {
+                    second.push(Span::styled(" · ", t.muted()));
+                    second.extend(marked(fit(note, note_room - 3), t.state(*state)));
+                }
+            }
+            (card_lines(Line::from(second), mark, row, width, selected, filter, t), None)
         }
         RowKind::Header { label, count, gap } => {
             let line = Line::from(vec![
@@ -355,7 +460,7 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
         }
         RowKind::Hidden { count, expanded, gap } => {
             let label = format!(" {} hidden · {count}", if *expanded { "▾" } else { "▸" });
-            let line = Line::from(vec![mark, Span::styled(fit(&label, width.saturating_sub(1)), sel(t.muted().add_modifier(Modifier::BOLD)))]);
+            let line = Line::from(vec![mark, Span::styled(fit(&label, width.saturating_sub(1)), main(t.muted().add_modifier(Modifier::BOLD)))]);
             (if *gap && !compact { vec![Line::raw(""), line] } else { vec![line] }, None)
         }
         // Only listed while it is being named: see create_lines.
@@ -363,28 +468,30 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, t: &Theme) ->
     }
 }
 
-/// The "+ new" row being named: the field where the window or session will
-/// appear, then its folder; the reason a name was refused at the end.
-fn create_lines(c: &Create, compact: bool, width: u16, home: &str, t: &Theme) -> Vec<Line<'static>> {
+/// The "+ new" row being named: the field where the window (WIN) or session
+/// will appear, then its folder; the reason a name was refused at the end.
+fn create_lines(c: &Create, compact: bool, width: u16, home: &str, win: &str, t: &Theme) -> Vec<Line<'static>> {
     let w = width as usize;
     let mut line = vec![Span::styled("▌", Style::new().fg(t.accent))];
     let (placeholder, dir) = match &c.new {
         New::Window { dir, .. } => {
             line.push(Span::styled(" ├─ ", t.muted()));
-            (if compact { "name (or automatic)" } else { "window name (empty: named after what runs)" }, dir)
+            (if compact { "name (or automatic)".to_string() } else { format!("{win} name (empty: named after what runs)") }, dir)
         }
         New::Session { dir } => {
             line.push(Span::raw(" "));
-            ("session name", dir)
+            ("session name".to_string(), dir)
         }
     };
     line.push(Span::styled("+ ", Style::new().fg(t.accent).add_modifier(Modifier::BOLD)));
-    let place = if compact { String::new() } else { format!("  {}", short_path(dir, home)) };
+    // The folder takes at most half of what is left: the name comes first.
+    let room = w.saturating_sub(cols(&line)) / 2;
+    let place = if compact || room < 6 { String::new() } else { format!("  {}", fit(&short_path(dir, home), room - 2)) };
     // The reason gets what the name and folder leave.
     let spare = w.saturating_sub(cols(&line) + place.width() + c.field.text().width().max(8) + 4);
     let slot = c.error.as_ref().map(|e| Span::styled(format!("✗ {}", fit(e, spare.max(12))), t.state(State::Asking)));
     let room = w.saturating_sub(cols(&line) + place.width() + slot.as_ref().map_or(0, |s| s.width() + 2));
-    line.extend(field_spans(&c.field, placeholder, room, t));
+    line.extend(field_spans(&c.field, &placeholder, room, t));
     line.push(Span::styled(place, t.muted()));
     if let Some(slot) = slot {
         push_right(&mut line, slot, w);
@@ -410,13 +517,38 @@ fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'s
 }
 
 /// Directory-first cards stay two lines in both layouts. SECOND is either
-/// the topic label or its editor; the bright identity line never moves.
-fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usize, t: &Theme) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, kind, path, .. } = &row.kind else { return vec![second] };
+/// the topic label or its editor; the bright identity line (its path, in
+/// the accent when SELECTED) never moves. A host's `host:` is in the hint
+/// colour, as Sessions shows `@host`; under a folder header the path would
+/// repeat, the session and window stand in for it, muted.
+fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
+    let RowKind::Agent { state, kind, path, host, place, .. } = &row.kind else { return vec![second] };
+    let identity = if selected { t.selected() } else { bold() };
     let icon = Span::styled(agent_icon(kind, t.agent_icons), bold());
     let padding = 3usize.saturating_sub(icon.width());
     let mut first = vec![mark, Span::raw(" "), dot(t, Some(*state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))];
-    first.push(Span::styled(path.display(width.saturating_sub(cols(&first))), bold()));
+    let room = width.saturating_sub(cols(&first));
+    let hinted = Style::new().fg(t.hint);
+    // The host, where the path doesn't say it (none, or not shown).
+    let at = if host.is_empty() || (place.is_none() && split_host(&path.full).0 == host) { String::new() } else { format!("  @{host}") };
+    let at = if at.width() > room / 2 { String::new() } else { at };
+    let room = room - at.width();
+    match place {
+        Some(place) => first.extend(hl(fit(place, room), if selected { identity } else { t.muted() }, row, filter, t)),
+        None => {
+            let text = path.display(room);
+            match text.strip_prefix(host.as_str()).filter(|rest| !host.is_empty() && rest.starts_with(':')) {
+                Some(rest) => {
+                    first.extend(hl(format!("{host}:"), hinted, row, filter, t));
+                    first.extend(hl(rest[1..].to_string(), identity, row, filter, t));
+                }
+                None => first.extend(hl(text, identity, row, filter, t)),
+            }
+        }
+    }
+    if !at.is_empty() {
+        first.extend(hl(at, hinted, row, filter, t));
+    }
     vec![Line::from(first), second]
 }
 
@@ -427,7 +559,9 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
     let mark = Span::styled("▌", Style::new().fg(t.accent));
     let slot = match (&r.suggesting, &r.error) {
         (Some(_), _) => Some(Span::styled(if compact { "✦ suggesting" } else { "✦ suggesting…" }, Style::new().fg(t.hint))),
-        (None, Some(e)) => Some(Span::styled(format!("✗ {}", fit(e, (w / 2).max(12))), t.state(State::Asking))),
+        // Half the row, or what a short name leaves of it: the reason a
+        // save was refused is the whole of what the server said.
+        (None, Some(e)) => Some(Span::styled(format!("✗ {}", fit(e, (w / 2).max(12).max(w.saturating_sub(r.field.text().width() + 20)))), t.state(State::Asking))),
         (None, None) if r.field.is_empty() && !r.placeholder.is_empty() => Some(Span::styled("automatic", t.muted())),
         _ => None,
     };
@@ -444,12 +578,12 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
         if let Some(slot) = slot {
             push_right(&mut second, slot, w);
         }
-        return card_lines(Line::from(second), mark, row, w, t);
+        return card_lines(Line::from(second), mark, row, w, true, None, t);
     }
     // What comes before the name, as the row draws it.
     let (mut first, rest) = match &row.kind {
         RowKind::Window { .. } => {
-            let (mut lines, _) = row_lines(row, true, compact, width, t);
+            let (mut lines, _) = row_lines(row, true, compact, width, None, "window", t);
             let line = lines.remove(0);
             // The tree, index and dot: everything up to the name.
             let prefix: Vec<Span<'static>> = line.spans.into_iter().take(5).collect();
@@ -476,11 +610,16 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
     };
     let mut y = area.y;
     let mut lines = Vec::new();
+    // The row on the list's last line.
+    let mut bottom = None;
     for (i, row) in app.rows.iter().enumerate().skip(view.offset) {
         if y >= area.bottom() {
             break;
         }
         let h = row.height(view.compact);
+        if y + h >= area.bottom() {
+            bottom = Some(i);
+        }
         if let Some(target) = &row.target {
             // A row cut off at the bottom is only clickable where it shows.
             view.rows.push((Rect::new(area.x, y, area.width, h.min(area.bottom() - y)), i, target.clone()));
@@ -494,8 +633,8 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         }
         let (mut drawn, toggle) = match (&app.mode, renaming.filter(|r| row.target.as_ref() == Some(&r.target))) {
             (_, Some(r)) => (rename_lines(row, r, view.compact, area.width, t), None),
-            (Mode::Create(c), None) if matches!(row.kind, RowKind::New) => (create_lines(c, view.compact, area.width, app.home(), t), None),
-            _ => row_lines(row, i == app.selected, view.compact, area.width, t),
+            (Mode::Create(c), None) if matches!(row.kind, RowKind::New) => (create_lines(c, view.compact, area.width, app.home(), app.caps.window(), t), None),
+            _ => row_lines(row, i == app.selected, view.compact, area.width, Some(&app.filter), app.caps.window(), t),
         };
         if let Mode::Move(carry) = &app.mode {
             if row.target.as_ref() == Some(&carry.target)
@@ -532,12 +671,58 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
     }
     if app.rows.is_empty() {
         let msg = match app.tab {
-            Tab::Agents if app.query.text().trim().is_empty() => "no agents running",
-            _ => "no matches",
+            // What to do about it, on the server it runs on.
+            Tab::Agents if app.query.text().trim().is_empty() && app.caps.rex => {
+                "no agents running\n\nagents show here once they report their state to Rex (Claude Code and pi do by themselves)"
+            }
+            Tab::Agents if app.query.text().trim().is_empty() => {
+                "no agents running\n\nagents show here once agent-status.tmux reports their state (README: Agent state)"
+            }
+            _ => "no matches · esc clears the filter",
         };
-        lines.push(Line::styled(format!("  {msg}"), t.muted()));
+        let area = Rect { x: area.x + 2, width: area.width.saturating_sub(2), ..area };
+        f.render_widget(Paragraph::new(msg).style(t.muted()).wrap(Wrap { trim: true }), area);
+        return;
+    }
+    // What the list holds past either edge, at the right end of the line
+    // above it (the blank under the input) and of its last line.
+    let (above, below) = beyond(&app.rows, view.offset, view.compact, area.height);
+    let width = area.width as usize;
+    let more = |arrow: &str, n: usize| Span::styled(format!("{arrow} {n} more"), t.muted());
+    if above > 0 && area.y > 0 && area.height > 0 {
+        let up = more("↑", above);
+        f.render_widget(Paragraph::new(Line::from(up)).right_aligned(), Rect { y: area.y - 1, height: 1, ..area });
+    }
+    if below > 0 && let Some(last) = (area.height as usize).checked_sub(1).and_then(|i| lines.get_mut(i)) {
+        let down = more("↓", below);
+        // Over the end of a row that is not the selected one: that one's
+        // (a note, a field being typed in, what ⏎ does) is read, so there
+        // the mark shows only beside it.
+        let keep = if bottom == Some(app.selected) { last.width() + 2 } else { 0 };
+        if width > down.width() + 1 && keep + down.width() <= width {
+            let at = width - down.width() - 1;
+            let mut spans = cut(std::mem::take(&mut last.spans), at);
+            push_right(&mut spans, down, width);
+            last.spans = spans;
+            // A toggle it covers is not there to be clicked.
+            let (edge, y) = (area.x + at as u16, area.bottom() - 1);
+            view.toggles.retain(|(r, _)| r.y != y || r.right() <= edge);
+        }
     }
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// How many selectable rows (with a target, or the hidden heading) are out
+/// of view above OFFSET and, in HEIGHT lines from it, below or cut off.
+fn beyond(rows: &[Row], offset: usize, compact: bool, height: u16) -> (usize, usize) {
+    let selectable = |r: &&Row| r.target.is_some() || matches!(r.kind, RowKind::Hidden { .. });
+    let mut used = 0;
+    let shown = rows.iter().skip(offset).take_while(|r| {
+        used += r.height(compact);
+        used <= height
+    });
+    let end = offset + shown.count();
+    (rows[..offset.min(rows.len())].iter().filter(selectable).count(), rows[end.min(rows.len())..].iter().filter(selectable).count())
 }
 
 /// The open menu, a box hanging from its anchor (from the SELECTED row
@@ -563,8 +748,20 @@ fn draw_menu(f: &mut Frame, menu: &Menu, selected: usize, view: &mut View, area:
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     view.menu = Some(rect);
+    // Scrolled so the selected item shows; the borders say what is past
+    // them. Items record their own index: a click runs what it shows.
+    let rows = inner.height as usize;
+    let top = (menu.selected + 1).saturating_sub(rows);
+    let n = menu.items.len();
+    if top > 0 && rect.width > 6 && rows > 0 {
+        f.render_widget(Paragraph::new(Line::styled(format!("↑{top}"), t.muted())).right_aligned(), Rect { x: rect.x + 1, width: rect.width - 2, height: 1, ..rect });
+    }
+    if n > top + rows && rect.width > 6 && rows > 0 {
+        let below = Rect { x: rect.x + 1, y: rect.bottom() - 1, width: rect.width - 2, height: 1 };
+        f.render_widget(Paragraph::new(Line::styled(format!("↓{}", n - top - rows), t.muted())).right_aligned(), below);
+    }
     let mut lines = Vec::new();
-    for (i, item) in menu.items.iter().enumerate().take(inner.height as usize) {
+    for (row, (i, item)) in menu.items.iter().enumerate().skip(top).take(rows).enumerate() {
         let gap = (inner.width as usize).saturating_sub(item.label.width() + item.key.width() + 2);
         let chosen = i == menu.selected;
         let style = if chosen { Style::new().fg(t.accent).add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::new() };
@@ -573,7 +770,7 @@ fn draw_menu(f: &mut Frame, menu: &Menu, selected: usize, view: &mut View, area:
             Span::styled(format!(" {}{}", item.label, " ".repeat(gap)), style),
             Span::styled(format!("{} ", item.key), key),
         ]));
-        view.items.push((Rect::new(inner.x, inner.y + i as u16, inner.width, 1), i));
+        view.items.push((Rect::new(inner.x, inner.y + row as u16, inner.width, 1), i));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -585,29 +782,40 @@ mod tests {
     #[test]
     fn rows_draw_as_many_lines_as_they_are_high() {
         let kinds = [
-            RowKind::Session { name: "s".into(), windows: 2, current: true },
-            RowKind::Window { index: "1".into(), name: "w".into(), meta: "~/a".into(), state: None, active: true, last: false, expanded: Some(false) },
+            RowKind::Session { name: "s".into(), host: "devbox".into(), away: false, windows: 2, current: true },
+            RowKind::Window { index: "1".into(), name: "w".into(), path: AgentPath::plain("~/a", ""), panes: 2, state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into() },
+            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), note: "n".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into(), host: String::new(), place: None },
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
             RowKind::Hidden { count: 2, expanded: false, gap: false },
             RowKind::Hidden { count: 2, expanded: true, gap: true },
         ];
-        let t = Theme::from_values(&[]);
+        let t = Theme::default();
         for kind in kinds {
             let row = Row { target: None, kind, preview: None, score: None };
             for compact in [false, true] {
-                assert_eq!(row_lines(&row, true, compact, 40, &t).0.len(), row.height(compact) as usize, "compact: {compact}");
+                assert_eq!(row_lines(&row, true, compact, 40, None, "window", &t).0.len(), row.height(compact) as usize, "compact: {compact}");
             }
         }
+    }
+
+    #[test]
+    fn an_untitled_agents_note_has_the_line() {
+        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: String::new(), note: "Allow edit to token.rs?".into(), path: AgentPath::plain("~/p", ""), age: "<1m".into(), host: String::new(), place: None };
+        let row = Row { target: None, kind, preview: None, score: None };
+        let text: String = row_lines(&row, false, false, 40, None, "window", &Theme::default()).0.iter().map(|l| l.to_string() + "\n").collect();
+        assert!(text.contains("Allow edit to token.rs?") && !text.contains("untitled"), "{text}");
     }
 
     #[test]
     fn agent_cards_put_bright_identity_above_muted_age_and_topic() {
         let cases = [("claude", "✳", "\u{ec82}"), ("codex", "›_", "\u{ec81}"), ("pi", "π", "π"), ("opencode", "◇", "\u{f0763}"), ("gemini", "✦", "\u{ec10}"), ("custom", "▣", "▣"), ("", "▣", "▣")];
         for (mode, kind, icon) in cases.into_iter().flat_map(|(kind, unicode, nerd)| [(AgentIcons::Unicode, kind, unicode), (AgentIcons::Nerd, kind, nerd)]) {
-            let mut t = Theme::from_values(&["", if mode == AgentIcons::Nerd { "colour8" } else { "" }]);
+            let mut t = Theme::default();
+            if mode == AgentIcons::Nerd {
+                t.set("muted", "colour8");
+            }
             t.agent_icons = mode;
             assert_eq!(agent_icon(kind, mode), icon);
             assert!(icon.width() <= 2);
@@ -617,21 +825,21 @@ mod tests {
                         let row = Row {
                             target: None,
                             kind: RowKind::Agent {
-                                state: State::Working, stale, kind: kind.into(), title: "task".into(),
-                                path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(),
+                                state: State::Working, stale, kind: kind.into(), title: "task".into(), note: String::new(),
+                                path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(), host: String::new(), place: None,
                             },
                             preview: None, score: None,
                         };
                         for width in [24, 40, 72] {
-                            let (lines, _) = row_lines(&row, true, compact, width, &t);
+                            let (lines, _) = row_lines(&row, true, compact, width, None, "window", &t);
                             assert!(lines.iter().all(|l| l.width() <= width as usize), "{kind}: {lines:?}");
                             let identity = lines[0].to_string();
                             let detail = lines[1].to_string();
-                            assert!(identity.starts_with(&format!("▌ ● {icon}")), "{identity}");
+                            assert!(identity.starts_with(&format!("▌ ◐ {icon}")), "{identity}");
                             assert!(!identity.contains("task"), "{identity}");
                             let mark = lines[0].spans.iter().find(|s| s.content == icon).unwrap();
                             assert_eq!(mark.style, bold(), "{kind}: bright provider icon");
-                            assert_eq!(lines[0].spans.last().unwrap().style, bold(), "bright path");
+                            assert_eq!(lines[0].spans.last().unwrap().style, t.selected(), "bright path, selected");
                             assert_eq!(lines[1].spans.last().unwrap().style, t.muted(), "muted topic");
                             assert!(detail.ends_with("task"), "{detail}");
                             if width == 72 {
@@ -650,15 +858,15 @@ mod tests {
 
     #[test]
     fn elapsed_time_matches_the_state_while_the_topic_stays_muted() {
-        let t = Theme::from_values(&[]);
+        let t = Theme::default();
         for state in State::ALL {
             let row = Row {
                 target: None, preview: None, score: None,
                 kind: RowKind::Agent { state, stale: false, kind: "pi".into(),
-                    title: "Branch labels".into(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into() },
+                    title: "Branch labels".into(), note: String::new(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into(), host: String::new(), place: None },
             };
             for compact in [false, true] {
-                let lines = row_lines(&row, false, compact, 40, &t).0;
+                let lines = row_lines(&row, false, compact, 40, None, "window", &t).0;
                 let age = lines[1].spans.iter().find(|s| s.content.contains("5m")).unwrap();
                 assert_eq!(age.style, t.state(state));
                 assert_eq!(lines[1].spans.last().unwrap().style, t.muted());
@@ -668,7 +876,7 @@ mod tests {
 
     #[test]
     fn compact_agent_editor_fits_long_errors_after_stale_metadata() {
-        let snap = crate::model::fixture(&["$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|one||||/a"]);
+        let snap = crate::backend::tmux::fixture(&["$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|one||||/a"]);
         let mut app = App::new(snap, Tab::Agents, "$1".into(), "@1".into(), String::new(), true, false);
         if let RowKind::Agent { age, stale, .. } = &mut app.rows[app.selected].kind {
             *age = "5m".into(); *stale = true;
@@ -676,7 +884,7 @@ mod tests {
         app.run(Command::Rename);
         let Mode::Rename(r) = &mut app.mode else { panic!("not renaming") };
         r.error = Some("pi timed out after 30s".into());
-        let t = Theme::from_values(&[]);
+        let t = Theme::default();
         for width in [24, 36, 40, 72] {
             let lines = rename_lines(&app.rows[app.selected], r, true, width, &t);
             assert!(lines.iter().all(|l| l.width() <= width as usize), "{width}: {lines:?}");
@@ -689,10 +897,302 @@ mod tests {
     }
 
     #[test]
+    fn session_window_paths_use_the_shared_formatter_and_fit_both_layouts() {
+        let t = Theme::default();
+        let path = AgentPath::plain("~/source/project/日本語/src", "");
+        for panes in [1, 2, 100] {
+            let row = Row {
+                target: None, preview: None, score: None,
+                kind: RowKind::Window { index: "1".into(), name: "work".into(), path: path.clone(), panes,
+                    state: Some(State::Working), active: true, last: true, expanded: (panes > 1).then_some(false) },
+            };
+            for compact in [false, true] {
+                for width in [24, 40, 72, 120] {
+                    let (lines, toggle) = row_lines(&row, true, compact, width, None, "window", &t);
+                    assert_eq!(lines.len(), if compact { 2 } else { 1 });
+                    assert!(lines.iter().all(|l| l.width() <= width as usize), "{lines:?}");
+                    assert_eq!(toggle.is_some(), panes > 1);
+                    assert_eq!(lines.last().unwrap().spans.last().unwrap().style, t.muted());
+                    if width == 120 {
+                        assert!(lines.last().unwrap().to_string().contains(&path.display(100)));
+                        assert_eq!(lines.last().unwrap().to_string().contains("panes"), panes > 1);
+                    }
+                }
+            }
+        }
+        let short = AgentPath::plain("~/a", "");
+        assert_eq!(window_detail(&short, 2, 13), "~/a · 2 panes", "keep the count when a short path fits exactly");
+        assert_eq!(window_detail(&short, 2, 12), "~/a", "omit the count when there is insufficient room");
+        for width in 0..100 {
+            assert_eq!(window_detail(&path, 1, width), path.display(width));
+            assert!(window_detail(&path, 2, width).width() <= width);
+        }
+    }
+
+    #[test]
     fn fits_by_display_width() {
         assert_eq!(fit("abcdef", 6), "abcdef");
         assert_eq!(fit("abcdef", 4), "abc…");
         assert_eq!(fit("日本語テキスト", 7), "日本語…");
         assert_eq!(fit("abc", 0), "");
+    }
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn render(app: &App, view: &mut View, width: u16, height: u16, title: &str) -> Terminal<TestBackend> {
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let body = Text::default();
+        term.draw(|f| draw(f, app, view, &Preview { title, body: &body }, &Theme::default())).unwrap();
+        term
+    }
+
+    fn screen(term: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = term.backend().buffer();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    fn agent(title: &str, note: &str, path: &str) -> Row {
+        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: title.into(), note: note.into(), path: AgentPath::plain(path, ""), age: "<1m".into(), host: String::new(), place: None };
+        Row { target: None, kind, preview: None, score: None }
+    }
+
+    #[test]
+    fn a_note_takes_the_room_a_short_title_leaves() {
+        let t = Theme::default();
+        let line = |title: &str, note: &str, width: u16| row_lines(&agent(title, note, "~/p"), false, false, width, None, "window", &t).0[1].to_string();
+        assert!(line("Fix bug", "Allow edit to main.rs?", 40).ends_with("Fix bug · Allow edit to main.r…"), "{}", line("Fix bug", "Allow edit to main.rs?", 40));
+        assert!(line("Fix bug", "Allow edit?", 40).ends_with("Fix bug · Allow edit?"));
+        // Both long: half each.
+        let both = line("Refactor the session parser", "Allow edit to src/backend/rex.rs?", 40);
+        assert!(both.contains("Refactor the se… · Allow edit …"), "{both}");
+        for width in 0..100 {
+            for (title, note) in [("Fix bug", "Allow edit to main.rs?"), ("", "Allow 👨‍👩‍👧 edit?"), ("👍🏽 ok ❤️", ""), ("a ☺️ b", "x")] {
+                let lines = row_lines(&agent(title, note, "~/p"), true, false, width, None, "window", &t).0;
+                assert!(lines.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}: {lines:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn long_session_and_window_names_are_fitted_beside_their_details() {
+        let t = Theme::default();
+        let name = "pablo@pmac: ~/source/dac/core/b2m-dac-core";
+        let window = Row {
+            target: None, preview: None, score: None,
+            kind: RowKind::Window { index: "1".into(), name: name.into(), path: AgentPath::plain("~/source/dac/core/b2m-dac-core", ""), panes: 2,
+                state: Some(State::Working), active: true, last: false, expanded: Some(false) },
+        };
+        let session = Row {
+            target: None, preview: None, score: None,
+            kind: RowKind::Session { name: name.into(), host: "devbox".into(), away: false, windows: 3, current: true },
+        };
+        for width in 12..120u16 {
+            for compact in [false, true] {
+                let (lines, toggle) = row_lines(&window, false, compact, width, None, "window", &t);
+                assert!(lines.iter().all(|l| l.width() <= width as usize), "{width}: {lines:?}");
+                let first = lines[0].to_string();
+                let at = toggle.unwrap() as usize;
+                assert_eq!(first.chars().nth(at), Some('▸'), "{width}: the toggle stays on the row: {first}");
+                let (lines, _) = row_lines(&session, false, compact, width, None, "window", &t);
+                assert!(lines[0].width() <= width as usize, "{width}: {lines:?}");
+            }
+        }
+        let first = row_lines(&window, false, false, 80, None, "window", &t).0[0].to_string();
+        assert!(first.contains("pablo@pmac: ~/source/dac/core/b2m… ▸  ~/source/dac/core/b2m-… · 2 panes"), "the path keeps half: {first}");
+        let short = Row { kind: RowKind::Window { index: "1".into(), name: "ml".into(), path: AgentPath::plain("~/source/dac/core/b2m-dac-core", ""), panes: 1,
+            state: None, active: true, last: true, expanded: None }, ..window };
+        assert!(row_lines(&short, false, false, 50, None, "window", &t).0[0].to_string().ends_with("ml  ~/source/dac/core/b2m-dac-core"), "a short name leaves the path its room");
+        let first = row_lines(&session, false, false, 40, None, "window", &t).0[0].to_string();
+        assert!(first.contains('…') && first.contains("*  @devbox") && !first.contains("windows"), "{first}");
+        assert!(row_lines(&session, false, false, 80, None, "window", &t).0[0].to_string().ends_with(&format!("{name}*  @devbox  3 windows")));
+        // A server that is failing: its rows are the last it said.
+        let row = |host: &str| Row { target: None, preview: None, score: None, kind: RowKind::Session { name: "api".into(), host: host.into(), away: true, windows: 1, current: false } };
+        let line = |host: &str| row_lines(&row(host), false, false, 60, None, "window", &t).0;
+        assert!(line("devbox")[0].to_string().ends_with("api  @devbox · away  1 window"), "{:?}", line("devbox"));
+        assert!(line("")[0].to_string().ends_with("api  not answering  1 window"));
+        // Said whole or not at all, whatever the room, and never as a match.
+        let long = |host: &str, width: u16| {
+            let kind = RowKind::Session { name: "a-long-session-name-here".into(), host: host.into(), away: true, windows: 1, current: false };
+            row_lines(&Row { target: None, preview: None, score: None, kind }, false, false, width, None, "window", &t).0[0].to_string()
+        };
+        for width in 0..80 {
+            for host in ["build-01.internal", "m", ""] {
+                let line = long(host, width);
+                let said = if host.is_empty() { "not answering" } else { " · away" };
+                assert!(line.contains(said) || !line.contains(said.trim().split(' ').next_back().unwrap()), "{width}: {line}");
+                assert!(line.width() <= (width as usize).max(3), "{width}: {line}");
+            }
+        }
+        assert!(long("build-01.internal", 45).ends_with(" · away"), "{}", long("build-01.internal", 45));
+        assert!(long("m", 60).contains("  @m · away"), "a short host shows: {}", long("m", 60));
+        let said = line("devbox")[0].spans.iter().find(|s| s.content.contains("away")).unwrap().style;
+        assert_eq!(said.fg, t.state(State::Asking).fg, "as a failure is said");
+    }
+
+    fn many_agents() -> App {
+        let lines: Vec<String> = (1..=6).map(|i| format!("$1|s|@{i}|{i}|w{i}|{}|0|%{i}|0|1|claude||working|0|claude|task {i}||||/a{i}", u8::from(i == 1))).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let snap = crate::backend::tmux::fixture(&lines);
+        App::new(snap, Tab::Agents, "$1".into(), "@1".into(), String::new(), true, false)
+    }
+
+    #[test]
+    fn rows_past_the_viewport_are_counted_at_its_edges() {
+        let mut app = many_agents();
+        let mut view = View::new();
+        // No room for the preview. Input, blank, then 5 list lines: a header and two cards.
+        let term = render(&app, &mut view, 60, 10, "");
+        let lines = screen(&term);
+        assert!(!lines[2].contains('↑'), "{lines:#?}");
+        assert!(lines[7].ends_with("↓ 4 more │"), "on the last list line: {lines:#?}");
+        assert!(lines[7].contains("task 2"), "the line keeps its text: {lines:#?}");
+        assert_eq!(view.rows.len(), 2, "the hit rects are the rows': {:?}", view.rows);
+        assert!(view.rows.iter().all(|(r, ..)| r.y >= 3 && r.bottom() <= 8));
+        for _ in 0..5 {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let term = render(&app, &mut view, 60, 10, "");
+        let lines = screen(&term);
+        assert!(lines[2].ends_with("↑ 4 more │"), "on the blank under the input: {lines:#?}");
+        assert!(!lines.iter().any(|l| l.contains('↓')), "{lines:#?}");
+        assert_eq!(beyond(&app.rows, 0, false, 100), (0, 0));
+        assert_eq!(beyond(&app.rows, 0, false, 4), (0, 5), "a card cut off counts");
+        // The selected row's end is read (a note, a field, what ⏎ does):
+        // on the last line, the mark shows only where it covers none of it.
+        let mut app = many_agents();
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let wide = screen(&render(&app, &mut View::new(), 60, 10, ""));
+        assert!(wide[7].contains("task 2") && wide[7].ends_with("↓ 4 more │"), "beside it: {wide:#?}");
+        let narrow = screen(&render(&app, &mut View::new(), 21, 10, ""));
+        assert!(narrow[7].contains("task 2") && !narrow[7].contains('↓'), "not over it: {narrow:#?}");
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let narrow = screen(&render(&app, &mut View::new(), 21, 10, ""));
+        assert!(narrow[7].ends_with("↓ 4 more │"), "over another row's: {narrow:#?}");
+    }
+
+    #[test]
+    fn a_toggle_the_mark_covers_is_not_there_to_click() {
+        // Windows of two panes, the last line's with a name that puts its ▸ at the row's end.
+        let name = "n".repeat(60);
+        let lines: Vec<String> = (1..=8).flat_map(|i| (0..2).map(move |p| (i, p))).map(|(i, p)| format!("$1|s|@{i}|{i}|{name}|{}|0|%{}|{p}|{}|zsh|||||||||/a", u8::from(i == 1), i * 2 + p, u8::from(p == 0))).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let app = App::new(crate::backend::tmux::fixture(&lines), Tab::Sessions, "$1".into(), "@1".into(), String::new(), false, false);
+        for (width, height) in [(40, 9), (60, 9), (90, 9), (40, 12)] {
+            let mut view = View::new();
+            let term = render(&app, &mut view, width, height, "");
+            let lines = screen(&term);
+            let y = lines.iter().position(|l| l.contains('↓')).unwrap_or_else(|| panic!("{lines:#?}")) as u16;
+            let at = lines[y as usize].chars().position(|c| c == '↓').unwrap() as u16;
+            assert!(view.toggles.iter().all(|(r, _)| r.y != y || r.right() <= at), "{width}x{height}: {:?} under the mark at {at}: {lines:#?}", view.toggles);
+            assert!(view.toggles.iter().any(|(r, _)| r.y < y), "the others stay: {:?}", view.toggles);
+        }
+        for width in 0..90 {
+            for height in 0..14 {
+                render(&app, &mut View::new(), width, height, "");
+            }
+        }
+    }
+
+    #[test]
+    fn a_menu_taller_than_its_popup_scrolls_to_the_selection() {
+        let mut app = many_agents();
+        let mut view = View::new();
+        let size = (60, 10);
+        render(&app, &mut view, size.0, size.1, "");
+        app.run(Command::Menu);
+        let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
+        let n = menu.items.len();
+        assert!(n > 8, "more items than the popup has lines: {n}");
+        for step in 0..=n {
+            let term = render(&app, &mut view, size.0, size.1, "");
+            let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
+            assert_eq!(menu.selected, step % n, "wraps");
+            let lines = screen(&term);
+            let row = |r: &Rect| lines[r.y as usize].chars().skip(r.x as usize).take(r.width as usize).collect::<String>();
+            // Every drawn item is where its click lands, the selected one too.
+            assert!(view.items.iter().any(|(_, i)| *i == menu.selected), "{step}: {:?}", view.items);
+            for (r, i) in &view.items {
+                assert!(view.menu.unwrap().contains(r.as_position()) && row(r).contains(&menu.items[*i].label), "{step}: {i} at {r:?}: {lines:#?}");
+            }
+            let first = view.items.first().unwrap().1;
+            let menu_rect = view.menu.unwrap();
+            assert_eq!(lines[menu_rect.y as usize].contains('↑'), first > 0, "{lines:#?}");
+            assert_eq!(lines[menu_rect.bottom() as usize - 1].contains('↓'), view.items.last().unwrap().1 + 1 < n, "{lines:#?}");
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        render(&app, &mut view, size.0, size.1, "");
+        let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
+        assert!(view.items.iter().any(|(_, i)| *i == menu.selected), "wrapping up to the end shows it");
+    }
+
+    #[test]
+    fn the_preview_title_is_fitted_beside_the_list_too() {
+        let app = many_agents();
+        let title = format!("session:1.1 · {}", "x".repeat(200));
+        for (width, height) in [(120, 20), (70, 30)] {
+            let mut view = View::new();
+            let lines = screen(&render(&app, &mut view, width, height, &title));
+            assert!(lines.iter().any(|l| l.contains("session:1.1 · xxx") && l.contains("x…")), "{width}: {lines:#?}");
+        }
+    }
+
+    #[test]
+    fn a_long_carried_label_and_folder_leave_the_line_its_prompt() {
+        let dir = format!("/srv/{}project", "deep/".repeat(20));
+        let snap = crate::backend::tmux::fixture(&[&format!("$1|s|@1|1|{}|1|0|%1|0|1|zsh|||||||||{dir}", "w".repeat(80)), "$1|s|@2|2|v|0|0|%2|0|1|zsh|||||||||/a"]);
+        let mut app = App::new(snap, Tab::Sessions, "$1".into(), "@1".into(), String::new(), true, false);
+        app.run(Command::Move);
+        assert!(matches!(app.mode, Mode::Move(_)));
+        for width in [80, 90, 120] {
+            let lines = screen(&render(&app, &mut View::new(), width, 12, ""));
+            assert!(lines[1].contains("› filter") && lines[1].contains("⇅ moving") && lines[1].contains('…'), "{width}: {lines:#?}");
+        }
+        app.run(Command::Cancel);
+        app.run(Command::NewWindow);
+        let Mode::Create(c) = &app.mode else { panic!("not creating") };
+        let t = Theme::default();
+        for width in 0..120 {
+            let lines = create_lines(c, false, width, "", "window", &t);
+            assert!(lines.iter().all(|l| l.width() <= (width as usize).max(8)), "{width}: {lines:?}");
+        }
+        let line = create_lines(c, false, 60, "", "window", &t)[0].to_string();
+        assert!(line.contains("▏window name") && line.contains("…/deep/project"), "{line}");
+    }
+
+    #[test]
+    fn remote_agents_show_their_host_and_a_folders_cards_their_place() {
+        let mut snap = crate::backend::tmux::fixture(&[
+            "$1|ml|@1|1|train|1|0|%1|0|1|claude||working|0|claude|fit||||devbox:/home/me/source/company/project",
+            "$1|ml|@1|1|train|1|0|%2|1|0|claude||asking|0|claude|eval||||",
+            "$2|web|@2|1|api|1|0|%3|0|1|claude||working|0|claude|serve||||/srv/api",
+        ]);
+        snap.sessions[0].host = "devbox".into();
+        let t = Theme::default();
+        let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Status, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
+        let cards: Vec<&Row> = rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).collect();
+        let first = |r: &Row, w: u16| row_lines(r, false, false, w, None, "window", &t).0.remove(0);
+        // Waiting first.
+        let line = first(cards[1], 60);
+        assert!(line.to_string().ends_with("devbox:~/source/company/project"), "{line}");
+        assert_eq!(line.spans.iter().find(|s| s.content == "devbox:").unwrap().style, Style::new().fg(t.hint));
+        assert!(first(cards[1], 24).to_string().contains("devbox:"), "the host outlasts the path");
+        assert!(first(cards[0], 60).to_string().ends_with("@devbox"), "no path to carry it: {}", first(cards[0], 60));
+        assert!(!first(cards[2], 60).to_string().contains('@'));
+        assert_eq!(crate::rows::pane_title(&snap, "%1"), "ml:1.0 @devbox · claude");
+        // By folder, a card under its own folder shows its session and window.
+        let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Folder, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
+        let text: Vec<String> = rows.iter().flat_map(|r| row_lines(r, false, false, 60, None, "window", &t).0).map(|l| l.to_string()).collect();
+        assert!(text.contains(&" devbox:~/source/company/project 1".to_string()), "{text:#?}");
+        assert!(text.iter().any(|l| l.ends_with("◐ ✳  ml · train  @devbox")), "{text:#?}");
+        assert!(text.iter().any(|l| l.ends_with("◐ ✳  web · api")), "{text:#?}");
+        for width in 0..80 {
+            for r in rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })) {
+                assert!(row_lines(r, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
+            }
+        }
     }
 }

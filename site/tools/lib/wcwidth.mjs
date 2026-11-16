@@ -49,7 +49,7 @@ export function strWidth(s) {
 export const GLYPHS = new Set(
   [
     '─│├└┌┐┘╭╮╰╯┬┴┼', // box drawing: the popup frame and the tree
-    '●○', // agent state dots
+    '●○◐', // agent state dots and marks (◐ working)
     'π◇▣', // agent identity marks (other marks already appear below)
     '▌▏', // selection mark, filter cursor
     '›‹', // prompt, back

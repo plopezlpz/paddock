@@ -1,13 +1,16 @@
-//! Agent paths: discover repository anchors once per directory, collapse the
-//! route to linked worktrees, then fit to width. Sessions keep their labels.
+//! Shared directory labels: discover repository anchors once per directory,
+//! collapse the route to linked worktrees, then fit paths and Git heads to width.
+//! Discovery reads files: Git runs only for layouts the files cannot resolve.
 
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use crate::rows::{home_path, short_path};
+use crate::rows::{fit, home_path, short_path};
 
 #[derive(Clone, Debug)]
 pub struct AgentPath {
@@ -15,7 +18,8 @@ pub struct AgentPath {
     pub full: String,
     /// Repo-relative, or main-repo/…/worktree with any subdirectory suffix.
     label: String,
-    anchored: bool,
+    /// The repository's folder (a worktree's: its main checkout's), if any.
+    anchor: Option<String>,
     head: Option<GitHead>,
 }
 
@@ -33,7 +37,14 @@ impl GitHead {
 
 impl AgentPath {
     pub fn plain(path: &str, home: &str) -> Self {
-        Self { full: home_path(path, home), label: short_path(path, home), anchored: false, head: None }
+        Self { full: home_path(path, home), label: short_path(path, home), anchor: None, head: None }
+    }
+
+    /// The repository it is in (a worktree's: its main one), by name.
+    /// Its name and folder: one name can belong to several repositories.
+    pub fn repo(&self) -> Option<(&str, &str)> {
+        let anchor = self.anchor.as_deref()?;
+        Some((self.label.split('/').next()?, anchor))
     }
 
     /// Search never depends on display truncation.
@@ -48,19 +59,20 @@ impl AgentPath {
             return format!("{} ({label})", self.label);
         }
         // Keep the Git suffix even when branch and directory names match.
-        // Prefer the repo anchor and give the branch up to a third of a narrow
-        // card; below five columns there is no room for both path and suffix.
+        // The branch gets what the path leaves, and a third of a narrow card
+        // when the path needs it all, never the repo anchor's room; below
+        // five columns there is no room for both path and suffix.
         if width < 5 { return self.display_path(width); }
         let anchor = self.label.split('/').next().unwrap_or("").width();
-        let room = (width / 3).max(4).min(width.saturating_sub(anchor).max(4));
-        let branch = prefix(&label, room - 3);
+        let room = width.saturating_sub(self.label.width()).max(width / 3).max(4).min(width.saturating_sub(anchor).max(4));
+        let branch = fit(&label, room - 3);
         let suffix = format!(" ({branch})");
         format!("{}{suffix}", self.display_path(width.saturating_sub(suffix.width())))
     }
 
     fn display_path(&self, width: usize) -> String {
-        if !self.anchored || self.label.width() <= width {
-            return prefix(&self.label, width);
+        if self.anchor.is_none() || self.label.width() <= width {
+            return fit(&self.label, width);
         }
         let parts: Vec<&str> = self.label.split('/').collect();
         let repo = parts[0];
@@ -75,53 +87,40 @@ impl AgentPath {
         }
         let base = format!("{repo}/…/");
         if base.width() < width {
-            format!("{base}{}", prefix(parts.last().unwrap(), width - base.width()))
+            format!("{base}{}", fit(parts.last().unwrap(), width - base.width()))
         } else {
-            prefix(repo, width)
+            fit(repo, width)
         }
     }
-}
-
-fn prefix(s: &str, width: usize) -> String {
-    if s.width() <= width {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in s.chars() {
-        let n = c.width().unwrap_or(0);
-        if used + n + 1 > width {
-            break;
-        }
-        out.push(c);
-        used += n;
-    }
-    if width > 0 {
-        out.push('…');
-    }
-    out
 }
 
 #[derive(Default)]
 pub struct PathCache {
     home: String,
     labels: HashMap<String, Option<Repository>>,
+    /// Main checkouts by linked worktree root, shared by every path inside it.
+    mains: HashMap<PathBuf, Option<PathBuf>>,
+    /// HEAD by file, reread only when it is modified or replaced (Git renames
+    /// a new one into place), so a row costs one stat and a branch switch
+    /// still shows on the next rebuild. None: the stamp is not to be trusted.
+    heads: HashMap<PathBuf, (Option<Stamp>, Option<GitHead>)>,
 }
 
 impl PathCache {
     pub fn new(home: String) -> Self {
-        Self { home, labels: HashMap::new() }
+        Self { home, ..Self::default() }
     }
 
     pub fn home(&self) -> &str { &self.home }
 
     pub fn get(&mut self, path: &str) -> AgentPath {
         let home = &self.home;
-        let repo = self.labels.entry(path.to_string()).or_insert_with(|| repository_info(Path::new(path)));
+        let mains = &mut self.mains;
+        let repo = self.labels.entry(path.to_string()).or_insert_with(|| repository_info(Path::new(path), mains));
         match repo {
             Some(repo) => AgentPath {
-                full: home_path(path, home), label: repo.label.clone(), anchored: true,
-                head: repo.git_dir.as_deref().and_then(read_head),
+                full: home_path(path, home), label: repo.label.clone(), anchor: Some(repo.anchor.clone()),
+                head: repo.head.as_deref().and_then(|file| cached_head(&mut self.heads, file)),
             },
             None => AgentPath::plain(path, home),
         }
@@ -130,7 +129,28 @@ impl PathCache {
 
 struct Repository {
     label: String,
-    git_dir: Option<PathBuf>,
+    anchor: String,
+    /// The nearest repository's HEAD file.
+    head: Option<PathBuf>,
+}
+
+type Stamp = (SystemTime, u64);
+
+/// How much older than its reading a file's mtime must be for the stamp to
+/// say the file is unchanged: a coarse clock gives a write in the same tick
+/// the same mtime (Git's racy-clean rule).
+const RACY: Duration = Duration::from_secs(1);
+
+fn cached_head(heads: &mut HashMap<PathBuf, (Option<Stamp>, Option<GitHead>)>, file: &Path) -> Option<GitHead> {
+    let meta = std::fs::metadata(file).ok()?;
+    let stamp = (meta.modified().ok()?, meta.ino());
+    if let Some((_, head)) = heads.get(file).filter(|(seen, _)| *seen == Some(stamp)) {
+        return head.clone();
+    }
+    let settled = SystemTime::now().duration_since(stamp.0).is_ok_and(|age| age >= RACY);
+    let head = read_head(file);
+    heads.insert(file.into(), (settled.then_some(stamp), head.clone()));
+    head
 }
 
 fn git_dir(root: &Path) -> Option<PathBuf> {
@@ -140,8 +160,8 @@ fn git_dir(root: &Path) -> Option<PathBuf> {
     Some(root.join(contents.trim_end_matches(['\r', '\n']).strip_prefix("gitdir: ")?))
 }
 
-fn read_head(dir: &Path) -> Option<GitHead> {
-    let contents = std::fs::read_to_string(dir.join("HEAD")).ok()?;
+fn read_head(file: &Path) -> Option<GitHead> {
+    let contents = std::fs::read_to_string(file).ok()?;
     let head = contents.trim();
     if let Some(branch) = head.strip_prefix("ref: refs/heads/").filter(|s| !s.is_empty()) {
         return Some(GitHead { name: branch.into(), detached: false });
@@ -154,20 +174,19 @@ fn read_head(dir: &Path) -> Option<GitHead> {
 
 #[cfg(test)]
 fn repository_label(path: &Path) -> Option<String> {
-    repository_info(path).map(|repo| repo.label)
+    repository_info(path, &mut HashMap::new()).map(|repo| repo.label)
 }
 
-fn repository_info(path: &Path) -> Option<Repository> {
+fn repository_info(path: &Path, mains: &mut HashMap<PathBuf, Option<PathBuf>>) -> Option<Repository> {
     let path = path.canonicalize().ok()?;
     let repos: Vec<&Path> = path.ancestors().filter(|p| p.join(".git").exists()).collect();
     let outermost = *repos.last()?;
     // The branch belongs to the nearest repository, even when the path label
     // is anchored at an enclosing repository or worktree's main checkout.
-    let git_dir = git_dir(repos[0]);
+    let head = git_dir(repos[0]).map(|dir| dir.join("HEAD"));
     // A linked worktree's gitfile leads to its private admin directory, whose
     // commondir is the marker distinguishing it from a submodule or a repo
-    // with --separate-git-dir. Let Git locate the main worktree rather than
-    // assuming the common dir's parent is a checkout.
+    // with --separate-git-dir. See main_worktree for locating its checkout.
     // Search nearest-first, past ordinary nested repos and submodules: they
     // must not hide an enclosing linked worktree's main-repository identity.
     let linked = repos.iter().copied().find(|repo| {
@@ -175,7 +194,7 @@ fn repository_info(path: &Path) -> Option<Repository> {
         gitfile.as_deref().and_then(|s| s.trim().strip_prefix("gitdir: "))
             .is_some_and(|dir| repo.join(dir).join("commondir").is_file())
     });
-    let main = linked.and_then(main_worktree);
+    let main = linked.and_then(|root| mains.entry(root.into()).or_insert_with(|| main_worktree(root)).clone());
     let anchor = main.as_deref().unwrap_or(outermost);
     let name = anchor.file_name()?.to_str()?;
     if main.is_some() {
@@ -184,16 +203,54 @@ fn repository_info(path: &Path) -> Option<Repository> {
         // route, keeping the worktree's own name and any directory below it.
         let worktree = linked?;
         let tail = path.strip_prefix(worktree.parent()?).ok()?;
-        return Some(Repository { label: format!("{name}/…/{}", tail.to_str()?), git_dir });
+        return Some(Repository { label: format!("{name}/…/{}", tail.to_str()?), anchor: anchor.to_str()?.into(), head });
     }
     let relative = path.strip_prefix(anchor).ok()?;
     Some(Repository {
         label: if relative.as_os_str().is_empty() { name.into() } else { format!("{name}/{}", relative.to_str()?) },
-        git_dir,
+        anchor: anchor.to_str()?.into(),
+        head,
     })
 }
 
+/// The main checkout of the linked worktree at ROOT, or a bare main repo.
 fn main_worktree(root: &Path) -> Option<PathBuf> {
+    main_checkout(root).or_else(|| bare_main(root)).or_else(|| git_main_worktree(root))
+}
+
+/// A bare main repo, from files alone: the common dir, when its config says
+/// it is bare. Git reports that directory too, but costs a process each.
+fn bare_main(root: &Path) -> Option<PathBuf> {
+    let admin = git_dir(root)?;
+    let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
+    let common = admin.join(common.trim_end_matches(['\r', '\n'])).canonicalize().ok()?;
+    let config = std::fs::read_to_string(common.join("config")).ok()?;
+    let mut core = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            core = line.eq_ignore_ascii_case("[core]");
+        } else if core && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("bare")
+        {
+            return value.trim().eq_ignore_ascii_case("true").then_some(common);
+        }
+    }
+    None
+}
+
+/// The usual layout, from files alone: the admin directory's commondir is the
+/// main checkout's own .git directory (or a bare main repo named .git, whose
+/// folder is taken for its checkout). Anything else (another bare main repo,
+/// --separate-git-dir) is left to Git rather than assuming a checkout.
+fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let admin = git_dir(root)?;
+    let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
+    let common = admin.join(common.trim_end_matches(['\r', '\n'])).canonicalize().ok()?;
+    let main = common.parent()?;
+    (main.join(".git").canonicalize().ok()? == common).then(|| main.into())
+}
+
+fn git_main_worktree(root: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["-C"]).arg(root)
         .args(["worktree", "list", "--porcelain", "-z"])
@@ -244,6 +301,74 @@ mod tests {
     }
     impl Drop for Fixture {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn sessions_and_agents_share_paths_branches_and_fresh_heads() {
+        use crate::rows::{self, Filter, Group, RowKind, Tree};
+        let f = Fixture::new();
+        let main = f.0.join("project");
+        let worktree = f.0.join("containers/topic");
+        let plain = f.0.join("Downloads");
+        f.git(&["init", main.to_str().unwrap()]);
+        f.git(&["-C", main.to_str().unwrap(), "commit", "--allow-empty", "-m", "initial"]);
+        f.git(&["-C", main.to_str().unwrap(), "worktree", "add", "-b", "topic", worktree.to_str().unwrap()]);
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut cache = PathCache::new(f.0.to_str().unwrap().into());
+        let none = std::collections::HashSet::new();
+        let tree = Tree { expanded: &none, collapsed: &none, keep: None, current: "$1" };
+        let path_of = |rows: Vec<rows::Row>| rows.into_iter().find_map(|r| match r.kind {
+            RowKind::Window { path, .. } | RowKind::Agent { path, .. } => Some(path), _ => None,
+        }).unwrap();
+        for (dir, expected) in [
+            (&main, "project (main)"), (&worktree, "project/…/topic (topic)"),
+            (&worktree.join("src"), "project/…/topic/src (topic)"), (&plain, "~/Downloads"),
+        ] {
+            let snap = crate::backend::tmux::fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|task||||{}", dir.display())]);
+            let session = path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache));
+            let agent = path_of(rows::agents(&snap, &mut Filter::new(), Group::Flat, None, &mut cache, 0, false));
+            assert_eq!(session.display(200), expected);
+            for width in 0..100 { assert_eq!(session.display(width), agent.display(width)); }
+        }
+        let snap = crate::backend::tmux::fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|task||||{}", worktree.display())]);
+        f.git(&["-C", worktree.to_str().unwrap(), "checkout", "-b", "feature/searchable-branch"]);
+        assert_eq!(path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache)).display(200),
+            "project/…/topic (feature/searchable-branch)", "cached discovery still rereads HEAD");
+        for query in [worktree.to_str().unwrap(), "'~/containers/topic", "'project/…/topic", "'feature/searchable-branch"] {
+            let mut filter = Filter::new(); filter.set(query);
+            assert!(rows::sessions(&snap, &mut filter, &tree, &mut cache).iter().any(|r| matches!(r.kind, RowKind::Window { .. })), "{query}");
+        }
+        f.git(&["-C", worktree.to_str().unwrap(), "checkout", "--detach"]);
+        let session = path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache));
+        let agent = path_of(rows::agents(&snap, &mut Filter::new(), Group::Flat, None, &mut cache, 0, false));
+        assert_eq!(session.display(200), agent.display(200));
+        assert!(session.display(200).contains("(detached "));
+        let mut filter = Filter::new(); filter.set(&session.head.as_ref().unwrap().name);
+        assert!(rows::sessions(&snap, &mut filter, &tree, &mut cache).iter().any(|r| matches!(r.kind, RowKind::Window { .. })));
+    }
+
+    #[test]
+    fn sessions_search_inactive_pane_branches_but_display_the_active_directory() {
+        use crate::rows::{self, Filter, RowKind, Tree};
+        let f = Fixture::new();
+        let main = f.0.join("project");
+        let other = f.0.join("other");
+        f.git(&["init", main.to_str().unwrap()]);
+        f.git(&["init", other.to_str().unwrap()]);
+        f.git(&["-C", other.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/feature/inactive-pane"]);
+        let snap = crate::backend::tmux::fixture(&[
+            &format!("$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||{}", main.display()),
+            &format!("$1|s|@1|1|w|1|0|%2|1|0|zsh|||||||||{}", other.display()),
+        ]);
+        let none = std::collections::HashSet::new();
+        let tree = Tree { expanded: &none, collapsed: &none, keep: None, current: "$1" };
+        let mut cache = PathCache::new(f.0.to_str().unwrap().into());
+        let mut filter = Filter::new(); filter.set("'feature/inactive-pane");
+        let rows = rows::sessions(&snap, &mut filter, &tree, &mut cache);
+        assert_eq!(rows.len(), 3, "session, window and matching inactive pane");
+        assert!(matches!(&rows[1].kind, RowKind::Window { path, panes: 2, expanded: Some(true), .. } if path.display(80) == "project (main)"));
+        assert!(matches!(&rows[2].target, Some(crate::model::Target::Pane { pane, .. }) if pane == "%2"));
     }
 
     #[test]
@@ -331,8 +456,70 @@ mod tests {
         f.git(&["-C", main.to_str().unwrap(), "commit", "--allow-empty", "-m", "initial"]);
         let root = f.0.join("worktrees/topic");
         f.git(&["-C", main.to_str().unwrap(), "worktree", "add", "-b", "topic", root.to_str().unwrap()]);
+        assert!(main_checkout(&root).is_none(), "the common dir's parent is not a checkout");
         assert!(main_worktree(&root).is_none(), "Git only reports the separate admin directory");
         assert_eq!(repository_label(&root).unwrap(), "topic");
+    }
+
+    #[test]
+    fn main_checkouts_are_found_from_files_and_git_only_resolves_the_rest() {
+        let f = Fixture::new();
+        let main = f.0.join("project");
+        f.git(&["init", main.to_str().unwrap()]);
+        f.git(&["-C", main.to_str().unwrap(), "commit", "--allow-empty", "-m", "initial"]);
+        let root = f.0.join("worktrees/topic");
+        f.git(&["-C", main.to_str().unwrap(), "worktree", "add", "-b", "topic", root.to_str().unwrap()]);
+        assert_eq!(main_checkout(&root), Some(main.clone()), "no Git process for the usual layout");
+        assert!(main_checkout(&main).is_none(), "a main checkout is not a linked worktree");
+        let mut cache = PathCache::new(f.0.to_str().unwrap().into());
+        for dir in [root.clone(), root.join("src"), root.join("src/deep")] {
+            std::fs::create_dir_all(&dir).unwrap();
+            let label = format!("project/…/{}", dir.strip_prefix(f.0.join("worktrees")).unwrap().display());
+            assert_eq!(cache.get(dir.to_str().unwrap()).display(200), format!("{label} (topic)"));
+        }
+        assert_eq!(cache.get(main.to_str().unwrap()).display(200), "project (main)");
+        assert_eq!(cache.mains.len(), 1, "subdirectories share their worktree root's lookup");
+        assert_eq!(cache.heads.len(), 2, "one HEAD per repository, not per path");
+
+        // A bare main repo has no checkout: Git reports the repo itself.
+        let bare = f.0.join("bare.git");
+        f.git(&["clone", "--bare", main.to_str().unwrap(), bare.to_str().unwrap()]);
+        let linked = f.0.join("bare-topic");
+        f.git(&["-C", bare.to_str().unwrap(), "worktree", "add", "-b", "bare-topic", linked.to_str().unwrap()]);
+        assert!(main_checkout(&linked).is_none());
+        assert_eq!(bare_main(&linked), Some(bare.clone()), "no Git process for a bare main repo either");
+        assert_eq!(main_worktree(&linked), Some(bare));
+        assert_eq!(repository_label(&linked).unwrap(), "bare.git/…/bare-topic");
+        // One named .git is taken for its folder's checkout.
+        let dotgit = f.0.join("dotgit");
+        f.git(&["clone", "--bare", main.to_str().unwrap(), dotgit.join(".git").to_str().unwrap()]);
+        let linked = f.0.join("dotgit-topic");
+        f.git(&["-C", dotgit.join(".git").to_str().unwrap(), "worktree", "add", "-b", "dotgit-topic", linked.to_str().unwrap()]);
+        assert_eq!(main_checkout(&linked), Some(dotgit));
+    }
+
+    #[test]
+    fn a_head_written_in_the_same_tick_it_was_read_is_read_again() {
+        let f = Fixture::new();
+        let file = f.0.join("HEAD");
+        let mut heads = HashMap::new();
+        let write = |branch: &str, mtime: SystemTime| {
+            // In place, as a coarse clock leaves it: same inode, same mtime.
+            let out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&file).unwrap();
+            std::io::Write::write_all(&mut &out, format!("ref: refs/heads/{branch}\n").as_bytes()).unwrap();
+            out.set_modified(mtime).unwrap();
+        };
+        let branch = |heads: &mut HashMap<_, _>| cached_head(heads, &file).unwrap().name;
+        let now = SystemTime::now();
+        write("one", now);
+        assert_eq!(branch(&mut heads), "one");
+        write("two", now);
+        assert_eq!(branch(&mut heads), "two", "a stamp this fresh is not trusted");
+        let old = now - Duration::from_secs(10);
+        write("three", old);
+        assert_eq!(branch(&mut heads), "three");
+        write("four", old);
+        assert_eq!(branch(&mut heads), "three", "a settled stamp is: no read");
     }
 
     #[test]
@@ -367,7 +554,7 @@ mod tests {
         let line = format!("$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||||{root}");
         let mut filter = crate::rows::Filter::new();
         for hidden in [false, true] {
-            let snap = if hidden { crate::model::fixture_hidden(&[&line], &["%1"]) } else { crate::model::fixture(&[&line]) };
+            let snap = if hidden { crate::backend::tmux::fixture_hidden(&[&line], &["%1"]) } else { crate::backend::tmux::fixture(&[&line]) };
             filter.set("'feature/searchable-branch");
             let rows = crate::rows::agents(&snap, &mut filter, crate::rows::Group::Flat, None, &mut cache, 0, false);
             assert_eq!(rows.iter().filter(|r| matches!(r.kind, crate::rows::RowKind::Agent { .. })).count(), 1);
@@ -407,7 +594,7 @@ mod tests {
     #[test]
     fn branch_labels_fit_without_crowding_out_the_repository() {
         let path = AgentPath {
-            full: String::new(), label: "project/…/topic/src".into(), anchored: true,
+            full: String::new(), label: "project/…/topic/src".into(), anchor: Some(String::new()),
             head: Some(GitHead { name: "feature/日本語-long-branch".into(), detached: false }),
         };
         assert_eq!(path.display(100), "project/…/topic/src (feature/日本語-long-branch)");
@@ -421,10 +608,24 @@ mod tests {
     }
 
     #[test]
+    fn a_short_label_leaves_the_branch_its_room() {
+        let path = AgentPath { full: String::new(), label: "project".into(), anchor: Some(String::new()), head: Some(GitHead { name: "feature/searchable-branch".into(), detached: false }) };
+        assert_eq!(path.display(30), "project (feature/searchable-…)");
+        assert_eq!(path.display(35), "project (feature/searchable-branch)");
+        assert_eq!(path.display(12), "project (f…)");
+        for width in 0..60 {
+            let label = path.display(width);
+            assert!(label.width() <= width, "{width}: {label}");
+            if width >= 11 { assert!(label.starts_with("project ("), "{width}: {label}"); }
+        }
+    }
+
+    #[test]
     fn labels_keep_the_repo_and_tail_within_display_width() {
-        let path = AgentPath { full: String::new(), label: "project/long/intermediate/worktrees/topic".into(), anchored: true, head: None };
+        let path = AgentPath { full: String::new(), label: "project/long/intermediate/worktrees/topic".into(), anchor: Some(String::new()), head: None };
         assert_eq!(path.display(30), "project/…/worktrees/topic");
         assert_eq!(path.display(18), "project/…/topic");
+        assert_eq!((path.repo(), AgentPath::plain("/tmp/x", "").repo()), (Some(("project", "")), None), "folder groups");
         let unicode = AgentPath { label: "日本語/long/worktrees/修正".into(), ..path };
         for width in 0..60 {
             let text = unicode.display(width);

@@ -1,16 +1,13 @@
-//! paddock: a tmux popup for sessions, windows, panes and the AI agents in
-//! them. See USAGE.
+//! paddock: a popup for sessions, windows, panes and the AI agents in
+//! them, on a tmux or a Rex server (src/backend). See USAGE.
 //!
-//! The popup binding passes the invoking client and location as
-//! PADDOCK_CLIENT, PADDOCK_SESSION and PADDOCK_WINDOW; paddock never guesses a
-//! client, since another terminal may become active while it is open.
-//!
-//! Event-driven: one channel carries terminal input, tmux notifications and
-//! title suggestions; the loop sleeps until one arrives or the live
-//! preview's next capture (or a suggestion's deadline) is due, and draws
-//! only when something changed.
+//! Event-driven: one channel carries terminal input, server notifications
+//! (on Rex also: a capture came in) and title suggestions; the loop sleeps
+//! until one arrives or the live preview's next capture (or a suggestion's
+//! deadline) is due, and draws only when something changed.
 
 mod app;
+mod backend;
 mod edit;
 mod live;
 mod model;
@@ -18,7 +15,6 @@ mod notification;
 mod paths;
 mod rows;
 mod theme;
-mod tmux;
 mod ui;
 
 use std::env;
@@ -28,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -36,66 +32,37 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
 use ratatui::crossterm::execute;
 
-use app::{Action, App, Op, Tab, View};
+use app::{Action, App, Tab, View};
 use live::Live;
 use model::Target;
-use theme::Theme;
-use tmux::{field, quote, Control, Msg, SEP, SESSION};
+use backend::{Backend, Msg, Ran, Start};
+use backend::rex::lua_string as lua;
 use ui::Preview;
-
-/// Refresh, checked by tmux about once a second: the snapshot's text, so a
-/// title, state or name changing anywhere (a control client's %* covers only
-/// its own session) arrives with the new snapshot. Changes to windows in
-/// other sessions (added, closed, renamed) also arrive at once as
-/// notifications. Each value is a `field`, so a newline in it cannot end the
-/// notification line.
-fn subscription() -> String {
-    format!("refresh-client -B {}", quote(&format!("panes::{}", model::format())))
-}
 
 enum Ev {
     Input(Event),
-    /// A notification, after this many replies (`Control::replied`).
-    Tmux(u64, Msg),
+    /// A server notification, after this many replies (`Backend::replied`).
+    Backend(u64, Msg),
     /// The suggest command's answer to suggestion ID.
     Suggested(u64, Result<String, String>),
 }
 
-struct Context {
-    client: String,
-    session: String,
-    window: String,
-}
-
-fn context() -> Result<Context, String> {
-    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    if let (Some(client), Some(session), Some(window)) = (get("PADDOCK_CLIENT"), get("PADDOCK_SESSION"), get("PADDOCK_WINDOW")) {
-        return Ok(Context { client, session, window });
-    }
-    // Run from a shell inside tmux (development): the pane's own client.
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", &format!("#{{client_name}}{SEP}#{{session_id}}{SEP}#{{window_id}}")])
-        .output()
-        .map_err(|e| format!("cannot run tmux: {e}"))?;
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let f: Vec<&str> = line.split(SEP).collect();
-    match f.as_slice() {
-        [c, s, w] if !c.is_empty() => Ok(Context { client: c.to_string(), session: s.to_string(), window: w.to_string() }),
-        _ => Err("run paddock from its tmux binding (or inside tmux)".into()),
-    }
-}
-
 /// Without --tab (or with --tab last), paddock opens on the tab it was last
 /// closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init | paddock --version\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]";
+const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init [--rex] | paddock --version\n       paddock --rex [--tab sessions|agents] [--client CLIENT] [--suggest COMMAND] [--color ROLE=COLOUR]... [--icons unicode|nerd]\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]";
 
 /// For `paddock init`: a binary installed without the plugin checkout
 /// (Homebrew) still binds the keys, by running this script itself.
 const PLUGIN: &str = include_str!("../paddock.tmux");
+/// For `paddock init --rex`: the Rex action, made for this binary.
+const REX_PLUGIN: &str = include_str!("../rex/paddock.lua");
 
 enum Cmd {
     Run(Option<Tab>),
+    /// On Rex: the rex/paddock.lua action's command line.
+    Rex(backend::rex::Opts),
     Init,
+    InitRex,
     Notification { state: String, kind: String, path: String, icons: theme::AgentIcons },
     Version,
     Help,
@@ -106,7 +73,9 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
         [] | ["--tab", "last"] => Ok(Cmd::Run(None)),
         ["--tab", "sessions"] => Ok(Cmd::Run(Some(Tab::Sessions))),
         ["--tab", "agents"] => Ok(Cmd::Run(Some(Tab::Agents))),
+        ["--rex", opts @ ..] => backend::rex::Opts::parse(opts).map(Cmd::Rex),
         ["init"] => Ok(Cmd::Init),
+        ["init", "--rex"] => Ok(Cmd::InitRex),
         ["notification", state @ ("finished" | "asking" | "waiting" | "failed"), kind, path] => {
             Ok(Cmd::Notification { state: (*state).into(), kind: (*kind).into(), path: (*path).into(), icons: theme::AgentIcons::Unicode })
         }
@@ -120,31 +89,35 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
 }
 
 /// The error (without main's "paddock: " prefix) if the key bindings that
-/// started us, from plugin version PLUGIN, are not for OURS: the popup's
-/// flags and env are a contract between the two. The fix depends on which
-/// side is older; each line fits a popup on an 80-column terminal.
-fn version_mismatch(plugin: Option<&str>, ours: &str) -> Option<String> {
+/// started us, or on REX rex/paddock.lua, from plugin version PLUGIN, are not
+/// for OURS: the popup's flags and env are a contract between the two. The
+/// fix depends on which side is older; each line fits a popup on an
+/// 80-column terminal.
+fn version_mismatch(plugin: Option<&str>, ours: &str, rex: bool) -> Option<String> {
     // Numerically, part by part: "0.10.0" is newer than "0.9.0".
     let parts = |v: &str| v.split('.').map(str::parse::<u64>).collect::<Result<Vec<_>, _>>().ok();
+    let (what, update, bin) = if rex { ("paddock.lua", "run paddock init --rex", "set bin in paddock.setup") } else { ("key bindings", "reload tmux", "point PADDOCK_BIN at it") };
     plugin.filter(|p| *p != ours).map(|p| {
         let fix = match (parts(p), parts(ours)) {
-            (Some(a), Some(b)) if a < b => "reload tmux to rebind the keys".to_string(),
-            (Some(a), Some(b)) if a > b => format!("install paddock {p} (or point PADDOCK_BIN at it)"),
-            _ => format!("reload tmux, or install paddock {p}"),
+            (Some(a), Some(b)) if a < b && rex => format!("{update} to update it"),
+            (Some(a), Some(b)) if a < b => format!("{update} to rebind the keys"),
+            (Some(a), Some(b)) if a > b => format!("install paddock {p} (or {bin})"),
+            _ => format!("{update}, or install paddock {p}"),
         };
-        format!("key bindings for paddock {p}, but this is {ours}\n{fix}")
+        format!("{what} for paddock {p}, but this is {ours}\n{fix}")
     })
 }
 
-/// The command ARGS ask for, run from key bindings for PLUGIN. Bindings from
-/// another version are refused before the arguments are checked: newer ones
-/// may pass flags this binary does not know, and the version is what to fix.
+/// The command ARGS ask for, run from key bindings (or rex/paddock.lua) for
+/// PLUGIN. Bindings from another version are refused before the arguments
+/// are checked: newer ones may pass flags this binary does not know, and the
+/// version is what to fix.
 fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
     let cmd = parse(args);
-    if matches!(cmd, Ok(Cmd::Init | Cmd::Version | Cmd::Help | Cmd::Notification { .. })) {
+    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. })) {
         return cmd;
     }
-    version_mismatch(plugin, ours).map_or(cmd, Err)
+    version_mismatch(plugin, ours, args.first() == Some(&"--rex")).map_or(cmd, Err)
 }
 
 /// The path the key bindings should use for this binary, one that survives an
@@ -197,13 +170,48 @@ fn init() -> Result<(), String> {
     Err(format!("cannot run bash: {e}"))
 }
 
+/// Where Rex reads its init.lua, by the environment GET gives: REX_CONFIG,
+/// else rex/init.lua in $XDG_CONFIG_HOME, else in ~/.config.
+fn rex_config(get: impl Fn(&str) -> Option<String>) -> PathBuf {
+    let get = |k: &str| get(k).filter(|v| !v.is_empty());
+    get("REX_CONFIG").map(PathBuf::from).unwrap_or_else(|| {
+        let config = get("XDG_CONFIG_HOME").map_or_else(|| PathBuf::from(get("HOME").unwrap_or_default()).join(".config"), PathBuf::from);
+        config.join("rex/init.lua")
+    })
+}
+
+/// rex/paddock.lua made for binary BIN at VERSION: it runs that binary,
+/// which checks it is the version the action was made for.
+fn rex_plugin(bin: &Path, version: &str) -> String {
+    REX_PLUGIN.replacen("local BIN = nil", &format!("local BIN = {}", lua(&bin.to_string_lossy())), 1).replacen("local VERSION = nil", &format!("local VERSION = {}", lua(version)), 1)
+}
+
+/// Install rex/paddock.lua, made for this binary, beside Rex's init.lua,
+/// and say how to load it, unless init.lua does.
+fn init_rex() -> Result<(), String> {
+    let init = rex_config(|k| env::var(k).ok());
+    let path = init.with_file_name("paddock.lua");
+    let fail = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(fail)?;
+    std::fs::write(&path, rex_plugin(&self_path()?, env!("CARGO_PKG_VERSION"))).map_err(fail)?;
+    println!("installed {}", path.display());
+    let file = path.to_string_lossy();
+    if !std::fs::read_to_string(&init).is_ok_and(|text| text.contains(&*file)) {
+        println!("load it from {}:\n\n  local paddock = dofile({})\n  paddock.setup{{ key = \"cmd+shift+a\" }}\n", init.display(), lua(&file));
+    }
+    println!("then run: rex config reload");
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let plugin = env::var("PADDOCK_PLUGIN_VERSION").ok();
+    let plugin = env::var("PADDOCK_PLUGIN_VERSION").ok().filter(|v| !v.is_empty());
     let result = command(&args, plugin.as_deref(), env!("CARGO_PKG_VERSION")).and_then(|cmd| match cmd {
-        Cmd::Run(tab) => run(tab),
+        Cmd::Run(tab) => run(tab, Server::detect()),
+        Cmd::Rex(opts) => run(opts.tab, Server::Rex(opts)),
         Cmd::Init => init(),
+        Cmd::InitRex => init_rex(),
         Cmd::Notification { state, kind, path, icons } => {
             println!("{}", notification::format(&state, &kind, &path, &env::var("HOME").unwrap_or_default(), icons));
             Ok(())
@@ -215,180 +223,24 @@ fn main() {
         Cmd::Help => {
             println!("{USAGE}");
             println!("init: bind the keys from ~/.tmux.conf with run-shell 'paddock init' (no plugin checkout needed)");
+            println!("init --rex: install the Rex action (rex/paddock.lua) beside Rex's init.lua, and print how to load it");
             println!("notification: print two plain-text lines (title, path/branch); sends nothing and needs no tmux connection");
             Ok(())
         }
     });
     if let Err(e) = result {
-        eprintln!("paddock: {e}");
-        std::process::exit(1);
+        fail(&e, args.first() == Some(&"--rex") && args.contains(&"--popup"));
     }
 }
 
-/// A name or folder as a tmux argument. tmux expands formats in these
-/// (`#S`, and `#(…)` would run a command), so `#` is doubled to stay literal.
-fn literal(s: &str) -> String {
-    quote(&s.replace('#', "##"))
-}
-
-/// A session as `refuge` sees it, live: its group, and its windows (one
-/// linked at two indexes is listed twice) with their panes.
-struct Place {
-    id: String,
-    group: String,
-    /// paddock's own session.
-    ours: bool,
-    windows: Vec<(String, Vec<String>)>,
-}
-
-/// For `list-clients` of one client: its session, then every session as
-/// `ID OURS @W%P%P@W%P GROUP` (each id starts with its own sigil).
-fn places_format() -> String {
-    let windows = "#{W:#{window_id}#{P:#{pane_id}}}";
-    format!("#{{session_id}}#{{S:{SEP}#{{session_id}} #{{==:#{{session_name}},{SESSION}}} {windows} {}}}", field("session_group"))
-}
-
-/// The client's session and every session, from `places_format` output.
-fn places(line: &str) -> (String, Vec<Place>) {
-    let mut parts = line.split(SEP);
-    let current = parts.next().unwrap_or_default().to_string();
-    let sessions = parts
-        .filter_map(|p| {
-            let mut f = p.splitn(4, ' ');
-            let (id, ours, windows, group) = (f.next()?, f.next()?, f.next()?, f.next()?);
-            let windows = windows
-                .split('@')
-                .skip(1)
-                .map(|w| {
-                    let mut ids = w.split('%');
-                    (format!("@{}", ids.next().unwrap_or_default()), ids.map(|p| format!("%{p}")).collect())
-                })
-                .collect();
-            Some(Place { id: id.to_string(), group: group.to_string(), ours: ours == "1", windows })
-        })
-        .collect();
-    (current, sessions)
-}
-
-/// Where the client must go before OP runs, if OP closes CURRENT, the
-/// session it shows: with tmux's default detach-on-destroy it would be
-/// detached. A moved window or pane is followed; otherwise any session OP
-/// leaves standing (not a group peer that closes with it).
-fn refuge(op: &Op, current: &str, sessions: &[Place]) -> Option<String> {
-    // A pane leaving its window as its only pane closes the window in every
-    // session it is linked into (kill-window too).
-    let only_pane = |pane: &str| sessions.iter().flat_map(|s| &s.windows).find(|(_, panes)| panes.iter().any(|p| p == pane)).filter(|(_, panes)| panes.len() == 1);
-    let in_group_of = |s: &Place, id: &str| s.id == id || sessions.iter().any(|o| o.id == id && !o.group.is_empty() && o.group == s.group);
-    let closes = |s: &Place| {
-        let only = |window: &str| s.windows.iter().all(|(w, _)| w == window);
-        match op {
-            Op::Kill(Target::Session { session }) => s.id == *session,
-            Op::Kill(Target::Window { window, .. }) => only(window),
-            Op::Kill(Target::Pane { pane, .. }) | Op::JoinPane { pane, .. } => only_pane(pane).is_some_and(|(w, _)| only(w)),
-            Op::BreakPane { pane, session } => s.id != *session && only_pane(pane).is_some_and(|(w, _)| only(w)),
-            // A window leaves FROM and its group only, once.
-            Op::MoveWindow { from, window, into, .. } => from != into && s.windows.len() == 1 && only(window) && in_group_of(s, from),
-            _ => false,
-        }
-    };
-    if !closes(sessions.iter().find(|s| s.id == current)?) {
-        return None;
+/// Report E and exit. In POPUP, rex/paddock.lua's floating pane, which
+/// closes with paddock, the error stays up a moment first, to be read.
+fn fail(e: &str, popup: bool) -> ! {
+    eprintln!("paddock: {e}");
+    if popup {
+        thread::sleep(Duration::from_secs(4));
     }
-    let follow = match op {
-        Op::MoveWindow { into, .. } => Some(into.as_str()),
-        Op::BreakPane { session, .. } => Some(session.as_str()),
-        Op::JoinPane { to, .. } => sessions.iter().find(|s| s.windows.iter().any(|(_, panes)| panes.contains(to))).map(|s| s.id.as_str()),
-        _ => None,
-    };
-    let first = sessions.iter().filter(|s| Some(s.id.as_str()) == follow);
-    first.chain(sessions).find(|s| !s.ours && !closes(s)).map(|s| s.id.clone())
-}
-
-/// Where `shelter` moved a client: out of session FROM, into TO.
-struct Sheltered {
-    from: String,
-    to: String,
-}
-
-/// CLIENT's session and every session, now.
-fn client_places(tmux: &mut Control, client: &str) -> Result<(String, Vec<Place>), String> {
-    // Not display-message: its formats see paddock's own client, even with -c.
-    let only = format!("#{{==:#{{client_name}},{client}}}");
-    let line = tmux.cmd(&format!("list-clients -f {} -F {}", quote(&only), quote(&places_format())))?;
-    Ok(places(line.first().map_or("", String::as_str)))
-}
-
-/// Before OP runs, move CLIENT out of the session it shows (now: it may
-/// have moved since the popup opened) if OP closes it; where it went.
-fn shelter(tmux: &mut Control, op: &Op, client: &str) -> Result<Option<Sheltered>, String> {
-    if !matches!(op, Op::Kill(_) | Op::MoveWindow { .. } | Op::JoinPane { .. } | Op::BreakPane { .. }) {
-        return Ok(None);
-    }
-    let (current, sessions) = client_places(tmux, client)?;
-    let Some(to) = refuge(op, &current, &sessions) else { return Ok(None) };
-    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&to)))?;
-    Ok(Some(Sheltered { from: current, to }))
-}
-
-/// Where a client `shelter` moved goes back to once its op failed: the
-/// session it came from, if that is still there and the client still shows
-/// the refuge (CURRENT).
-fn homecoming(moved: &Sheltered, current: &str, sessions: &[Place]) -> Option<String> {
-    (current == moved.to && sessions.iter().any(|s| s.id == moved.from)).then(|| moved.from.clone())
-}
-
-/// After a failed op, put CLIENT back where `shelter` took it from; where
-/// it went. Best effort: the op's error is the one to report.
-fn unshelter(tmux: &mut Control, moved: &Sheltered, client: &str) -> Option<String> {
-    let (current, sessions) = client_places(tmux, client).ok()?;
-    let back = homecoming(moved, &current, &sessions)?;
-    tmux.cmd(&format!("switch-client -c {} -t {}", quote(client), quote(&back))).ok()?;
-    Some(back)
-}
-
-/// Make OP's change on the server; what it created, if anything. Moves and
-/// swaps keep every client's current window (-d).
-fn run_op(tmux: &mut Control, op: &Op) -> Result<Option<Target>, String> {
-    let q = |s: &str| quote(s);
-    let window_in = |session: &String, window: &String| Target::Window { session: session.clone(), window: window.clone() }.arg();
-    let line = match op {
-        Op::SetTitle { pane, title: Some(title) } => format!("set-option -p -t {} @agent-description {}", q(pane), q(title)),
-        Op::SetTitle { pane, title: None } => format!("set-option -p -u -t {} @agent-description", q(pane)),
-        Op::SetHidden { pane, hidden } => format!("set-option -p -t {} @paddock-hidden {}", q(pane), u8::from(*hidden)),
-        Op::SetHiddenExpanded(expanded) => format!("set-option -g {HIDDEN_EXPANDED} {}", u8::from(*expanded)),
-        Op::RenameSession { session, name } => format!("rename-session -t {} -- {}", q(session), literal(name)),
-        Op::RenameWindow { window, name } if name.is_empty() => format!("set-window-option -t {} automatic-rename on", q(window)),
-        Op::RenameWindow { window, name } => format!("rename-window -t {} -- {}", q(window), literal(name)),
-        Op::Kill(Target::Session { session }) => format!("kill-session -t {}", q(session)),
-        Op::Kill(t @ Target::Window { .. }) => format!("kill-window -t {}", t.arg()),
-        Op::Kill(Target::Pane { pane, .. }) => format!("kill-pane -t {}", q(pane)),
-        Op::SwapWindows { session, a, b } => format!("swap-window -d -s {} -t {}", window_in(session, a), window_in(session, b)),
-        Op::SwapPanes(a, b) => format!("swap-pane -d -s {} -t {}", q(a), q(b)),
-        Op::MoveWindow { from, window, into, to, before } => {
-            format!("move-window -d {} -s {} -t {}", if *before { "-b" } else { "-a" }, window_in(from, window), window_in(into, to))
-        }
-        Op::JoinPane { pane, to, before } => {
-            // Side by side in a wide pane, else one above the other (cells
-            // are about twice as tall as wide).
-            // Unknown (the pane went): join-pane says so.
-            let size = tmux.row(to, &["pane_width", "pane_height"]);
-            let n = |i: usize| size.get(i).and_then(|v| v.parse::<u32>().ok());
-            let wide = matches!((n(0), n(1)), (Some(w), Some(h)) if w >= 2 * h);
-            format!("join-pane -d {}{} -s {} -t {}", if *before { "-b " } else { "" }, if wide { "-h" } else { "-v" }, q(pane), q(to))
-        }
-        Op::BreakPane { pane, session } => format!("break-pane -d -s {} -t {}", q(pane), q(&format!("{session}:"))),
-        Op::NewSession { name, dir } => {
-            let id = tmux.cmd(&format!("new-session -d -P -F {} -s {} -c {}", q("#{session_id}"), literal(name), literal(dir)))?;
-            return Ok(id.first().map(|session| Target::Session { session: session.clone() }));
-        }
-        Op::NewWindow { session, after, name, dir } => {
-            // No name: tmux names it after what runs.
-            let name = if name.is_empty() { String::new() } else { format!(" -n {}", literal(name)) };
-            let id = tmux.cmd(&format!("new-window -d -a -P -F {} -t {}{name} -c {}", q("#{window_id}"), window_in(session, after), literal(dir)))?;
-            return Ok(id.first().map(|window| Target::Window { session: session.clone(), window: window.clone() }));
-        }
-    };
-    tmux.cmd(&line).map(|_| None)
+    std::process::exit(1);
 }
 
 /// How long a suggestion may take before it is given up (and stopped).
@@ -483,43 +335,34 @@ fn next_minute() -> Instant {
     Instant::now() + Duration::from_secs(60 - now.as_secs() % 60)
 }
 
-/// Attach and subscribe.
-fn connect(tx: &Sender<Ev>) -> Result<Control, String> {
-    let events = tx.clone();
-    let mut tmux = Control::connect(move |replied, m| {
-        let _ = events.send(Ev::Tmux(replied, m));
-    })?;
-    tmux.cmd(&subscription()).map_err(|e| format!("cannot attach to tmux session {SESSION}: {e}"))?;
-    Ok(tmux)
+/// The server the popup runs on.
+enum Server {
+    Tmux,
+    Rex(backend::rex::Opts),
 }
 
-/// Global option holding the tab paddock was last closed on.
-const LAST_TAB: &str = "@paddock-last-tab";
-const HIDDEN_EXPANDED: &str = "@paddock-hidden-expanded";
+impl Server {
+    /// Rex when run in a Rex terminal outside tmux, else tmux.
+    fn detect() -> Server {
+        let set = |k: &str| env::var(k).is_ok_and(|v| !v.is_empty());
+        if !set("TMUX") && set("REX_SESSION") { Server::Rex(backend::rex::Opts::default()) } else { Server::Tmux }
+    }
+}
 
-fn run(tab: Option<Tab>) -> Result<(), String> {
-    let ctx = context()?;
+fn run(tab: Option<Tab>, server: Server) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
-    let mut tmux = connect(&tx)?;
-    let tab = tab.unwrap_or_else(|| {
-        let last = tmux.cmd(&format!("show-option -gqv {LAST_TAB}")).unwrap_or_default();
-        Tab::parse(last.first().map_or("", |l| l.trim())).unwrap_or(Tab::Sessions)
-    });
-    // Options as the invoking window sees them, not paddock's own session.
-    let [host, suggest_command] = <[String; 2]>::try_from(tmux.row(&ctx.window, &["host", "@agent-suggest-command"])).unwrap_or_default();
-    let theme = Theme::load(&mut tmux, &ctx.window);
-    let home = std::env::var("HOME").unwrap_or_default();
-    let can_suggest = !suggest_command.trim().is_empty();
-    // The snapshot's text, to skip a refresh that changes nothing.
-    let mut shown = model::fetch(&mut tmux)?;
-    // Notifications tmux sent before the last fetch's reply are in it.
-    let mut fetched = tmux.replied();
-    let hidden_expanded = tmux.cmd(&format!("show-option -gqv {HIDDEN_EXPANDED}"))?.first().is_some_and(|v| v == "1");
-    let mut app = App::new(model::parse(&shown, &host), tab, ctx.session.clone(), ctx.window.clone(), home, can_suggest, hidden_expanded);
+    let events = tx.clone();
+    let post = move |replied, m| {
+        let _ = events.send(Ev::Backend(replied, m));
+    };
+    let (mut backend, start): (Box<dyn Backend>, Start) = match server {
+        Server::Tmux => backend::tmux::connect(post).map(|(b, s)| (Box::new(b) as Box<dyn Backend>, s))?,
+        Server::Rex(opts) => backend::rex::connect(opts, post).map(|(b, s)| (Box::new(b) as Box<dyn Backend>, s))?,
+    };
+    let mut popup = Popup::new(backend.as_mut(), start, tab, env::var("HOME").unwrap_or_default(), tx.clone())?;
 
     let mut tui = Tui::new()?;
-    let answers = tx.clone();
-    // Terminal input joins the tmux notifications on one channel.
+    // Terminal input joins the server's notifications on one channel.
     thread::spawn(move || {
         while let Ok(ev) = event::read() {
             if tx.send(Ev::Input(ev)).is_err() {
@@ -527,266 +370,241 @@ fn run(tab: Option<Tab>) -> Result<(), String> {
             }
         }
     });
+    let mut view = View::new();
+    // The tab to reopen on, kept as it changes: a popup closed from outside
+    // (Rex's toggle key, tmux's popup) ends without returning here.
+    let mut saved = popup.app.tab;
     let result = (|| -> Result<Option<Target>, String> {
-        let mut live = Live::new();
-        let mut view = View::new();
-        let mut minute = next_minute();
-        let mut dirty = true;
-        let mut suggestion: Option<Suggestion> = None;
         loop {
-            // The preview follows the selection while it is on screen (the
-            // last draw says whether there was room for it).
-            live.follow(app.preview_pane(&view));
-            dirty |= live.tick(&mut tmux);
-            if tmux.is_dead() {
-                return Err("tmux stopped answering".into());
-            }
-            if dirty {
-                let title = live.pane.as_deref().map(|p| rows::pane_title(&app.snap, p)).unwrap_or_default();
+            popup.tick(backend.as_mut(), &view)?;
+            if popup.dirty {
+                let live = &popup.live;
+                let title = live.pane.as_deref().map(|p| rows::pane_title(&popup.app.snap, p)).unwrap_or_default();
                 let preview = Preview { title: &title, body: &live.body };
-                tui.0.draw(|f| ui::draw(f, &app, &mut view, &preview, &theme)).map_err(|e| e.to_string())?;
-                dirty = false;
-                if app.preview_pane(&view) != live.pane.as_deref() {
+                tui.0.draw(|f| ui::draw(f, &popup.app, &mut view, &preview, &popup.theme)).map_err(|e| e.to_string())?;
+                popup.dirty = false;
+                popup.app.preview_fits = view.preview_fits;
+                if popup.app.preview_pane(&view) != popup.live.pane.as_deref() {
                     // The preview just appeared or went away: follow it now.
-                    dirty = true;
+                    popup.dirty = true;
                     continue;
                 }
             }
-
-            let deadline = [Some(minute), live.due(), suggestion.as_ref().map(|s| s.deadline)].into_iter().flatten().min().unwrap_or(minute);
-            let mut stale = false;
-            let mut fresh = None;
-            let mut ev = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            let ev = match rx.recv_timeout(popup.deadline().saturating_duration_since(Instant::now())) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return Ok(None),
             };
-            // Handle everything already queued before drawing again.
-            while let Some(e) = ev {
-                match e {
-                    Ev::Input(input) => {
-                        let action = match input {
-                            Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
-                            Event::Mouse(m) => app.on_mouse(m, &view, Instant::now()),
-                            Event::Paste(text) => {
-                                app.paste(&text);
-                                Action::None
-                            }
-                            _ => Action::None,
-                        };
-                        match action {
-                            Action::Quit => return Ok(None),
-                            Action::Activate(t) => return Ok(Some(t)),
-                            Action::Run(job) => {
-                                let result = shelter(&mut tmux, &job.op, &ctx.client).and_then(|moved| {
-                                    if let Some(m) = &moved {
-                                        app.moved(&m.to);
-                                    }
-                                    let result = run_op(&mut tmux, &job.op);
-                                    // It failed: back to the session it was to close,
-                                    // if that still stands.
-                                    if result.is_err()
-                                        && let Some(back) = moved.and_then(|m| unshelter(&mut tmux, &m, &ctx.client))
-                                    {
-                                        app.moved(&back);
-                                    }
-                                    result
-                                });
-                                if let Some(created) = app.ran(job, result) {
-                                    return Ok(Some(created));
-                                }
-                                // Show the result now, not at the next subscription
-                                // check, even if nothing changed (a moved row is
-                                // followed then).
-                                stale = true;
-                                shown.clear();
-                                // Events still queued (a held ⇧↓) wait for that
-                                // snapshot: from this one, a second swap would
-                                // undo the first.
-                                dirty = true;
-                                break;
-                            }
-                            Action::Suggest { pane, id } => match suggest(&suggest_command, &pane, id, answers.clone()) {
-                                Ok(s) => suggestion = Some(s),
-                                Err(e) => app.suggested(id, Err(e)),
-                            },
-                            Action::None => {}
-                        }
-                        dirty = true;
-                    }
-                    Ev::Suggested(id, result) => {
-                        if suggestion.as_ref().is_some_and(|s| s.id == id) {
-                            suggestion = None;
-                        }
-                        app.suggested(id, result);
-                        dirty = true;
-                    }
-                    Ev::Tmux(_, Msg::Exit) => return Ok(None),
-                    // Older than the snapshot shown: the %sessions-changed
-                    // making SESSION sends, or a subscription value from
-                    // before an op, which would put back what it changed.
-                    Ev::Tmux(replied, _) if replied < fetched => {}
-                    Ev::Tmux(_, Msg::Changed) => stale = true,
-                    Ev::Tmux(_, Msg::Rows(text)) => fresh = Some(text),
-                }
-                ev = rx.try_recv().ok();
+            if let Flow::Close(target) = popup.handle(ev, &rx, backend.as_mut(), &view)? {
+                return Ok(target);
             }
-            if let Some(s) = &suggestion
-                && Instant::now() >= s.deadline
-            {
-                let id = s.id;
-                suggestion = None;
-                app.suggested(id, Err(format!("no title after {}s", SUGGEST_TIMEOUT.as_secs())));
-                dirty = true;
-            }
-            // Stop a suggestion nobody waits for any more (cancelled, typed over).
-            if suggestion.as_ref().is_some_and(|s| app.suggesting() != Some(s.id)) {
-                suggestion = None;
-            }
-            // One snapshot for any burst of notifications: the subscription's
-            // latest unless one is due now. The preview's pane is captured on
-            // its own schedule.
-            let text = if stale {
-                let text = model::fetch(&mut tmux)?;
-                fetched = tmux.replied();
-                Some(text)
-            } else {
-                fresh
-            };
-            if let Some(text) = text.filter(|t| *t != shown) {
-                app.set_snapshot(model::parse(&text, &host));
-                shown = text;
-                dirty = true;
-            }
-            if Instant::now() >= minute {
-                app.refresh();
-                minute = next_minute();
-                dirty = true;
+            if popup.app.tab != saved {
+                saved = popup.app.tab;
+                backend.closed(saved);
             }
         }
     })();
     drop(tui);
     // The next bare `paddock` reopens this tab.
-    let _ = tmux.cmd(&format!("set-option -gq {LAST_TAB} {}", app.tab.label()));
+    backend.closed(popup.app.tab);
     if let Some(target) = result? {
-        // Switch in one command: a pane target also selects the pane, and -Z
-        // keeps a zoomed window zoomed (select-pane would unzoom it).
-        let switched = tmux.cmd(&format!("switch-client -Z -c {} -t {}", quote(&ctx.client), target.arg()));
-        if let Err(e) = switched {
-            // display-message expands formats: keep a # in the error literal.
-            let message = format!("paddock: {e}");
-            let shown = tmux.cmd(&format!("display-message -c {} {}", quote(&ctx.client), literal(&message)));
-            // Unseen, the error goes to the popup (-EE keeps it open).
-            shown.map_err(|_| e)?;
-        }
+        backend.activate(&target)?;
     }
     Ok(())
+}
+
+/// What the loop does after `Popup::handle`.
+#[derive(Debug, PartialEq)]
+enum Flow {
+    Stay,
+    /// Close, then show the target, if any.
+    Close(Option<Target>),
+}
+
+/// The popup apart from its terminal: the app, what it shows and what it
+/// waits for. `tick` comes before each draw, `handle` after each wait.
+struct Popup {
+    app: App,
+    theme: theme::Theme,
+    /// Notifications sent before the last fetch's reply are in it.
+    fetched: u64,
+    live: Live,
+    suggest_command: String,
+    suggestion: Option<Suggestion>,
+    /// Where a suggestion posts its answer.
+    answers: Sender<Ev>,
+    minute: Instant,
+    /// Something changed since the last draw.
+    dirty: bool,
+}
+
+impl Popup {
+    /// The popup on TAB (else the last one) over BACKEND's first snapshot.
+    fn new(backend: &mut dyn Backend, start: Start, tab: Option<Tab>, home: String, answers: Sender<Ev>) -> Result<Popup, String> {
+        let tab = tab.or(start.last_tab).unwrap_or(Tab::Sessions);
+        let can_suggest = !start.suggest_command.trim().is_empty();
+        let mut app = App::new(backend.fetch()?, tab, start.session, start.window, home, can_suggest, start.hidden_expanded);
+        app.caps = backend.caps();
+        let (theme, fetched, live) = (start.theme, backend.replied(), Live::new());
+        Ok(Popup { app, theme, fetched, live, suggest_command: start.suggest_command, suggestion: None, answers, minute: next_minute(), dirty: true })
+    }
+
+    /// The preview follows the selection while it is on screen (the last
+    /// draw says whether there was room for it): a capture that is due or
+    /// in goes in the next draw. News of the connection shows too.
+    fn tick(&mut self, backend: &mut dyn Backend, view: &View) -> Result<(), String> {
+        self.live.follow(self.app.preview_pane(view));
+        self.dirty |= self.live.tick(backend);
+        if backend.is_dead() {
+            return Err("the server stopped answering".into());
+        }
+        // Trouble stays up while it lasts (a key clears what else is said).
+        if let Some(news) = backend.health() {
+            match news {
+                Err(trouble) => self.app.trouble = Some(trouble),
+                Ok(back) => (self.app.trouble, self.app.status) = (None, Some(app::Status::Note(back))),
+            }
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    /// When to wake with no event: the next minute (ages tick over), the
+    /// preview's next capture, or a suggestion's deadline.
+    fn deadline(&self) -> Instant {
+        [Some(self.minute), self.live.due(), self.suggestion.as_ref().map(|s| s.deadline)].into_iter().flatten().min().unwrap_or(self.minute)
+    }
+
+    /// Handle EV (None: woken by the deadline) and everything already
+    /// queued behind it on RX, then take the snapshot they call for.
+    fn handle(&mut self, ev: Option<Ev>, rx: &Receiver<Ev>, backend: &mut dyn Backend, view: &View) -> Result<Flow, String> {
+        let app = &mut self.app;
+        let mut stale = false;
+        // An op ran: its snapshot shows even when it is the one shown (a
+        // moved row is followed then).
+        let mut ran = false;
+        let mut fresh = None;
+        let mut ev = ev;
+        while let Some(e) = ev {
+            match e {
+                Ev::Input(input) => {
+                    let action = match input {
+                        Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
+                        Event::Mouse(m) => app.on_mouse(m, view, Instant::now()),
+                        Event::Paste(text) => {
+                            app.paste(&text);
+                            Action::None
+                        }
+                        _ => Action::None,
+                    };
+                    match action {
+                        Action::Quit => return Ok(Flow::Close(None)),
+                        Action::Activate(t) if !app.caps.activate_open => return Ok(Flow::Close(Some(t))),
+                        Action::Activate(t) => match backend.activate(&t) {
+                            Ok(()) => return Ok(Flow::Close(None)),
+                            Err(e) => app.status = Some(app::Status::Failed(e)),
+                        },
+                        Action::Run(job) => {
+                            let Ran { moved, result, unsure } = backend.run(&job.op);
+                            let job = if unsure { job.unsure() } else { job };
+                            for session in &moved {
+                                app.moved(session);
+                            }
+                            if let Some(created) = app.ran(job, result) {
+                                if !app.caps.activate_open {
+                                    return Ok(Flow::Close(Some(created)));
+                                }
+                                // As any jump there: a failure stays in the popup.
+                                match backend.activate(&created) {
+                                    Ok(()) => return Ok(Flow::Close(None)),
+                                    Err(e) => app.status = Some(app::Status::Failed(e)),
+                                }
+                            }
+                            // Show the result now, not at the next subscription
+                            // check.
+                            (stale, ran) = (true, true);
+                            // Events still queued (a held ⇧↓) wait for that
+                            // snapshot: from this one, a second swap would
+                            // undo the first.
+                            self.dirty = true;
+                            break;
+                        }
+                        Action::Suggest { pane, id } => match suggest(&self.suggest_command, &pane, id, self.answers.clone()) {
+                            Ok(s) => self.suggestion = Some(s),
+                            Err(e) => app.suggested(id, Err(e)),
+                        },
+                        Action::None => {}
+                    }
+                    self.dirty = true;
+                }
+                Ev::Suggested(id, result) => {
+                    if self.suggestion.as_ref().is_some_and(|s| s.id == id) {
+                        self.suggestion = None;
+                    }
+                    app.suggested(id, result);
+                    self.dirty = true;
+                }
+                Ev::Backend(_, Msg::Exit) => return Ok(Flow::Close(None)),
+                // Older than the snapshot shown: the %sessions-changed
+                // making SESSION sends, or a subscription value from
+                // before an op, which would put back what it changed.
+                Ev::Backend(replied, _) if replied < self.fetched => {}
+                Ev::Backend(_, Msg::Changed) => stale = true,
+                Ev::Backend(_, Msg::Captured) => {}
+                Ev::Backend(_, Msg::Rows(snap)) => fresh = Some(snap),
+            }
+            ev = rx.try_recv().ok();
+        }
+        if let Some(s) = &self.suggestion
+            && Instant::now() >= s.deadline
+        {
+            let id = s.id;
+            self.suggestion = None;
+            app.suggested(id, Err(format!("no title after {}s", SUGGEST_TIMEOUT.as_secs())));
+            self.dirty = true;
+        }
+        // Stop a suggestion nobody waits for any more (cancelled, typed over).
+        if self.suggestion.as_ref().is_some_and(|s| app.suggesting() != Some(s.id)) {
+            self.suggestion = None;
+        }
+        // One snapshot for any burst of notifications: the subscription's
+        // latest unless one is due now. The preview's pane is captured on
+        // its own schedule.
+        let snap = if stale {
+            let snap = backend.fetch()?;
+            self.fetched = backend.replied();
+            Some(snap)
+        } else {
+            fresh
+        };
+        // A refresh that changes nothing is skipped.
+        if let Some(snap) = snap.filter(|s| ran || *s != app.snap) {
+            app.set_snapshot(snap);
+            self.dirty = true;
+        }
+        if Instant::now() >= self.minute {
+            app.refresh();
+            self.minute = next_minute();
+            self.dirty = true;
+        }
+        Ok(Flow::Stay)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn names_and_folders_stay_literal() {
-        assert_eq!(literal("#S #(rm -rf ~) it's"), r"'##S ##(rm -rf ~) it'\''s'");
-    }
-
-    /// `places_format` output: LINES are the client's session, then each
-    /// session's `ID OURS WINDOWS GROUP`.
-    fn layout(lines: &[&str]) -> (String, Vec<Place>) {
-        places(&lines.join(&SEP.to_string()))
-    }
-
-    #[test]
-    fn reads_every_session_from_one_line() {
-        // As tmux 3.8 printed it: a with a-2 (grouped), "b x", _paddock.
-        let (current, sessions) = layout(&["$0", "$0 0 @0%0@1%1%2 a", "$1 0 @2%3 ", "$2 0 @0%0@1%1%2 a", "$3 1 @4%5 "]);
-        assert_eq!(current, "$0");
-        let s = &sessions[0];
-        assert_eq!((s.id.as_str(), s.group.as_str(), s.ours), ("$0", "a", false));
-        assert_eq!(s.windows, [("@0".to_string(), vec!["%0".to_string()]), ("@1".to_string(), vec!["%1".to_string(), "%2".to_string()])]);
-        assert_eq!(sessions.iter().map(|s| (s.group.as_str(), s.ours)).collect::<Vec<_>>(), [("a", false), ("", false), ("a", false), ("", true)]);
-        assert_eq!(layout(&["$0", "$0 0 @0%0 my group"]).1[0].group, "my group");
-    }
-
-    #[test]
-    fn refuge_is_taken_from_the_session_the_client_shows_now() {
-        let kill = |session: &str| Op::Kill(Target::Session { session: session.into() });
-        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 ", "$9 1 @9%9 "]);
-        // The popup opened in $0, but a refuge (or anything else) moved the client to $1.
-        assert_eq!(refuge(&kill("$1"), "$1", &sessions).as_deref(), Some("$0"));
-        assert_eq!(refuge(&kill("$0"), "$1", &sessions), None, "not the client's session");
-        let pane = Op::Kill(Target::Pane { session: "$1".into(), window: "@1".into(), pane: "%1".into() });
-        assert_eq!(refuge(&pane, "$1", &sessions).as_deref(), Some("$0"));
-        // Never paddock's own session; with nowhere else, nothing.
-        let (_, alone) = layout(&["", "$0 0 @0%0 ", "$9 1 @9%9 "]);
-        assert_eq!(refuge(&kill("$0"), "$0", &alone), None);
-    }
-
-    #[test]
-    fn refuge_sees_windows_linked_elsewhere() {
-        // $0's only window @0 is also linked into $1 (at two indexes there).
-        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @0%0@1%1@0%0 "]);
-        let kill = Op::Kill(Target::Window { session: "$1".into(), window: "@0".into() });
-        assert_eq!(refuge(&kill, "$0", &sessions).as_deref(), Some("$1"), "killed through $1, it closes $0 too");
-        let pane = Op::Kill(Target::Pane { session: "$1".into(), window: "@0".into(), pane: "%0".into() });
-        assert_eq!(refuge(&pane, "$0", &sessions).as_deref(), Some("$1"));
-        // Linked twice into the client's session, it is still its only window.
-        let (_, twice) = layout(&["", "$0 0 @0%0@0%0 ", "$1 0 @1%1 "]);
-        let kill = Op::Kill(Target::Window { session: "$0".into(), window: "@0".into() });
-        assert_eq!(refuge(&kill, "$0", &twice).as_deref(), Some("$1"));
-        // A window with another pane, or a session with another window, stays.
-        let (_, more) = layout(&["", "$0 0 @0%0%3 ", "$1 0 @0%0%3@1%1 "]);
-        let pane = Op::Kill(Target::Pane { session: "$0".into(), window: "@0".into(), pane: "%0".into() });
-        assert_eq!(refuge(&pane, "$0", &more), None);
-        assert_eq!(refuge(&Op::Kill(Target::Window { session: "$1".into(), window: "@1".into() }), "$1", &more), None);
-    }
-
-    #[test]
-    fn refuge_is_never_a_group_peer_that_closes_too() {
-        // a ($0) and a-2 ($1) share their one window; b ($2) does not.
-        let (_, sessions) = layout(&["", "$0 0 @0%0 a", "$1 0 @0%0 a", "$2 0 @1%1 "]);
-        let window = Op::Kill(Target::Window { session: "$0".into(), window: "@0".into() });
-        assert_eq!(refuge(&window, "$0", &sessions).as_deref(), Some("$2"));
-        let pane = Op::Kill(Target::Pane { session: "$0".into(), window: "@0".into(), pane: "%0".into() });
-        assert_eq!(refuge(&pane, "$0", &sessions).as_deref(), Some("$2"));
-        // Killing the session alone leaves its peer, windows and all.
-        assert_eq!(refuge(&Op::Kill(Target::Session { session: "$0".into() }), "$0", &sessions).as_deref(), Some("$1"));
-        // Moving the window out of the peer empties the whole group: follow it.
-        let mv = Op::MoveWindow { from: "$1".into(), window: "@0".into(), into: "$2".into(), to: "@1".into(), before: false };
-        assert_eq!(refuge(&mv, "$0", &sessions).as_deref(), Some("$2"));
-        // Out of an ungrouped session that also links it, it stays in the client's.
-        let (_, linked) = layout(&["", "$0 0 @0%0 ", "$1 0 @0%0 ", "$2 0 @1%1 "]);
-        assert_eq!(refuge(&mv, "$0", &linked), None);
-    }
-
-    #[test]
-    fn refuge_follows_a_moved_window_or_pane() {
-        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 "]);
-        let mv = Op::MoveWindow { from: "$0".into(), window: "@0".into(), into: "$2".into(), to: "@2".into(), before: false };
-        assert_eq!(refuge(&mv, "$0", &sessions).as_deref(), Some("$2"));
-        let join = Op::JoinPane { pane: "%0".into(), to: "%2".into(), before: false };
-        assert_eq!(refuge(&join, "$0", &sessions).as_deref(), Some("$2"));
-        let break_ = |session: &str| Op::BreakPane { pane: "%0".into(), session: session.into() };
-        assert_eq!(refuge(&break_("$2"), "$0", &sessions).as_deref(), Some("$2"));
-        assert_eq!(refuge(&break_("$0"), "$0", &sessions), None, "a window of its own in the same session");
-    }
-
-    #[test]
-    fn a_failed_op_takes_the_client_back_from_its_refuge() {
-        let moved = Sheltered { from: "$0".into(), to: "$1".into() };
-        let (_, sessions) = layout(&["", "$0 0 @0%0 ", "$1 0 @1%1 ", "$2 0 @2%2 "]);
-        assert_eq!(homecoming(&moved, "$1", &sessions).as_deref(), Some("$0"));
-        assert_eq!(homecoming(&moved, "$2", &sessions), None, "it moved on since: left there");
-        assert_eq!(homecoming(&moved, "", &sessions), None, "the client is gone");
-        let (_, closed) = layout(&["", "$1 0 @1%1 ", "$2 0 @2%2 "]);
-        assert_eq!(homecoming(&moved, "$1", &closed), None, "the op closed it after all");
-    }
+    use app::{Op, Status};
+    use backend::Caps;
+    use model::Snapshot;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn parses_commands() {
         assert!(matches!(parse(&["init"]), Ok(Cmd::Init)));
+        assert!(matches!(parse(&["init", "--rex"]), Ok(Cmd::InitRex)));
+        assert!(matches!(parse(&["--rex", "--tab", "agents"]), Ok(Cmd::Rex(o)) if o.tab == Some(Tab::Agents)));
+        assert!(parse(&["--rex", "--nope"]).is_err());
         assert!(parse(&["init", "x"]).is_err());
         assert!(matches!(parse(&["--tab", "agents"]), Ok(Cmd::Run(Some(Tab::Agents)))));
         assert!(matches!(parse(&["--tab", "sessions"]), Ok(Cmd::Run(Some(Tab::Sessions)))));
@@ -820,27 +638,34 @@ mod tests {
 
     #[test]
     fn handshake_refuses_other_versions() {
-        assert_eq!(version_mismatch(None, "0.1.0"), None);
-        assert_eq!(version_mismatch(Some("0.1.0"), "0.1.0"), None);
+        assert_eq!(version_mismatch(None, "0.1.0", false), None);
+        assert_eq!(version_mismatch(Some("0.1.0"), "0.1.0", false), None);
         // Stale bindings, an upgraded binary: a reload rebinds them.
-        let e = version_mismatch(Some("0.9.0"), "0.10.0").unwrap();
+        let e = version_mismatch(Some("0.9.0"), "0.10.0", false).unwrap();
         assert_eq!(e, "key bindings for paddock 0.9.0, but this is 0.10.0\nreload tmux to rebind the keys");
         // An old binary (PADDOCK_BIN, or not rebuilt): reloading does nothing.
-        let e = version_mismatch(Some("0.3.0"), "0.2.0").unwrap();
+        let e = version_mismatch(Some("0.3.0"), "0.2.0", false).unwrap();
         assert_eq!(e, "key bindings for paddock 0.3.0, but this is 0.2.0\ninstall paddock 0.3.0 (or point PADDOCK_BIN at it)");
-        let e = version_mismatch(Some("0.3.0-rc1"), "0.3.0").unwrap();
+        let e = version_mismatch(Some("0.3.0-rc1"), "0.3.0", false).unwrap();
         assert!(e.ends_with("\nreload tmux, or install paddock 0.3.0-rc1"), "{e}");
+        // On Rex, the copy `paddock init --rex` installed.
+        let e = version_mismatch(Some("0.9.0"), "0.10.0", true).unwrap();
+        assert_eq!(e, "paddock.lua for paddock 0.9.0, but this is 0.10.0\nrun paddock init --rex to update it");
+        let e = version_mismatch(Some("0.3.0"), "0.2.0", true).unwrap();
+        assert!(e.ends_with("\ninstall paddock 0.3.0 (or set bin in paddock.setup)"), "{e}");
         // A popup 80% of 80 columns wide shows each line unwrapped.
         for (p, o) in [("10.10.10", "10.10.9"), ("10.10.9", "10.10.10")] {
-            for line in version_mismatch(Some(p), o).unwrap().lines() {
-                assert!("paddock: ".len() + line.len() <= 64, "{line}");
+            for rex in [false, true] {
+                for line in version_mismatch(Some(p), o, rex).unwrap().lines() {
+                    assert!("paddock: ".len() + line.len() <= 64, "{line}");
+                }
             }
         }
     }
 
     #[test]
     fn version_is_checked_before_arguments() {
-        let mismatch = version_mismatch(Some("0.9.0"), "0.8.0");
+        let mismatch = version_mismatch(Some("0.9.0"), "0.8.0", false);
         // A flag from newer bindings: the version is the error, not usage.
         assert_eq!(command(&["--tab", "future"], Some("0.9.0"), "0.8.0").err(), mismatch);
         assert_eq!(command(&["--tab", "agents"], Some("0.9.0"), "0.8.0").err(), mismatch);
@@ -851,6 +676,25 @@ mod tests {
         assert!(matches!(command(&["--version"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Version)));
         assert!(matches!(command(&["--help"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Help)));
         assert!(matches!(command(&["init"], Some("0.9.0"), "0.8.0"), Ok(Cmd::Init)));
+        assert!(matches!(command(&["init", "--rex"], Some("0.9.0"), "0.8.0"), Ok(Cmd::InitRex)));
+        // rex/paddock.lua's command line too.
+        let mismatch = version_mismatch(Some("0.9.0"), "0.8.0", true);
+        assert_eq!(command(&["--rex", "--future"], Some("0.9.0"), "0.8.0").err(), mismatch);
+        assert!(matches!(command(&["--rex", "--popup"], Some("0.8.0"), "0.8.0"), Ok(Cmd::Rex(_))));
+        assert!(matches!(command(&["--rex", "--popup"], None, "0.8.0"), Ok(Cmd::Rex(_))), "a checkout's copy has no version");
+    }
+
+    #[test]
+    fn the_rex_action_is_made_for_this_binary() {
+        let lua = rex_plugin(Path::new("/opt/homebrew/bin/paddock"), "0.8.0");
+        assert!(lua.contains("\nlocal BIN = \"/opt/homebrew/bin/paddock\"\nlocal VERSION = \"0.8.0\"\n"), "{lua}");
+        assert!(!lua.contains(" = nil\n") && REX_PLUGIN.contains("\nlocal BIN = nil\nlocal VERSION = nil\n"));
+        assert!(rex_plugin(Path::new("/a \"b\""), "1").contains(r#"local BIN = "/a \"b\"""#), "quoted for Lua");
+        // Beside Rex's init.lua.
+        let env = |vars: &'static [(&str, &str)]| move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        assert_eq!(rex_config(env(&[("HOME", "/h")])), Path::new("/h/.config/rex/init.lua"));
+        assert_eq!(rex_config(env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x"), ("REX_CONFIG", "")])), Path::new("/x/rex/init.lua"));
+        assert_eq!(rex_config(env(&[("HOME", "/h"), ("REX_CONFIG", "/c/my.lua")])), Path::new("/c/my.lua"));
     }
 
     #[test]
@@ -888,5 +732,247 @@ mod tests {
         assert_eq!(nocwd("/opt/homebrew/bin/paddock", ""), Path::new("/opt/homebrew/bin/paddock"));
         assert_eq!(nocwd("./target/debug/paddock", "/opt/homebrew/bin"), Path::new("/opt/homebrew/bin/paddock"));
         assert_eq!(nocwd("bin/paddock", "bin"), exe);
+    }
+
+    /// A server the test scripts: snapshots are fixture lines, the next of
+    /// `after` once an op runs. It records what it is asked to do.
+    #[derive(Default)]
+    struct Fake {
+        caps: Caps,
+        text: String,
+        after: Vec<String>,
+        fetches: u64,
+        ops: Vec<Op>,
+        captured: Vec<String>,
+        activated: Vec<Target>,
+        /// Why `activate` fails, if it does.
+        refuse: Option<String>,
+        /// What `health` tells of next.
+        news: Option<Result<String, String>>,
+        /// Why `run` fails, if it does, and whether without an answer.
+        fail: Option<String>,
+        unsure: bool,
+        /// What `run` made, if it succeeds.
+        made: Option<Target>,
+    }
+
+    impl Backend for Fake {
+        fn caps(&self) -> Caps {
+            self.caps
+        }
+
+        fn fetch(&mut self) -> Result<Snapshot, String> {
+            self.fetches += 1;
+            Ok(rows(&self.text))
+        }
+
+        fn replied(&self) -> u64 {
+            self.fetches
+        }
+
+        fn is_dead(&self) -> bool {
+            false
+        }
+
+        fn health(&mut self) -> Option<Result<String, String>> {
+            self.news.take()
+        }
+
+        fn capture(&mut self, pane: &str) -> Option<(Result<Vec<String>, String>, Duration)> {
+            self.captured.push(pane.into());
+            Some((Ok(vec![pane.into()]), Duration::ZERO))
+        }
+
+        fn run(&mut self, op: &Op) -> Ran {
+            self.ops.push(op.clone());
+            if !self.after.is_empty() {
+                self.text = self.after.remove(0);
+            }
+            Ran { moved: Vec::new(), result: self.fail.clone().map_or_else(|| Ok(self.made.clone()), Err), unsure: self.fail.is_some() && self.unsure }
+        }
+
+        fn closed(&mut self, _: Tab) {}
+
+        fn activate(&mut self, target: &Target) -> Result<(), String> {
+            self.activated.push(target.clone());
+            self.refuse.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    /// The snapshot of fixture lines TEXT.
+    fn rows(text: &str) -> Snapshot {
+        backend::tmux::fixture(&text.lines().collect::<Vec<_>>())
+    }
+
+    /// Session $1 with windows NAMES (`@N:name`), in that order, a pane each.
+    fn windows(names: &[&str]) -> String {
+        let line = |(i, w): (usize, &&str)| {
+            let (id, name) = w.split_once(':').unwrap();
+            format!("$1|s|{id}|{}|{name}|{}|0|%{}|0|1|zsh|||||||||/a", i + 1, u8::from(i == 0), &id[1..])
+        };
+        names.iter().enumerate().map(line).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The popup over FAKE's snapshot, opened from window @1 of $1, its
+    /// selection on TARGET; and the channel its events come on.
+    fn popup(fake: &mut Fake, target: Target) -> (Popup, Sender<Ev>, Receiver<Ev>) {
+        let (tx, rx) = mpsc::channel();
+        let start = Start { last_tab: None, theme: theme::Theme::default(), suggest_command: String::new(), hidden_expanded: false, session: "$1".into(), window: "@1".into() };
+        let mut p = Popup::new(fake, start, Some(Tab::Sessions), String::new(), tx.clone()).unwrap();
+        p.app.selected = p.app.rows.iter().position(|r| r.target.as_ref() == Some(&target)).unwrap();
+        (p, tx, rx)
+    }
+
+    fn window(id: &str) -> Target {
+        Target::Window { session: "$1".into(), window: id.into() }
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> Option<Ev> {
+        Some(Ev::Input(Event::Key(KeyEvent::new(code, modifiers))))
+    }
+
+    /// The windows of session $1 the popup shows, in order.
+    fn shown(p: &Popup) -> Vec<&str> {
+        p.app.snap.sessions[0].windows.iter().map(|w| w.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_ops_result_shows_at_once_and_older_news_is_ignored() {
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), after: vec![windows(&["@2:b", "@1:a"])], ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        let before = rows(&fake.text);
+        let view = View::new();
+        assert_eq!(p.handle(key(KeyCode::Down, KeyModifiers::SHIFT), &rx, &mut fake, &view), Ok(Flow::Stay));
+        assert_eq!(fake.ops, [Op::SwapWindows { session: "$1".into(), a: "@1".into(), b: "@2".into() }]);
+        assert_eq!(shown(&p), ["@2", "@1"], "a snapshot taken after the op, without waiting for news");
+        assert_eq!(p.app.status, Some(Status::Done("moved down   ^z undo".into())));
+        assert_eq!(p.app.selected_target(), Some(&window("@1")), "the moved row is followed");
+        // A subscription value sent before that snapshot would put the swap back.
+        assert_eq!(p.handle(Some(Ev::Backend(p.fetched - 1, Msg::Rows(before))), &rx, &mut fake, &view), Ok(Flow::Stay));
+        assert_eq!(shown(&p), ["@2", "@1"]);
+        // One sent since is news.
+        let news = rows(&windows(&["@2:b", "@1:a", "@3:c"]));
+        p.handle(Some(Ev::Backend(p.fetched, Msg::Rows(news))), &rx, &mut fake, &view).unwrap();
+        assert_eq!(shown(&p), ["@2", "@1", "@3"]);
+    }
+
+    #[test]
+    fn a_held_key_repeats_its_op_from_the_snapshot_after_the_last() {
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b", "@3:c"]), after: vec![windows(&["@2:b", "@1:a", "@3:c"]), windows(&["@2:b", "@3:c", "@1:a"])], ..Fake::default() };
+        let (mut p, tx, rx) = popup(&mut fake, window("@1"));
+        let view = View::new();
+        // Both presses are queued before the loop wakes.
+        let down = || key(KeyCode::Down, KeyModifiers::SHIFT);
+        tx.send(down().unwrap()).unwrap();
+        p.handle(down(), &rx, &mut fake, &view).unwrap();
+        assert_eq!(fake.ops.len(), 1, "the second press waits for the first one's snapshot");
+        p.handle(rx.try_recv().ok(), &rx, &mut fake, &view).unwrap();
+        let swap = |a: &str, b: &str| Op::SwapWindows { session: "$1".into(), a: a.into(), b: b.into() };
+        assert_eq!(fake.ops, [swap("@1", "@2"), swap("@1", "@3")], "moved down twice, not down and back");
+        assert_eq!(shown(&p), ["@2", "@3", "@1"]);
+    }
+
+    #[test]
+    fn the_preview_follows_the_selection() {
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        let view = View::new();
+        p.tick(&mut fake, &view).unwrap();
+        assert_eq!(fake.captured, ["%1"]);
+        assert_eq!(p.live.pane.as_deref(), Some("%1"));
+        p.handle(key(KeyCode::Down, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+        p.tick(&mut fake, &view).unwrap();
+        assert_eq!(fake.captured, ["%1", "%2"], "captured at once, not at the next due time");
+        assert!(p.dirty);
+        // Off: nothing is captured.
+        p.app.preview_on = false;
+        p.tick(&mut fake, &view).unwrap();
+        assert_eq!((fake.captured.len(), p.live.pane.as_deref()), (2, None));
+    }
+
+    #[test]
+    fn closing_and_opening_go_by_what_the_server_can_do() {
+        let view = View::new();
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@2"));
+        assert_eq!(p.handle(key(KeyCode::Esc, KeyModifiers::NONE), &rx, &mut fake, &view), Ok(Flow::Close(None)));
+        // tmux: the popup closes, then the target is shown.
+        assert_eq!(p.handle(key(KeyCode::Enter, KeyModifiers::NONE), &rx, &mut fake, &view), Ok(Flow::Close(Some(window("@2")))));
+        assert!(fake.activated.is_empty());
+        assert_eq!(p.handle(Some(Ev::Backend(0, Msg::Exit)), &rx, &mut fake, &view), Ok(Flow::Close(None)), "the server went");
+        // Rex: shown first, so a failure stays in the popup to be read.
+        fake.caps.activate_open = true;
+        fake.refuse = Some("turn on Remote Control".into());
+        let (mut p, _tx, rx) = popup(&mut fake, window("@2"));
+        assert_eq!(p.handle(key(KeyCode::Enter, KeyModifiers::NONE), &rx, &mut fake, &view), Ok(Flow::Stay));
+        assert_eq!(p.app.status, Some(Status::Failed("turn on Remote Control".into())));
+        fake.refuse = None;
+        assert_eq!(p.handle(key(KeyCode::Enter, KeyModifiers::NONE), &rx, &mut fake, &view), Ok(Flow::Close(None)));
+        assert_eq!(fake.activated, [window("@2"), window("@2")]);
+    }
+
+    #[test]
+    fn what_is_created_is_gone_to_as_any_target_is() {
+        let view = View::new();
+        let create = |p: &mut Popup, fake: &mut Fake, rx: &Receiver<Ev>| {
+            for (code, mods) in [(KeyCode::Char('s'), KeyModifiers::CONTROL), (KeyCode::Char('n'), KeyModifiers::NONE)] {
+                p.handle(key(code, mods), rx, fake, &view).unwrap();
+            }
+            p.handle(key(KeyCode::Enter, KeyModifiers::NONE), rx, fake, &view)
+        };
+        // tmux: once the popup has closed.
+        let mut fake = Fake { text: windows(&["@1:a"]), made: Some(window("@9")), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        assert_eq!(create(&mut p, &mut fake, &rx), Ok(Flow::Close(Some(window("@9")))));
+        // Rex: first, so a failure stays in the popup to be read.
+        fake.caps.activate_open = true;
+        fake.refuse = Some("turn on Remote Control".into());
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        assert_eq!(create(&mut p, &mut fake, &rx), Ok(Flow::Stay));
+        assert_eq!(p.app.status, Some(Status::Failed("turn on Remote Control".into())));
+        assert_eq!(fake.activated, [window("@9")]);
+    }
+
+    #[test]
+    fn a_refused_op_opens_its_editor_again_unless_its_answer_was_lost() {
+        let view = View::new();
+        for (unsure, reopens) in [(false, true), (true, false)] {
+            let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), fail: Some("no".into()), unsure, ..Fake::default() };
+            let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+            p.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL), &rx, &mut fake, &view).unwrap();
+            p.handle(key(KeyCode::Char('n'), KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+            p.handle(key(KeyCode::Enter, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+            assert!(matches!(fake.ops[..], [Op::NewWindow { .. }]));
+            assert_eq!(matches!(p.app.mode, app::Mode::Create(_)), reopens, "unsure {unsure}: {:?}", p.app.status);
+        }
+    }
+
+    #[test]
+    fn a_servers_trouble_stays_up_while_it_lasts() {
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        let view = View::new();
+        fake.news = Some(Err("devbox stopped answering (trying again)".into()));
+        p.tick(&mut fake, &view).unwrap();
+        assert!(p.dirty && p.app.trouble.is_some());
+        // A key clears what else was said, not that: the list may be stale.
+        p.handle(key(KeyCode::Down, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+        p.tick(&mut fake, &view).unwrap();
+        assert_eq!((p.app.trouble.as_deref(), &p.app.status), (Some("devbox stopped answering (trying again)"), &None));
+        fake.news = Some(Ok("every server is answering again".into()));
+        p.tick(&mut fake, &view).unwrap();
+        assert_eq!((&p.app.trouble, &p.app.status), (&None, &Some(Status::Note("every server is answering again".into()))));
+    }
+
+    #[test]
+    fn a_suggestion_nobody_waits_for_is_dropped() {
+        let mut fake = Fake { text: windows(&["@1:a"]), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
+        let view = View::new();
+        // An answer to a suggestion never asked for changes nothing but the draw.
+        p.dirty = false;
+        p.handle(Some(Ev::Suggested(7, Ok("title".into()))), &rx, &mut fake, &view).unwrap();
+        assert!(p.dirty && p.suggestion.is_none());
+        assert_eq!(fake.fetches, 1, "no snapshot without news");
     }
 }

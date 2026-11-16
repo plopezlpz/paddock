@@ -353,7 +353,8 @@ if [ -x "$PB" ]; then
   # for the snapshot after the first, which would otherwise swap it back.
   t new-window -d -t main: -n w2 'sleep 600' \; new-window -d -t main: -n w3 'sleep 600'
   tmux -L "$OUT" send-keys Tab
-  check "real paddock: back on the sessions tab" wait_screen "w3"
+  # w3 came in the same snapshot, below the small popup's two-line rows.
+  check "real paddock: back on the sessions tab" wait_screen "w2"
   first=$(t display -p -t main:0 '#{window_id}')
   tmux -L "$OUT" send-keys S-Down S-Down
   third() { [ "$(t display -p -t main:2 '#{window_id}')" = "$first" ]; }

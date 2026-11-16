@@ -42,11 +42,12 @@ SEP=$'\037'
 # its session. Ask the server for the hook rather than parse version strings
 # (3.8a, next-3.9, master, openbsd-7.6): before 3.8 show-hooks fails, and so
 # does the whole call. The popup's defaults go first so the display shows
-# them; the style is the terminal's own colours, not tmux's default popup
-# style. The key tables list each key with its note, or its command if it
-# has none.
-if ! out=$(tmux set-option -gqo @paddock-popup-width '80%' \; \
-    set-option -gqo @paddock-popup-height '80%' \; \
+# them: 80% of the terminal, all of it when that is too narrow for the
+# preview beside the list (or too short for it below); the style is the
+# terminal's own colours, not tmux's default popup style. The key tables
+# list each key with its note, or its command if it has none.
+if ! out=$(tmux set-option -gqo @paddock-popup-width '#{?#{e|<:#{client_width},128},100%,80%}' \; \
+    set-option -gqo @paddock-popup-height '#{?#{e|<:#{client_height},30},100%,80%}' \; \
     set-option -gqo @paddock-popup-style 'bg=terminal,fg=terminal' \; \
     display-message -p "#{@paddock-key}$SEP#{@paddock-agents-key}$SEP#{@paddock-click}$SEP#{@paddock-popup-width}$SEP#{@paddock-popup-height}$SEP#{@paddock-popup-style}" \; \
     show-hooks -g client-closed \; \

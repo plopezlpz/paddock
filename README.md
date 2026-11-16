@@ -87,8 +87,9 @@ working in the same project, one per worktree, sit together.
 
 ### Skim agents without jumping to them
 
-The selected pane, live, beside the list, when the popup is at least 102
-columns wide (`ctrl-o` toggles it). Move down the list and the preview follows,
+The selected pane, live, beside the list when the popup is at least 102
+columns wide, else below it when the popup is at least 24 rows high (`ctrl-o`
+toggles it). Move down the list and the preview follows,
 so you can read what an agent is doing, or asking, before you jump to it.
 
 <img src="docs/brand/preview.svg" alt="paddock's agents tab with the selected agent's pane shown live beside the list; moving down the list changes the preview, and nothing is opened or switched." width="100%">
@@ -131,6 +132,13 @@ else the defaults (see [Options](#options)).
 
 It uses one tmux control-mode connection and redraws only when something
 changes.
+
+### Runs on tmux or Rex
+
+paddock also runs on a [Rex](https://www.superlogical.com/rex) server, in a
+floating pane, with agent state from Rex's own program status:
+`paddock init --rex` installs the action and prints how to load it. See
+[rex/README.md](rex/README.md).
 
 ## Install
 
@@ -229,21 +237,35 @@ is not checked: keep it at the clone's version, and update the two together.
 
 - **Sessions tab**: session › window › pane tree with each window's agent state.
 - **Agents tab**: one card per agent, grouped by status, session or folder, or not at all; it opens on the agent you are in.
-- **Preview**: the selected pane, live, when the popup is at least 102
-  columns wide.
-- **Phones**: under 80 columns, a compact two-line layout with tappable words.
+- **Preview**: the selected pane, live, beside the list when the popup is at
+  least 102 columns wide, else below it when it is at least 24 rows high.
+- **Phones**: under 80 columns, a compact two-line layout; under 60, footer
+  hints are words alone, to tap.
 
-Agent cards use two lines: a bright state dot, agent mark and directory/branch
-identity above state-colored elapsed time and a muted topic label. The colored dot means
-**state**, not agent type. The provider name remains searchable and appears in
+The selected row is marked `▌`, its name bold in the accent colour; the
+session the client shows is marked `*`. While filtering, the characters that
+matched are underlined in the accent colour. State has a mark of its own as
+well as a colour: `!` waiting, `◐` working, `✓` finished, `○` idle (the
+title bar names the counts when there is room).
+
+Agent cards use two lines: a state mark, agent mark and directory/branch
+identity above state-colored elapsed time and a muted topic label. The first
+mark means **state**, not agent type. The provider name remains searchable and appears in
 the preview header, without repeating it on the card. Editing the topic keeps
-the directory on the first line.
+the directory on the first line. Grouped by folder, a card whose directory
+would only repeat its group's header shows its session and window instead.
+When the list goes on past the popup's edge, `↑ N more` and `↓ N more` say
+how many rows there are that way.
 
 Title suggestions from agent-status.tmux request stable one- or two-word topics
 such as `Branch labels` or `Token expiry`. Existing titles are preserved, not
 cut to their first two words: use `ctrl-r` twice to suggest a short replacement,
 then Enter to keep it (or Escape to cancel). Filtering still uses the full stored
 title, even when it is visually truncated.
+
+Both tabs use the same path formatter. In Sessions, a window's path comes from
+its active pane, beside the window name in wide layouts and below it in compact
+layouts. Pane counts remain alongside the path when there is room.
 
 Paths are anchored at a worktree's main Git repository when it can be located;
 otherwise, at the first enclosing Git repository from filesystem root toward
@@ -255,14 +277,14 @@ this is a compact label, not a literal path. Long labels shorten further to fit.
 Non-repository paths keep the usual `~/…` abbreviation. Repository discovery is
 cached until the popup closes.
 
-Cards append the checked-out branch in parentheses, for example
+Paths append the checked-out branch in parentheses, for example
 `myrepo/…/topic (feature/cart)`, even when the branch matches the final directory
 name. Detached HEAD shows `(detached abc1234)` instead. This uses the nearest
 repository's HEAD, including for nested repos and submodules; it is reread when
-the agent list rebuilds. No full-path heading is displayed below the filter.
-Filtering searches the absolute and `~/…` paths, repo label, full branch name,
-and full detached commit ID, even when shortened or hidden. Sessions keeps its
-existing path display.
+either list rebuilds. No full-path heading is displayed below the filter.
+Both tabs search the absolute and `~/…` paths, repo label, full branch name,
+and full detached commit ID, even when shortened on screen. Agents also searches
+hidden cards; Sessions also matches Git metadata from inactive panes.
 
 ### Notification formatting
 
@@ -335,12 +357,14 @@ The section's saved expansion uses the global `@paddock-hidden-expanded` option.
 | `ctrl-r` | rename the selected session, window or agent, in place |
 | `shift-↑` `shift-↓` | move the selected window or pane past its neighbour (at the ends, into the next session or window) |
 | `ctrl-t` | move the selected window or pane: pick a spot (arrows or the filter), `Enter` drops it there |
-| `ctrl-x`, `Delete` | kill the selected session, window or pane, after saying what runs there (`Enter` or `ctrl-x` again) |
+| `ctrl-x`, `Delete` | kill the selected session, window or pane, after saying what runs there (`Enter` confirms; any other key cancels) |
 | `ctrl-s` | new window after the selected one (last in a selected session), in its folder; `ctrl-s` again: a new session instead |
-| `ctrl-z` | undo the last rename or move |
+| `ctrl-z` | undo the last rename, move, hide or show |
 | `ctrl-g` | change the agents' grouping |
 | `ctrl-o` | toggle the preview |
-| `Esc`, `ctrl-c` | back out: close a menu, cancel a rename, move, new name or question, else close |
+| `ctrl-a` | the selected row's menu: everything you can do with it (also in the footer) |
+| `Esc` | back out: close a menu, cancel a rename, move, new name or question, else clear the filter, else close |
+| `ctrl-c` | as `Esc`, but it closes rather than clear the filter |
 
 Renaming edits the name in place, with `←` `→`, `Home` `End` (`ctrl-a`
 `ctrl-e`), `ctrl-w` and `ctrl-u`. `Enter` saves. An empty window name hands
@@ -361,7 +385,7 @@ Mouse and touch: click to select, double-click to open (on a phone, tap the
 selected row). Click ▸ to show a window's panes. Drag a window or pane to
 move it. Right-click (or ctrl-click) opens the row's menu of everything you
 can do with it. Tabs and footer hints are buttons; when the footer runs out
-of room, ⋯ opens the menu.
+of room, its menu (`ctrl-a`) has the rest.
 
 ## Options
 
@@ -370,16 +394,18 @@ of room, ⋯ opens the menu.
 | `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
 | `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
-| `@paddock-popup-width`, `@paddock-popup-height` | `80%` | may be a format, e.g. `#{?#{e\|<:#{client_width},140},100%,80%}` |
+| `@paddock-popup-width`, `@paddock-popup-height` | `80%`, or `100%` on a terminal under 128 columns (30 rows) | may be a format, as the defaults are: `#{?#{e\|<:#{client_width},128},100%,80%}` |
 | `@paddock-popup-style` | `bg=terminal,fg=terminal` | popup background and text |
-| `@paddock-color-accent` | `pane-active-border-style` fg, else yellow | selection, active tab |
+| `@paddock-color-accent` | `pane-active-border-style` fg, else magenta | selection, active tab |
 | `@paddock-color-muted`, `-hint`, `-border` | dim, blue, muted | secondary text, key hints, frame |
 | `@paddock-color-asking`, `-working`, `-finished`, `-idle` | `@agent-color-*`, else red, yellow, cyan, green | agent dots |
 
 Colours are tmux colours: a name such as `red` or `brightred`, `colour214`,
 `#a2a970`, `default` or `terminal`. tmux's other names, such as `orange`,
 are not followed: set the `@paddock-color-*` to one of these to match. The
-dots are `@agent-icon-*` when one column wide, else `●` (`○` idle).
+state marks are `@agent-icon-*` when one column wide and no other state's
+(agent-status.tmux's default `●` is three states'), else `!` waiting, `◐`
+working, `✓` finished and `○` idle.
 
 ## Agent state
 

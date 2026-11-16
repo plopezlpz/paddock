@@ -6,6 +6,44 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-16
+
+### Added
+
+- Rex support (`paddock --rex`, rex/README.md): sessions, tabs, panes and agents on a Rex server and the servers its app connects to, with agent state from Rex's own program status. Snapshots and previews come in on a thread per server, so the popup never waits for Rex; animated agent titles (spinners) cost no snapshots, an agent's news reads only its own pane again, and a new tab or layout reads the sessions and tabs again but keeps the panes as read, so only a server's first read costs a call for each pane (over a network, a tenth of a second each). A quiet pane whose captures are slow (a long scrollback) is captured less often, every 3 seconds at most. An edit waits for a snapshot that has it, so a held `⇧↓` moves a tab step by step, on remote hosts too. A failed worker or listener is restarted; while a server fails the status line says which and why, for as long as it does, and its sessions are marked (`@host · away`). A host that is away is tried again every 30 seconds. A failed agent counts as asking, an unknown state as idle, and a finished agent turns idle once paddock has taken you to it, until it reports something new. Only what Rex can do is offered, in Rex's words: tabs and panes move within their session, and session names need not be unique. A tab without a name is named after its focused pane: an agent's title, else what runs there.
+- `paddock init --rex` installs the Rex action, made for that binary, beside Rex's `init.lua` and prints how to load it; paddock refuses an action made for another version and says how to fix it, as with tmux key bindings.
+- `ctrl-a` opens the selected row's menu.
+- State marks of their own beside the colour: `!` asking, `◐` working, `✓` finished, `○` idle. agent-status.tmux's default `●` for three states is not used for them.
+- While filtering, the matched characters are underlined; the selected row is marked `▌` and bold in the accent colour.
+- The preview goes below the list when the popup is too narrow for it beside the list but tall enough; the popup fills a small terminal by default.
+- An empty Agents tab says how agents get there.
+- `↑ N more` and `↓ N more` say that the list goes on past the popup's edge.
+- `ctrl-z` also undoes a hide or a show.
+- Grouped by folder, a card whose path would only repeat its group's header shows its session and window instead.
+
+### Changed
+
+- `Esc` clears the filter before it closes the popup.
+- The tab paddock reopens on is kept as soon as it changes, so it holds even when the popup is closed from outside.
+- A tmux preview of a short screen is topped up from the pane's history, except in the alternate screen (a full-screen program).
+- Repository labels for linked Git worktrees are found from files, without running Git for the usual layout or a bare main repository, and each HEAD is read again only when it changes.
+- Sessions window paths use the same Git-aware repository/worktree labels and branch suffixes as Agents, including explicit detached HEAD labels. Full paths, branches and commit IDs remain searchable, including metadata from inactive panes; window paths follow the active pane. Pane counts remain visible when space permits.
+- Grouped by folder, the agents in one Git repository share a group, its worktrees included, headed by the repository's name (with its folder when two share one).
+- Switching to Sessions from an agent selects the agent's window, and a selected window's session stays in view when there is room.
+- A card with no title gives its agent's message the whole line, not `untitled`.
+- A long session or window name is cut with `…` and leaves the path its room; an agent's message takes the room its title leaves, a branch the room its path leaves.
+- An agent's title from its pane title keeps punctuation in front (`~/src`, `[wip]`): only the glyphs and spinners agents put there are dropped.
+- The default accent is magenta, not yellow, which is also the working colour.
+
+### Fixed
+
+- A kill is confirmed with `Enter` only. `ctrl-x` again used to confirm it, so two presses (or a held key) killed row after row; now any other key cancels.
+- The row menu scrolls in a popup too short for it: its selection could move onto items that were not drawn, and `Enter` ran them.
+- A rename, or a new session or window, that the server refuses opens again with what was typed and the reason, instead of losing it to a status line.
+- A pane moved into a collapsed window opens it; before, the pane was listed alone and its next move seemed to do nothing.
+- An undo that fails stays to be tried again; `ctrl-s` cancelled goes back to the tab it came from; a move dropped where it can't go no longer keeps its row listed.
+- Wide characters are measured by grapheme when text is cut to fit, so an emoji with a variation selector or a joiner no longer overflows its place.
+
 ## [0.7.0] - 2026-10-31
 
 ### Added
@@ -151,7 +189,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/plopezlpz/paddock/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/plopezlpz/paddock/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/plopezlpz/paddock/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/plopezlpz/paddock/compare/v0.4.0...v0.5.0

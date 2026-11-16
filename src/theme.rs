@@ -1,15 +1,17 @@
-//! Colours. Each role resolves, in order: its @paddock-color-* option, the
-//! user's tmux theme (agent-status.tmux's @agent-color-*, the active pane
-//! border for the accent), then the terminal's own palette. Values use tmux
+//! Colours, by role. A backend sets the roles it has values for by name
+//! (`set`): tmux from its options (backend/tmux), Rex from the action's
+//! --color flags; the rest are the terminal's own palette. Values use tmux
 //! colour syntax: red, brightred, colour214, #a2a970, default, terminal (not
-//! tmux's X11 names, such as orange, which fall through to the next).
-//! State dots are agent-status.tmux's @agent-icon-*, when one column wide.
+//! tmux's X11 names, such as orange, which leave the role as it was).
+//! State marks are a backend's (`marks`: agent-status.tmux's @agent-icon-*),
+//! when one column wide and no other state's (its default `●` for three
+//! states is not), else a distinct glyph per state, so state never rests on
+//! colour alone.
 
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::model::State;
-use crate::tmux::Control;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentIcons {
@@ -35,6 +37,9 @@ pub fn agent_icon(kind: &str, mode: AgentIcons) -> &'static str {
 }
 
 pub struct Theme {
+    /// Draw the popup's rounded frame. A Rex floating pane has its own
+    /// edge, so there the frame's lines are left blank (its titles stay).
+    pub frame: bool,
     /// Explicit choice: terminal font coverage cannot be detected over tmux/SSH.
     pub agent_icons: AgentIcons,
     pub accent: Color,
@@ -46,64 +51,56 @@ pub struct Theme {
     icons: [String; State::ALL.len()],
 }
 
-/// Roles read from tmux, in this order, in one display-message. E: expands
-/// values that are formats themselves (tmux 3.8's default border style is
-/// a `#{?...}`).
-const OPTIONS: &[&str] = &[
-    "E:@paddock-color-accent",
-    "E:@paddock-color-muted",
-    "E:@paddock-color-hint",
-    "E:@paddock-color-border",
-    "E:@paddock-color-idle",
-    "E:@paddock-color-finished",
-    "E:@paddock-color-working",
-    "E:@paddock-color-asking",
-    "E:@agent-color-idle",
-    "E:@agent-color-finished",
-    "E:@agent-color-working",
-    "E:@agent-color-asking",
-    "E:pane-active-border-style",
-    "@agent-icon-idle",
-    "@agent-icon-finished",
-    "@agent-icon-working",
-    "@agent-icon-asking",
-    "@paddock-agent-icons",
-];
+/// The roles `set` takes; "waiting" is "asking".
+pub const ROLES: &[&str] = &["accent", "muted", "hint", "border", "idle", "finished", "working", "asking", "waiting"];
+
+/// The terminal's own palette, with a frame.
+impl Default for Theme {
+    fn default() -> Theme {
+        Theme {
+            frame: true,
+            agent_icons: AgentIcons::Unicode,
+            // None of the states' colours nor the hint's: a selected card
+            // stays apart from its state.
+            accent: Color::Magenta,
+            hint: Color::Blue,
+            muted: None,
+            border: None,
+            states: [Color::Green, Color::Cyan, Color::Yellow, Color::Red],
+            icons: ICONS.map(String::from),
+        }
+    }
+}
 
 impl Theme {
-    pub fn load(tmux: &mut Control, window: &str) -> Theme {
-        let row = tmux.row(window, OPTIONS);
-        Theme::from_values(&row.iter().map(String::as_str).collect::<Vec<_>>())
+    /// ROLE (one of ROLES) in COLOUR; left as it was when COLOUR is none.
+    pub fn set(&mut self, role: &str, colour: &str) {
+        let Some(c) = parse_colour(colour) else { return };
+        match role {
+            "accent" => self.accent = c,
+            "muted" => self.muted = Some(c),
+            "hint" => self.hint = c,
+            "border" => self.border = Some(c),
+            "idle" => self.states[State::Idle as usize] = c,
+            "finished" => self.states[State::Finished as usize] = c,
+            "working" => self.states[State::Working as usize] = c,
+            "asking" | "waiting" => self.states[State::Asking as usize] = c,
+            _ => {}
+        }
     }
 
-    /// VALUES lines up with OPTIONS; missing or unparsable values fall back.
-    pub fn from_values(values: &[&str]) -> Theme {
-        let v = |i: usize| values.get(i).copied().unwrap_or("");
-        let default = |s| match s {
-            State::Idle => Color::Green,
-            State::Finished => Color::Cyan,
-            State::Working => Color::Yellow,
-            State::Asking => Color::Red,
-        };
-        // @paddock-color-<state>, then @agent-color-<state>, in State order.
-        let states = State::ALL.map(|s| {
-            let i = s as usize;
-            parse_colour(v(4 + i)).or(parse_colour(v(8 + i))).unwrap_or(default(s))
-        });
-        // @agent-icon-<state>, if it takes the dot's one column.
-        let icons = State::ALL.map(|s| match v(13 + s as usize) {
-            icon if icon.width() == 1 => icon.to_string(),
-            _ if s == State::Idle => "○".to_string(),
-            _ => "●".to_string(),
-        });
-        Theme {
-            agent_icons: if v(17) == "nerd" { AgentIcons::Nerd } else { AgentIcons::Unicode },
-            accent: parse_colour(v(0)).or(style_fg(v(12))).unwrap_or(Color::Yellow),
-            muted: parse_colour(v(1)),
-            hint: parse_colour(v(2)).unwrap_or(Color::Blue),
-            border: parse_colour(v(3)),
-            states,
-            icons,
+    /// MARKS, in State order, as the states' marks: each that takes the
+    /// mark's one column and tells its state apart, from the others' marks
+    /// and from the ones states without a mark keep (which can leave
+    /// another state its own in turn).
+    pub fn marks(&mut self, marks: [&str; State::ALL.len()]) {
+        let n = marks.len();
+        let mut take = marks.map(|m| m.width() == 1 && marks.iter().filter(|o| **o == m).count() == 1);
+        while let Some(i) = (0..n).find(|&i| take[i] && (0..n).any(|j| !take[j] && self.icons[j] == marks[i])) {
+            take[i] = false;
+        }
+        for i in (0..n).filter(|&i| take[i]) {
+            self.icons[i] = marks[i].to_string();
         }
     }
 
@@ -122,22 +119,24 @@ impl Theme {
         Style::new().fg(self.states[s as usize])
     }
 
-    /// The dot that stands for S.
+    /// The mark that stands for S.
     pub fn icon(&self, s: State) -> &str {
         &self.icons[s as usize]
     }
 
-    /// The current session's badge: the accent as background, the text in the
-    /// terminal's background colour, so it reads on light and dark themes.
-    pub fn badge(&self) -> Style {
-        Style::new().fg(self.accent).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    /// The selected row's main text, as the active tab.
+    pub fn selected(&self) -> Style {
+        Style::new().fg(self.accent).add_modifier(Modifier::BOLD)
+    }
+
+    /// Characters the filter matched, over the text's own style.
+    pub fn matched(&self) -> Style {
+        Style::new().fg(self.accent).add_modifier(Modifier::UNDERLINED).remove_modifier(Modifier::DIM)
     }
 }
 
-/// The fg= colour of a tmux style such as "bg=#202020,fg=#a2a970".
-fn style_fg(style: &str) -> Option<Color> {
-    style.split([',', ' ']).find_map(|part| part.trim().strip_prefix("fg=")).and_then(parse_colour)
-}
+/// Default state marks, in State order: one column each, told apart by shape.
+const ICONS: [&str; State::ALL.len()] = ["○", "✓", "◐", "!"];
 
 /// A tmux colour name, colourN, #rrggbb, or default/terminal (the terminal's
 /// own colour). Empty or unknown (e.g. tmux's theme* names) is None.
@@ -194,56 +193,59 @@ mod tests {
     }
 
     #[test]
-    fn reads_fg_from_a_style() {
-        assert_eq!(style_fg("fg=#A2A970"), Some(Color::Rgb(0xa2, 0xa9, 0x70)));
-        assert_eq!(style_fg("bg=#202020,fg=red"), Some(Color::Red));
-        assert_eq!(style_fg("bg=red"), None);
-    }
-
-    #[test]
     fn terminal_palette_when_nothing_is_set() {
-        let t = Theme::from_values(&[]);
-        assert_eq!(t.accent, Color::Yellow);
+        let t = Theme::default();
+        assert_eq!(t.accent, Color::Magenta);
         assert_eq!(t.state(State::Working).fg, Some(Color::Yellow));
+        assert!(State::ALL.iter().all(|&s| t.state(s).fg != Some(t.accent)) && t.hint != t.accent, "the accent is no state's colour, nor the hint's");
         assert_eq!(t.muted(), Style::new().add_modifier(Modifier::DIM));
         assert_eq!(t.border(), t.muted());
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "●", "●", "●"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
+        assert_eq!(t.agent_icons, AgentIcons::Unicode);
     }
 
     #[test]
-    fn tmux_theme_then_explicit_options_win() {
-        let mut v = vec![""; OPTIONS.len()];
-        v[8 + 2] = "#cc8c3c"; // @agent-color-working
-        v[12] = "fg=#A2A970"; // pane-active-border-style
-        let t = Theme::from_values(&v);
-        assert_eq!(t.accent, Color::Rgb(0xa2, 0xa9, 0x70));
-        assert_eq!(t.state(State::Working).fg, Some(Color::Rgb(0xcc, 0x8c, 0x3c)));
-        v[0] = "magenta";
-        v[4 + 2] = "colour1";
-        v[1] = "brightblack";
-        let t = Theme::from_values(&v);
-        assert_eq!(t.accent, Color::Magenta);
-        assert_eq!(t.state(State::Working).fg, Some(Color::Indexed(1)));
+    fn roles_are_set_by_name_and_only_to_colours() {
+        let mut t = Theme::default();
+        t.set("accent", "brightcyan");
+        t.set("muted", "brightblack");
+        t.set("waiting", "colour1");
+        t.set("working", "orange");
+        t.set("sky", "blue");
+        assert_eq!(t.accent, Color::LightCyan);
         assert_eq!(t.muted(), Style::new().fg(Color::DarkGray));
-    }
-
-    #[test]
-    fn agent_icons_are_explicit_and_default_to_unicode() {
-        assert_eq!(Theme::from_values(&[]).agent_icons, AgentIcons::Unicode);
-        let mut v = vec![""; OPTIONS.len()];
-        let option = OPTIONS.iter().position(|name| *name == "@paddock-agent-icons").unwrap();
-        for (value, expected) in [("nerd", AgentIcons::Nerd), ("unicode", AgentIcons::Unicode), ("", AgentIcons::Unicode), ("auto", AgentIcons::Unicode), ("glyphs", AgentIcons::Unicode), ("unknown", AgentIcons::Unicode)] {
-            v[option] = value;
-            assert_eq!(Theme::from_values(&v).agent_icons, expected, "{value}");
-        }
+        assert_eq!(t.state(State::Asking).fg, Some(Color::Indexed(1)));
+        assert_eq!(t.state(State::Working).fg, Some(Color::Yellow), "not a colour: left as it was");
     }
 
     #[test]
     fn dots_follow_the_status_bar_icons_that_fit() {
-        let mut v = vec![""; OPTIONS.len()];
-        v[13] = "-"; // @agent-icon-idle
-        v[16] = "??"; // @agent-icon-asking: two columns
-        let t = Theme::from_values(&v);
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "●", "●", "●"]);
+        let mut t = Theme::default();
+        t.marks(["-", "", "", "??"]); // asking: two columns
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "✓", "◐", "!"]);
+        assert!(ICONS.iter().all(|i| i.width() == 1));
+    }
+
+    #[test]
+    fn status_bar_icons_shared_by_states_are_not_state_marks() {
+        // agent-status.tmux's defaults: ● for three states, ○ idle.
+        let mut t = Theme::default();
+        t.marks(["○", "●", "●", "●"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
+        t.marks(["○", "●", "●", "?"]); // asking, set apart
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "?"]);
+    }
+
+    #[test]
+    fn a_mark_another_state_keeps_is_not_taken() {
+        let mut t = Theme::default();
+        t.marks(["!", "", "", ""]); // asking keeps its !
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
+        t.marks(["!", "", "", "?"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["!", "✓", "◐", "?"]);
+        // Idle keeps its ○, so finished cannot have it either.
+        let mut t = Theme::default();
+        t.marks(["!", "○", "", ""]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
     }
 }

@@ -8,15 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Debug, PartialEq)]
-pub enum Msg {
-    /// Something changed on the server that a snapshot should reflect.
-    Changed,
-    /// The refresh subscription's new value: a snapshot's text.
-    Rows(String),
-    /// The control client exited (server gone, or our session killed last).
-    Exit,
-}
+use crate::backend::Msg;
 
 /// Separates the fields of one format's output.
 pub const SEP: char = '\u{1f}';
@@ -148,7 +140,7 @@ const PLAIN: &[&str] = &["session_id", "window_id", "window_index", "window_acti
 
 /// `#{NAME}` with control characters as spaces: tmux does not escape
 /// values in replies or notifications, so a newline in a path or option
-/// would forge control lines, and a SEP (or a snapshot's marks, model.rs)
+/// would forge control lines, and a SEP (or a snapshot's marks, snapshot.rs)
 /// would shift the fields. NAME may carry modifiers (`E:name`).
 pub fn field(name: &str) -> String {
     if PLAIN.contains(&name) {
@@ -216,7 +208,7 @@ fn read_loop(out: impl BufRead, replies: Sender<Result<Vec<String>, String>>, ev
         } else if let Some(change) = line.strip_prefix("%subscription-changed ") {
             // `NAME $S - - - : VALUE`; the only subscription is the refresh one.
             if let Some((_, value)) = change.split_once(" : ") {
-                events(replied, Msg::Rows(value.to_string()));
+                events(replied, Msg::Rows(super::snapshot::parse(value)));
             }
         } else if is_change(&line) {
             events(replied, Msg::Changed);
@@ -255,6 +247,8 @@ pub fn quote(s: &str) -> String {
 mod tests {
     use super::*;
 
+    use crate::backend::tmux::snapshot::parse as rows;
+
     type Replies = Vec<Result<Vec<String>, String>>;
 
     fn run(stream: &str) -> (Replies, Vec<Msg>) {
@@ -277,11 +271,14 @@ mod tests {
             "%session-changed $0 a\n",
             "%begin 1 11 1\nhello\nworld\n%end 1 11 1\n",
             "%window-add @3\n",
-            "%subscription-changed panes $1 - - - : a : b\n",
+            "%subscription-changed panes $1 - - - : host\u{1c}$1\u{1f}a : b\n",
             "%begin 1 12 1\nno such pane\n%error 1 12 1\n",
         ));
         assert_eq!(replies, vec![Ok(vec!["hello".to_string(), "world".to_string()]), Err("no such pane".to_string())]);
-        assert_eq!(events, vec![Msg::Changed, Msg::Rows("a : b".into()), Msg::Exit]);
+        // The value whole, colons and all: a session named "a : b".
+        let Msg::Rows(snap) = &events[1] else { panic!("{events:?}") };
+        assert_eq!(snap.sessions.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["a : b"]);
+        assert_eq!(events, vec![Msg::Changed, Msg::Rows(rows("host\u{1c}$1\u{1f}a : b")), Msg::Exit]);
     }
 
     #[test]
@@ -293,7 +290,7 @@ mod tests {
             "%begin 1 12 1\nno\n%error 1 12 1\n",
             "%subscription-changed panes $1 - - - : v\n",
         ));
-        assert_eq!(events, vec![(0, Msg::Changed), (2, Msg::Rows("v".into())), (2, Msg::Exit)], "the attach's block is no reply");
+        assert_eq!(events, vec![(0, Msg::Changed), (2, Msg::Rows(rows("v"))), (2, Msg::Exit)], "the attach's block is no reply");
     }
 
     #[test]
