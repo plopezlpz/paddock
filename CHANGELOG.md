@@ -8,6 +8,7 @@ Notable changes to paddock, newest first. The format follows
 
 ### Changed
 
+- State marks are circles again, told apart by colour: `○` idle, `●` the others (or agent-status.tmux's `@agent-icon-*`, whatever they are), not 0.8.0's `!`, `◐`, `✓`.
 - `@paddock-agent-icons` is a format, expanded for the client the popup opens in: a terminal without a Nerd Font (a phone's) can get Unicode marks while another gets Nerd Font logos, e.g. `'#{?#{m:ghostty*,#{client_termtype}},nerd,unicode}'`.
 
 ## [0.8.0] - 2026-11-16

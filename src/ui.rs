@@ -835,7 +835,7 @@ mod tests {
                             assert!(lines.iter().all(|l| l.width() <= width as usize), "{kind}: {lines:?}");
                             let identity = lines[0].to_string();
                             let detail = lines[1].to_string();
-                            assert!(identity.starts_with(&format!("▌ ◐ {icon}")), "{identity}");
+                            assert!(identity.starts_with(&format!("▌ ● {icon}")), "{identity}");
                             assert!(!identity.contains("task"), "{identity}");
                             let mark = lines[0].spans.iter().find(|s| s.content == icon).unwrap();
                             assert_eq!(mark.style, bold(), "{kind}: bright provider icon");
@@ -1187,8 +1187,8 @@ mod tests {
         let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Folder, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
         let text: Vec<String> = rows.iter().flat_map(|r| row_lines(r, false, false, 60, None, "window", &t).0).map(|l| l.to_string()).collect();
         assert!(text.contains(&" devbox:~/source/company/project 1".to_string()), "{text:#?}");
-        assert!(text.iter().any(|l| l.ends_with("◐ ✳  ml · train  @devbox")), "{text:#?}");
-        assert!(text.iter().any(|l| l.ends_with("◐ ✳  web · api")), "{text:#?}");
+        assert!(text.iter().any(|l| l.ends_with("● ✳  ml · train  @devbox")), "{text:#?}");
+        assert!(text.iter().any(|l| l.ends_with("● ✳  web · api")), "{text:#?}");
         for width in 0..80 {
             for r in rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })) {
                 assert!(row_lines(r, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");

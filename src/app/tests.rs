@@ -1048,9 +1048,9 @@ fn a_narrow_title_drops_the_calmest_counts_whole() {
         .collect();
     let app = new(fixture(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>()), Tab::Agents, "@1");
     let top = |w| screen(&draw(&app, &mut View::new(), w, 12))[0].clone();
-    let marks = ['!', '◐', '✓', '○'];
+    let marks = ['●', '○'];
     assert_eq!(top(80).matches(marks).count(), 4, "{}", top(80));
-    assert!(top(80).contains("! 3 waiting  ◐ 3 working  ✓ 3 finished  ○ 3 idle ╮"), "named when they fit: {}", top(80));
+    assert!(top(80).contains("● 3 waiting  ● 3 working  ● 3 finished  ○ 3 idle ╮"), "named when they fit: {}", top(80));
     for w in 30..44 {
         let line = top(w);
         assert!(line.contains("sessions  agents"), "{line}");
@@ -1062,7 +1062,7 @@ fn a_narrow_title_drops_the_calmest_counts_whole() {
             }
         }
     }
-    assert!(top(38).contains("! 3"), "the most urgent stay: {}", top(38));
+    assert!(top(38).contains("● 3") && !top(38).contains('○'), "the most urgent stay, idle goes: {}", top(38));
 }
 
 #[test]

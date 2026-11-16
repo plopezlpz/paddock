@@ -454,9 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn state_marks_are_the_status_bar_icons_that_tell_states_apart() {
-        let t = themed(&[("@agent-icon-idle", "-"), ("@agent-icon-finished", "●"), ("@agent-icon-working", "●"), ("@agent-icon-asking", "??")]);
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "✓", "◐", "!"]);
+    fn state_marks_are_the_status_bar_icons_that_fit() {
+        let t = themed(&[("@agent-icon-idle", "-"), ("@agent-icon-finished", "◉"), ("@agent-icon-working", "●"), ("@agent-icon-asking", "??")]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "◉", "●", "●"]);
     }
 
     #[test]

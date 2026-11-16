@@ -3,10 +3,9 @@
 //! --color flags; the rest are the terminal's own palette. Values use tmux
 //! colour syntax: red, brightred, colour214, #a2a970, default, terminal (not
 //! tmux's X11 names, such as orange, which leave the role as it was).
-//! State marks are a backend's (`marks`: agent-status.tmux's @agent-icon-*),
-//! when one column wide and no other state's (its default `●` for three
-//! states is not), else a distinct glyph per state, so state never rests on
-//! colour alone.
+//! State marks are a backend's (`marks`: agent-status.tmux's @agent-icon-*)
+//! when one column wide, else circles: `○` idle, `●` the others, told apart
+//! by colour.
 
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
@@ -90,17 +89,12 @@ impl Theme {
     }
 
     /// MARKS, in State order, as the states' marks: each that takes the
-    /// mark's one column and tells its state apart, from the others' marks
-    /// and from the ones states without a mark keep (which can leave
-    /// another state its own in turn).
+    /// mark's one column.
     pub fn marks(&mut self, marks: [&str; State::ALL.len()]) {
-        let n = marks.len();
-        let mut take = marks.map(|m| m.width() == 1 && marks.iter().filter(|o| **o == m).count() == 1);
-        while let Some(i) = (0..n).find(|&i| take[i] && (0..n).any(|j| !take[j] && self.icons[j] == marks[i])) {
-            take[i] = false;
-        }
-        for i in (0..n).filter(|&i| take[i]) {
-            self.icons[i] = marks[i].to_string();
+        for (icon, mark) in self.icons.iter_mut().zip(marks) {
+            if mark.width() == 1 {
+                *icon = mark.to_string();
+            }
         }
     }
 
@@ -135,8 +129,9 @@ impl Theme {
     }
 }
 
-/// Default state marks, in State order: one column each, told apart by shape.
-const ICONS: [&str; State::ALL.len()] = ["○", "✓", "◐", "!"];
+/// Default state marks, in State order: one column each, told apart by
+/// colour (agent-status.tmux's own defaults).
+const ICONS: [&str; State::ALL.len()] = ["○", "●", "●", "●"];
 
 /// A tmux colour name, colourN, #rrggbb, or default/terminal (the terminal's
 /// own colour). Empty or unknown (e.g. tmux's theme* names) is None.
@@ -200,7 +195,7 @@ mod tests {
         assert!(State::ALL.iter().all(|&s| t.state(s).fg != Some(t.accent)) && t.hint != t.accent, "the accent is no state's colour, nor the hint's");
         assert_eq!(t.muted(), Style::new().add_modifier(Modifier::DIM));
         assert_eq!(t.border(), t.muted());
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "●", "●", "●"]);
         assert_eq!(t.agent_icons, AgentIcons::Unicode);
     }
 
@@ -221,31 +216,11 @@ mod tests {
     #[test]
     fn dots_follow_the_status_bar_icons_that_fit() {
         let mut t = Theme::default();
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "●", "●", "●"], "circles by default");
         t.marks(["-", "", "", "??"]); // asking: two columns
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "✓", "◐", "!"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "●", "●", "●"]);
+        t.marks(["○", "✓", "◐", "!"]);
+        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"], "shapes, if the status bar has them");
         assert!(ICONS.iter().all(|i| i.width() == 1));
-    }
-
-    #[test]
-    fn status_bar_icons_shared_by_states_are_not_state_marks() {
-        // agent-status.tmux's defaults: ● for three states, ○ idle.
-        let mut t = Theme::default();
-        t.marks(["○", "●", "●", "●"]);
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
-        t.marks(["○", "●", "●", "?"]); // asking, set apart
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "?"]);
-    }
-
-    #[test]
-    fn a_mark_another_state_keeps_is_not_taken() {
-        let mut t = Theme::default();
-        t.marks(["!", "", "", ""]); // asking keeps its !
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
-        t.marks(["!", "", "", "?"]);
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["!", "✓", "◐", "?"]);
-        // Idle keeps its ○, so finished cannot have it either.
-        let mut t = Theme::default();
-        t.marks(["!", "○", "", ""]);
-        assert_eq!(State::ALL.map(|s| t.icon(s)), ["○", "✓", "◐", "!"]);
     }
 }

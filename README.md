@@ -244,9 +244,9 @@ is not checked: keep it at the clone's version, and update the two together.
 
 The selected row is marked `▌`, its name bold in the accent colour; the
 session the client shows is marked `*`. While filtering, the characters that
-matched are underlined in the accent colour. State has a mark of its own as
-well as a colour: `!` waiting, `◐` working, `✓` finished, `○` idle (the
-title bar names the counts when there is room).
+matched are underlined in the accent colour. State has a colour: its mark is
+`○` idle and `●` otherwise (the title bar names the counts when there is
+room).
 
 Agent cards use two lines: a state mark, agent mark and directory/branch
 identity above state-colored elapsed time and a muted topic label. The first
@@ -411,9 +411,8 @@ of room, its menu (`ctrl-a`) has the rest.
 Colours are tmux colours: a name such as `red` or `brightred`, `colour214`,
 `#a2a970`, `default` or `terminal`. tmux's other names, such as `orange`,
 are not followed: set the `@paddock-color-*` to one of these to match. The
-state marks are `@agent-icon-*` when one column wide and no other state's
-(agent-status.tmux's default `●` is three states'), else `!` waiting, `◐`
-working, `✓` finished and `○` idle.
+state marks are `@agent-icon-*` when one column wide, else `○` idle and `●`
+the others.
 
 ## Agent state
 
