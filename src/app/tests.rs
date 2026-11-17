@@ -331,8 +331,8 @@ fn clicks_hit_list_rows_only() {
     assert!(view.preview_fits);
     let (rect, _, _) = view.rows.iter().find(|(_, _, target)| *target == pane("$1", "@2", "%3")).unwrap();
     let (x, y) = (rect.x + 4, rect.y);
-    assert!(screen(&term)[y as usize].contains("/b"), "only the identity line fits");
-    assert!(!screen(&term).iter().any(|l| l.contains("three")), "the topic is below the list");
+    assert!(screen(&term)[y as usize].contains("three"), "only the title line fits");
+    assert!(!screen(&term)[y as usize + 1].contains("/b"), "the folder is below the list");
     let before = app.selected;
     click(&mut app, &view, MouseButton::Left, (x, y - 1));
     assert_eq!(app.selected, before, "headers are not selectable");
@@ -509,9 +509,9 @@ fn compact_rows_take_two_lines_with_less_detail() {
     app.run(Command::Tab(Tab::Agents));
     let lines = screen(&draw(&app, &mut view, 46, 20));
     let at = lines.iter().position(|l| l.contains("deploy")).unwrap();
-    assert!(lines[at - 1].contains("/h/c"), "directory above the topic: {lines:#?}");
-    assert!(!lines[at - 1].contains("play"), "no tmux location: {lines:#?}");
-    assert!(!lines[at - 1].contains("codex"), "icon instead of provider name");
+    assert!(lines[at + 1].contains("/h/c"), "the folder under the title: {lines:#?}");
+    assert!(!lines[at].contains("play"), "no tmux location beside the title: {lines:#?}");
+    assert!(!lines[at].contains("codex"), "icon instead of provider name");
 }
 
 #[test]
@@ -686,7 +686,7 @@ fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
         let mut view = View::new();
         let before = draw(&app, &mut view, width, 24);
         let (_, y) = find(&before, "one");
-        let identity = screen(&before)[y as usize - 1].clone();
+        let detail = screen(&before)[y as usize + 1].clone();
         let targets = view.rows.clone();
         ctrl(&mut app, 'r');
         ctrl(&mut app, 'r');
@@ -694,13 +694,13 @@ fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
             if failed { app.suggested(1, Err("pi timed out after 30s".into())); }
             let term = draw(&app, &mut view, width, 24);
             let lines = screen(&term);
-            assert_eq!(lines[y as usize - 1], identity, "{width}: identity stays on line one");
-            assert!(lines[y as usize].contains("5m working?"), "age and stale state stay on line two: {lines:#?}");
-            assert!(lines[y as usize].contains("✎ "), "editor on the topic line: {lines:#?}");
+            assert_eq!(lines[y as usize + 1], detail, "{width}: age, stale state and folder stay on line two");
+            assert!(lines[y as usize + 1].contains("5m working?"), "{lines:#?}");
+            assert!(lines[y as usize].contains("✎ "), "editor on the title line: {lines:#?}");
             assert_eq!(field(&app), Some("one"), "narrow editors scroll without changing the title");
             if width >= 80 { assert!(lines[y as usize].contains("✎ one")); }
-            assert!(lines[y as usize].contains(if failed { "✗ pi" } else { "✦ sugg" }), "feedback on the topic line: {lines:#?}");
-            if width == 40 { assert!(lines[y as usize].contains('…'), "feedback truncation stays visible"); }
+            assert!(lines[y as usize].contains(if failed { "✗ pi" } else { "✦ sugg" }), "feedback on the title line: {lines:#?}");
+            if width == 40 && failed { assert!(lines[y as usize].contains('…'), "feedback truncation stays visible: {lines:#?}"); }
             assert_eq!(view.rows, targets, "{width}: editing never moves mouse targets");
         }
     }
@@ -713,7 +713,7 @@ fn the_title_is_edited_on_its_card() {
     ctrl(&mut app, 'r');
     let lines = screen(&draw(&app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("› on") && l.contains("renaming")), "the filter stays in view: {lines:#?}");
-    assert!(lines.iter().any(|l| l.contains("▌   ✎ one")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.contains("▌ ● ✳  ✎ one")), "{lines:#?}");
     ctrl(&mut app, 'u');
     let lines = screen(&draw(&app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("✎ ▏one") && l.contains("automatic")), "the automatic title as a placeholder: {lines:#?}");
@@ -987,7 +987,7 @@ fn hidden_heading_clicks_toggle_only_the_heading_not_its_spacer() {
         complete_hidden(&mut app, action);
         let term = draw(&app, &mut view, width, 14);
         assert!(app.hidden_expanded);
-        assert!(screen(&term).iter().any(|l| l.contains("parked question")));
+        assert!(screen(&term).iter().any(|l| l.contains("parked quest")), "{width}: {:#?}", screen(&term));
         let rect = view.hidden.unwrap();
         let action = click(&mut app, &view, MouseButton::Left, (rect.x + 3, rect.y));
         complete_hidden(&mut app, action);
@@ -1008,8 +1008,7 @@ fn agent_marks_survive_renaming_and_fall_back_to_the_command() {
             for width in [40, 80, 120] {
                 let lines = screen(&draw(&app, &mut View::new(), width, 12));
                 let title = lines.iter().position(|l| l.contains("task")).unwrap();
-                assert!(!lines[title].contains(icon), "{lines:#?}");
-                assert!(lines[title - 1].contains(icon), "{lines:#?}");
+                assert!(lines[title].contains(icon), "{lines:#?}");
             }
         }
     }

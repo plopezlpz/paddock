@@ -121,12 +121,13 @@ Elsewhere it is `Enter`.
 
 ### What it said, and what it changed
 
-A working, waiting or finished agent's card follows its title with what it
+A working, waiting or finished agent's card says under its title what it
 last said, after `›`: the tool call it waits on (`Bash: cargo test`, or its
 question), else the first line of its last answer. Once you have seen it (the
-agent is idle), the preview has those words and the card names it by its title
-alone (an untitled one keeps them, muted, as its name). A settled agent's card shows the
-changes waiting in its folder, `+12 −3` against HEAD and `· 2 untracked` for
+agent is idle), the preview has those words and the card shows its folder
+there instead (an untitled one, named by its folder, keeps them, muted). A
+settled agent's card shows the changes waiting in its folder, at the right of
+its title, `+12 −3` against HEAD and `· 2 untracked` for
 untracked files, so a finished card says whether there is something to review.
 On tmux the words come from the agent's transcript, as agent-status.tmux names
 it (Claude Code, pi, Codex); on Rex, from its status message. Both are read off
@@ -293,14 +294,15 @@ matched are underlined in the accent colour. State has a colour: its mark is
 `○` idle and `●` otherwise (the title bar names the counts when there is
 room).
 
-Agent cards use two lines: a state mark, agent mark and directory/branch
-identity above state-colored elapsed time, the topic, and where the agent runs
-(`session:window`, or the Rex session and tab) at the right. A window tmux
-names after what runs in it shows its number; grouped by session, the window
-alone. Short of room, where it runs gives way first. The first
+Agent cards use two lines: a state mark, agent mark and the title (the
+directory/branch while it has none) above state-colored elapsed time, what it
+asks or says while that is news, else its directory/branch, and where the
+agent runs (`session:window`, or the Rex session and tab) at the right. A
+window tmux names after what runs in it shows its number; grouped by session,
+the window alone. Short of room, where it runs gives way first. The first
 mark means **state**, not agent type. The provider name remains searchable and appears in
-the preview header, without repeating it on the card. Editing the topic keeps
-the directory on the first line.
+the preview header, without repeating it on the card. Editing the title
+happens on the first line; the second shows the folder, as a titled card's.
 When the list goes on past the popup's edge, `↑ N more` and `↓ N more` say
 how many rows there are that way.
 

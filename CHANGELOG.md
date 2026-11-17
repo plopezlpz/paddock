@@ -6,6 +6,12 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-17
+
+### Changed
+
+- An agent card leads with its title: the first line is the title (the folder while it has none) and the changes waiting, at the right; the second, after the elapsed time, what the agent asks or says while that is news, else its folder, and where it runs. Renaming edits the first line.
+
 ### Fixed
 
 - Rex: a listener that ended just as paddock looked at it could leave paddock waiting without news (state changes, new tabs) until something else woke it; it is started again at once.
@@ -227,7 +233,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/plopezlpz/paddock/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/plopezlpz/paddock/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/plopezlpz/paddock/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/plopezlpz/paddock/compare/v0.8.0...v0.8.1

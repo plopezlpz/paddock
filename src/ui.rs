@@ -34,8 +34,6 @@ const PREVIEW_BELOW_FROM: u16 = 24;
 const LIST_MAX: u16 = 72;
 /// Between footer hints.
 const GAP: &str = "   ";
-/// Columns a card's path keeps before the changes beside it give way.
-const PATH_MIN: usize = 24;
 
 fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
@@ -440,45 +438,7 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
             line.extend(marked(command.clone(), main(Style::new())));
             (vec![Line::from(line)], None)
         }
-        RowKind::Agent { title, note, state, place, .. } => {
-            let mut second = agent_detail_prefix(row, mark.clone(), t);
-            let room = width.saturating_sub(cols(&second));
-            // What it last said is news while it isn't idle, in its state's
-            // colour; an idle agent's is in the preview (an untitled one
-            // keeps it, muted, as its name).
-            let said = if *state == State::Idle { t.muted() } else { t.state(*state) };
-            let news = *state != State::Idle && !note.is_empty();
-            let (lead, lead_style) = match (title.is_empty(), note.is_empty()) {
-                (false, _) => (title.as_str(), Style::new()),
-                (true, false) => (note.as_str(), said),
-                (true, true) => ("untitled", t.muted().add_modifier(Modifier::ITALIC)),
-            };
-            let tail = if news && !title.is_empty() { note.as_str() } else { "" };
-            let tail_w = if tail.is_empty() { 0 } else { tail.width() + 3 };
-            let place_w = if place.is_empty() { 0 } else { place.width() + 2 };
-            // Where it runs goes first when short of room; then the note
-            // shrinks to a few words, then the title keeps half the line.
-            let place_w = if lead.width() + tail_w + place_w <= room { place_w } else { 0 };
-            let room = room - place_w;
-            let lead_room = if tail.is_empty() { room } else { lead.width().min(room.saturating_sub(tail.width().min(16) + 3).max(room / 2)) };
-            let lead = fit(lead, lead_room);
-            let tail_room = room.saturating_sub(lead.width());
-            if title.is_empty() && note.is_empty() {
-                second.push(Span::styled(lead, lead_style));
-            } else {
-                second.extend(marked(lead, lead_style));
-            }
-            if !tail.is_empty() && tail_room > 3 {
-                second.push(Span::styled(" › ", t.muted()));
-                second.extend(marked(fit(tail, tail_room - 3), said));
-            }
-            if place_w > 0 {
-                let at = width.saturating_sub(place.width());
-                second.push(Span::raw(" ".repeat(at.saturating_sub(cols(&second)))));
-                second.extend(marked(place.clone(), t.muted()));
-            }
-            (card_lines(Line::from(second), mark, row, width, selected, filter, t), None)
-        }
+        RowKind::Agent { .. } => (card_lines(row, mark, width, selected, filter, t), None),
         RowKind::Header { label, count, gap } => {
             let line = Line::from(vec![
                 Span::styled(format!(" {label} "), t.muted().add_modifier(Modifier::BOLD)),
@@ -544,42 +504,92 @@ fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'s
     second
 }
 
-/// Directory-first cards stay two lines in both layouts. SECOND is either
-/// the topic label or its editor; the bright identity line (its path, in
-/// the accent when SELECTED) never moves. A host's `host:` is in the hint
-/// colour, as Sessions shows `@host`.
-fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, kind, path, host, diff, .. } = &row.kind else { return vec![second] };
-    let identity = if selected { t.selected() } else { bold() };
+/// An agent's card: two lines in both layouts. The first names it, the
+/// second says how it is (see card_first and card_second).
+fn card_lines(row: &Row, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
+    let titled = matches!(&row.kind, RowKind::Agent { title, .. } if !title.is_empty());
+    vec![card_first(row, mark.clone(), width, selected, filter, t), card_second(row, mark, width, titled, filter, t)]
+}
+
+/// What starts a card's first line: its state and agent.
+fn card_head(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
+    let RowKind::Agent { state, kind, .. } = &row.kind else { return vec![mark] };
     let icon = Span::styled(agent_icon(kind, t.agent_icons), bold());
     let padding = 3usize.saturating_sub(icon.width());
-    let mut first = vec![mark, Span::raw(" "), dot(t, Some(*state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))];
+    vec![mark, Span::raw(" "), dot(t, Some(*state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))]
+}
+
+/// A folder as a card shows it: its host's `host:` in the hint colour, as
+/// Sessions shows `@host`.
+fn folder_spans(text: String, host: &str, style: Style, row: &Row, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
+    match text.strip_prefix(host).filter(|rest| !host.is_empty() && rest.starts_with(':')) {
+        Some(rest) => {
+            let mut spans = hl(format!("{host}:"), Style::new().fg(t.hint), row, filter, t);
+            spans.extend(hl(rest[1..].to_string(), style, row, filter, t));
+            spans
+        }
+        None => hl(text, style, row, filter, t),
+    }
+}
+
+/// A card's first line: its title, bright (in the accent when SELECTED), or
+/// its folder while it has none; the host where no folder shown says it,
+/// and the changes waiting at the right, the first to go when short.
+fn card_first(row: &Row, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
+    let mut first = card_head(row, mark, t);
+    let RowKind::Agent { state, title, note, path, host, diff, .. } = &row.kind else { return Line::from(first) };
+    let identity = if selected { t.selected() } else { bold() };
     let room = width.saturating_sub(cols(&first));
-    let hinted = Style::new().fg(t.hint);
-    // The host, where the path doesn't say it (none, or not shown).
-    let at = if host.is_empty() || split_host(&path.full).0 == host { String::new() } else { format!("  @{host}") };
+    // A titled card's folder is on its second line, unless news is.
+    let folder_shown = title.is_empty() || *state == State::Idle || note.is_empty();
+    let at = if host.is_empty() || (folder_shown && split_host(&path.full).0 == host) { String::new() } else { format!("  @{host}") };
     let at = if at.width() > room / 2 { String::new() } else { at };
     let room = room - at.width();
-    // The changes waiting, after the identity: the first to go when the line
-    // is short (the path keeps PATH_MIN columns, or what it needs).
+    let lead_w = if title.is_empty() { path.display(usize::MAX).width() } else { title.width() };
     let changes = if diff.is_empty() { String::new() } else { format!("  {diff}") };
-    let changes = if changes.width() + path.display(usize::MAX).width().min(PATH_MIN) > room { String::new() } else { changes };
+    let changes = if changes.width() + lead_w > room { String::new() } else { changes };
     let room = room - changes.width();
-    let text = path.display(room);
-    match text.strip_prefix(host.as_str()).filter(|rest| !host.is_empty() && rest.starts_with(':')) {
-        Some(rest) => {
-            first.extend(hl(format!("{host}:"), hinted, row, filter, t));
-            first.extend(hl(rest[1..].to_string(), identity, row, filter, t));
-        }
-        None => first.extend(hl(text, identity, row, filter, t)),
+    if title.is_empty() {
+        first.extend(folder_spans(path.display(room), host, identity, row, filter, t));
+    } else {
+        first.extend(hl(fit(title, room), identity, row, filter, t));
     }
     if !at.is_empty() {
-        first.extend(hl(at, hinted, row, filter, t));
+        first.extend(hl(at, Style::new().fg(t.hint), row, filter, t));
     }
     if !changes.is_empty() {
-        first.push(Span::styled(changes, t.muted()));
+        push_right(&mut first, Span::styled(changes.trim_start().to_string(), t.muted()), width);
     }
-    vec![Line::from(first), second]
+    Line::from(first)
+}
+
+/// A card's second line: how long it has been in its state; what it asks
+/// or says while it isn't idle, in its state's colour, else (TITLED, its
+/// folder being on the first line otherwise) its folder, or what it last
+/// said; and where it runs, at the right, the first to go when short.
+fn card_second(row: &Row, mark: Span<'static>, width: usize, titled: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
+    let mut second = agent_detail_prefix(row, mark, t);
+    let RowKind::Agent { state, note, path, host, place, .. } = &row.kind else { return Line::from(second) };
+    let room = width.saturating_sub(cols(&second));
+    let news = *state != State::Idle && !note.is_empty();
+    let folder = titled && !news;
+    let body_w = if folder { path.display(usize::MAX).width() } else if news { note.width() + 2 } else { note.width() };
+    let place_w = if place.is_empty() || body_w + place.width() + 2 > room { 0 } else { place.width() + 2 };
+    let room = room - place_w;
+    if folder {
+        second.extend(folder_spans(path.display(room), host, t.muted(), row, filter, t));
+    } else if news && room > 2 {
+        second.push(Span::styled("› ", t.muted()));
+        second.extend(hl(fit(note, room - 2), t.state(*state), row, filter, t));
+    } else if !news && !note.is_empty() {
+        second.extend(hl(fit(note, room), t.muted(), row, filter, t));
+    }
+    if place_w > 0 {
+        let at = width.saturating_sub(place.width());
+        second.push(Span::raw(" ".repeat(at.saturating_sub(cols(&second)))));
+        second.extend(hl(place.clone(), t.muted(), row, filter, t));
+    }
+    Line::from(second)
 }
 
 /// The row being renamed: the field replaces the name/topic on its usual
@@ -596,19 +606,21 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
         _ => None,
     };
     if matches!(row.kind, RowKind::Agent { .. }) {
-        let mut second = agent_detail_prefix(row, mark.clone(), t);
-        second.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
-        // Age/stale metadata takes space too. Reserve a usable editor before
-        // fitting feedback, rather than letting a long error overflow the row.
-        let feedback_room = w.saturating_sub(cols(&second) + 6 + 2);
+        // The field stands for the title, on the first line; the folder
+        // shows on the second, as for a titled card.
+        let mut first = card_head(row, mark.clone(), t);
+        first.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
+        // Reserve a usable editor before fitting feedback, rather than
+        // letting a long error overflow the row.
+        let feedback_room = w.saturating_sub(cols(&first) + 6 + 2);
         let slot = slot.filter(|_| feedback_room > 0)
             .map(|s| Span::styled(fit(&s.content, feedback_room), s.style));
-        let room = w.saturating_sub(cols(&second) + slot.as_ref().map_or(0, |s| s.width() + 2));
-        second.extend(field_spans(&r.field, &r.placeholder, room, t));
+        let room = w.saturating_sub(cols(&first) + slot.as_ref().map_or(0, |s| s.width() + 2));
+        first.extend(field_spans(&r.field, &r.placeholder, room, t));
         if let Some(slot) = slot {
-            push_right(&mut second, slot, w);
+            push_right(&mut first, slot, w);
         }
-        return card_lines(Line::from(second), mark, row, w, true, None, t);
+        return vec![Line::from(first), card_second(row, mark, w, true, None, t)];
     }
     // What comes before the name, as the row draws it.
     let (mut first, rest) = match &row.kind {
@@ -730,10 +742,13 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         // the mark shows only beside it. A card's place, at its end after
         // its gap, is not read: covered, it goes whole (a part of one would
         // name another).
+        // The changes, at the end of a card's first line, likewise.
         let before_place = bottom.and_then(|b| match &app.rows[b].kind {
-            RowKind::Agent { place, .. } if !place.is_empty() => {
+            RowKind::Agent { place, diff, .. } => {
                 let text = last.to_string();
-                text.strip_suffix(place.as_str()).filter(|rest| rest.ends_with("  ")).map(|rest| rest.trim_end().width())
+                [place, diff].into_iter().filter(|end| !end.is_empty())
+                    .find_map(|end| text.strip_suffix(end.as_str()).filter(|rest| rest.ends_with("  ")))
+                    .map(|rest| rest.trim_end().width())
             }
             _ => None,
         });
@@ -848,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_cards_put_bright_identity_above_muted_age_and_topic() {
+    fn agent_cards_put_a_bright_title_above_their_age_and_folder() {
         let cases = [("claude", "✳", "\u{ec82}"), ("codex", "›_", "\u{ec81}"), ("pi", "π", "π"), ("opencode", "◇", "\u{f0763}"), ("gemini", "✦", "\u{ec10}"), ("custom", "▣", "▣"), ("", "▣", "▣")];
         for (mode, kind, icon) in cases.into_iter().flat_map(|(kind, unicode, nerd)| [(AgentIcons::Unicode, kind, unicode), (AgentIcons::Nerd, kind, nerd)]) {
             let mut t = Theme::default();
@@ -875,17 +890,16 @@ mod tests {
                             let identity = lines[0].to_string();
                             let detail = lines[1].to_string();
                             assert!(identity.starts_with(&format!("▌ ● {icon}")), "{identity}");
-                            assert!(!identity.contains("task"), "{identity}");
+                            assert!(identity.ends_with("task"), "{identity}");
                             let mark = lines[0].spans.iter().find(|s| s.content == icon).unwrap();
                             assert_eq!(mark.style, bold(), "{kind}: bright provider icon");
-                            assert_eq!(lines[0].spans.last().unwrap().style, t.selected(), "bright path, selected");
-                            assert_eq!(lines[1].spans.last().unwrap().style, Style::new(), "the topic in plain text");
-                            assert!(detail.ends_with("task"), "{detail}");
+                            assert_eq!(lines[0].spans.last().unwrap().style, t.selected(), "bright title, selected");
+                            assert_eq!(lines[1].spans.last().unwrap().style, t.muted(), "the folder muted");
                             if width == 72 {
-                                assert!(identity.contains("~/a-long-project-path-日本語"), "{identity}");
+                                assert!(detail.contains("~/a-long-project-path-日本語"), "{detail}");
                             }
                             if !age.is_empty() {
-                                assert!(detail.find(age).unwrap() < detail.find("task").unwrap(), "{detail}");
+                                assert!(detail.find(age).unwrap() < detail.find("~/a").unwrap(), "{detail}");
                             }
                             assert_eq!(detail.contains('?'), stale, "{detail}");
                         }
@@ -896,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_time_matches_the_state_and_the_topic_is_plain() {
+    fn elapsed_time_matches_the_state_and_the_title_is_bold() {
         let t = Theme::default();
         for state in State::ALL {
             let row = Row {
@@ -908,7 +922,8 @@ mod tests {
                 let lines = row_lines(&row, false, compact, 40, None, "window", &t).0;
                 let age = lines[1].spans.iter().find(|s| s.content.contains("5m")).unwrap();
                 assert_eq!(age.style, t.state(state));
-                assert_eq!(lines[1].spans.last().unwrap().style, Style::new());
+                assert_eq!(lines[0].spans.last().unwrap().style, bold());
+                assert_eq!(lines[1].spans.last().unwrap().style, t.muted());
             }
         }
     }
@@ -927,10 +942,11 @@ mod tests {
         for width in [24, 36, 40, 72] {
             let lines = rename_lines(&app.rows[app.selected], r, true, width, &t);
             assert!(lines.iter().all(|l| l.width() <= width as usize), "{width}: {lines:?}");
-            assert!(lines[1].to_string().contains("✎ one"), "editor remains usable");
+            assert!(lines[0].to_string().contains("✎ one"), "editor remains usable");
+            assert!(lines[1].to_string().contains("5m"), "{lines:?}");
             if width == 36 {
-                assert!(lines[1].to_string().contains("✗ pi"));
-                assert!(lines[1].to_string().ends_with('…'), "visible error truncation");
+                assert!(lines[0].to_string().contains("✗ pi"));
+                assert!(lines[0].to_string().ends_with('…'), "visible error truncation");
             }
         }
     }
@@ -998,16 +1014,29 @@ mod tests {
     }
 
     #[test]
-    fn a_note_takes_the_room_a_short_title_leaves() {
+    fn a_card_names_its_title_above_what_it_asks() {
         let t = Theme::default();
-        let line = |title: &str, note: &str, width: u16| row_lines(&agent(title, note, "~/p"), false, false, width, None, "window", &t).0[1].to_string();
-        assert!(line("Fix bug", "Allow edit to main.rs?", 40).ends_with("Fix bug › Allow edit to main.r…"), "{}", line("Fix bug", "Allow edit to main.rs?", 40));
-        assert!(line("Fix bug", "Allow edit?", 40).ends_with("Fix bug › Allow edit?"));
-        // Both long: the note keeps a few words, the title half the line.
-        let both = line("Refactor the session parser", "Allow edit to src/backend/rex.rs?", 40);
-        assert!(both.contains("Refactor the s… › Allow edit t…"), "{both}");
+        let lines = |title: &str, note: &str, width: u16| -> Vec<String> { row_lines(&agent(title, note, "~/p"), false, false, width, None, "window", &t).0.iter().map(|l| l.to_string()).collect() };
+        let card = lines("Fix bug", "Allow edit to main.rs?", 40);
+        assert!(card[0].ends_with("Fix bug") && card[1].ends_with("› Allow edit to main.rs?"), "{card:#?}");
+        // The question takes the line, cut when long.
+        let long = lines("Refactor the session parser", "Allow edit to src/backend/rex.rs?", 31);
+        assert!(long[0].ends_with("Refactor the session pa…") && long[1].ends_with("› Allow edit to src/b…"), "{long:#?}");
+        // The changes at the right of the title, the first to go when short.
+        let mut changed = agent("Fix bug", "Allow edit?", "~/p");
+        if let RowKind::Agent { diff, .. } = &mut changed.kind {
+            *diff = "+12 −3 · 2 untracked".into();
+        }
+        let first = |width: u16| row_lines(&changed, false, false, width, None, "window", &t).0[0].to_string();
+        assert!(first(40).contains(" Fix bug  ") && first(40).ends_with(" +12 −3 · 2 untracked"), "{}", first(40));
+        assert!(first(30).ends_with("Fix bug"), "{}", first(30));
         for width in 0..100 {
             for (title, note) in [("Fix bug", "Allow edit to main.rs?"), ("", "Allow 👨‍👩‍👧 edit?"), ("👍🏽 ok ❤️", ""), ("a ☺️ b", "x")] {
+                let mut row = agent(title, note, "~/p");
+                if let RowKind::Agent { diff, .. } = &mut row.kind {
+                    *diff = "+1204 −3670 · 2 untracked".into();
+                }
+                assert!(row_lines(&row, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
                 let lines = row_lines(&agent(title, note, "~/p"), true, false, width, None, "window", &t).0;
                 assert!(lines.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}: {lines:?}");
             }
@@ -1015,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn a_card_says_where_it_runs_and_an_idle_one_only_its_title() {
+    fn a_card_says_where_it_runs_and_an_idle_one_its_folder() {
         let t = Theme::default();
         let card = |state: State, title: &str, note: &str| {
             let mut row = agent(title, note, "~/p");
@@ -1025,19 +1054,21 @@ mod tests {
             }
             row
         };
-        let line = |row: &Row, width: u16| row_lines(row, false, false, width, None, "window", &t).0[1].to_string();
+        let line = |row: &Row, n: usize, width: u16| row_lines(row, false, false, width, None, "window", &t).0[n].to_string();
         let asking = card(State::Asking, "Fix bug", "Allow edit?");
-        assert!(line(&asking, 60).contains("Fix bug › Allow edit?") && line(&asking, 60).ends_with(" ml:train"), "{}", line(&asking, 60));
+        assert!(line(&asking, 0, 60).ends_with("Fix bug"), "{}", line(&asking, 0, 60));
+        assert!(line(&asking, 1, 60).contains("› Allow edit?") && line(&asking, 1, 60).ends_with(" ml:train"), "{}", line(&asking, 1, 60));
         // Short of room, the place goes first.
-        assert!(line(&asking, 36).ends_with("Fix bug › Allow edit?") && !line(&asking, 36).contains("ml:"), "{}", line(&asking, 36));
-        // What an idle agent said is in the preview: its card names it.
+        assert!(line(&asking, 1, 26).ends_with("› Allow edit?") && !line(&asking, 1, 26).contains("ml:"), "{}", line(&asking, 1, 26));
+        // What an idle agent said is in the preview: its card says where.
         let idle = card(State::Idle, "Fix bug", "Done, all tests pass.");
-        assert!(line(&idle, 60).contains("Fix bug ") && !line(&idle, 60).contains("Done") && line(&idle, 60).ends_with(" ml:train"), "{}", line(&idle, 60));
-        // Untitled, its last words stand in for the title, muted.
-        let untitled = row_lines(&card(State::Idle, "", "Done, all tests pass."), false, false, 60, None, "window", &t).0.remove(1);
-        let words = untitled.spans.iter().find(|s| s.content.contains("Done")).unwrap();
+        assert!(line(&idle, 1, 60).contains("~/p ") && !line(&idle, 1, 60).contains("Done") && line(&idle, 1, 60).ends_with(" ml:train"), "{}", line(&idle, 1, 60));
+        // Untitled, its folder names it, and its last words follow, muted.
+        let untitled = row_lines(&card(State::Idle, "", "Done, all tests pass."), false, false, 60, None, "window", &t).0;
+        assert!(untitled[0].to_string().ends_with("~/p"), "{}", untitled[0]);
+        let words = untitled[1].spans.iter().find(|s| s.content.contains("Done")).unwrap();
         assert_eq!(words.style, t.muted());
-        assert!(untitled.to_string().ends_with(" ml:train"));
+        assert!(untitled[1].to_string().ends_with(" ml:train"));
         for width in 0..80 {
             for row in [&asking, &idle] {
                 assert!(row_lines(row, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
@@ -1130,6 +1161,22 @@ mod tests {
     }
 
     #[test]
+    fn the_more_mark_covers_changes_whole() {
+        let mut app = many_agents();
+        for row in &mut app.rows {
+            if let RowKind::Agent { diff, .. } = &mut row.kind {
+                *diff = "+1204 −3670 · 2 untracked".into();
+            }
+        }
+        for width in 30..70 {
+            // Input, blank, then a header, a card and the first line of the next.
+            let lines = screen(&render(&app, &mut View::new(), width, 9, ""));
+            let last = lines.iter().find(|l| l.contains('↓')).unwrap_or_else(|| panic!("{width}: {lines:#?}"));
+            assert!(!last.contains('+') || last.contains("+1204 −3670 · 2 untracked"), "{width}: {lines:#?}");
+        }
+    }
+
+    #[test]
     fn rows_past_the_viewport_are_counted_at_its_edges() {
         let mut app = many_agents();
         let mut view = View::new();
@@ -1138,7 +1185,7 @@ mod tests {
         let lines = screen(&term);
         assert!(!lines[2].contains('↑'), "{lines:#?}");
         assert!(lines[7].ends_with("↓ 4 more │"), "on the last list line: {lines:#?}");
-        assert!(lines[7].contains("task 2"), "the line keeps its text: {lines:#?}");
+        assert!(lines[7].contains("/a2"), "the line keeps its text: {lines:#?}");
         assert_eq!(view.rows.len(), 2, "the hit rects are the rows': {:?}", view.rows);
         assert!(view.rows.iter().all(|(r, ..)| r.y >= 3 && r.bottom() <= 8));
         for _ in 0..5 {
@@ -1155,11 +1202,11 @@ mod tests {
         let mut app = many_agents();
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let wide = screen(&render(&app, &mut View::new(), 60, 10, ""));
-        assert!(wide[7].contains("task 2") && wide[7].ends_with("↓ 4 more │"), "beside it: {wide:#?}");
-        let narrow = screen(&render(&app, &mut View::new(), 21, 10, ""));
-        assert!(narrow[7].contains("task 2") && !narrow[7].contains('↓'), "not over it: {narrow:#?}");
+        assert!(wide[7].contains("/a2") && wide[7].ends_with("↓ 4 more │"), "beside it: {wide:#?}");
+        let narrow = screen(&render(&app, &mut View::new(), 17, 10, ""));
+        assert!(narrow[7].contains("/a2") && !narrow[7].contains('↓'), "not over it: {narrow:#?}");
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        let narrow = screen(&render(&app, &mut View::new(), 21, 10, ""));
+        let narrow = screen(&render(&app, &mut View::new(), 17, 10, ""));
         assert!(narrow[7].ends_with("↓ 4 more │"), "over another row's: {narrow:#?}");
     }
 
@@ -1267,10 +1314,12 @@ mod tests {
         let cards: Vec<&Row> = rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).collect();
         let first = |r: &Row, w: u16| row_lines(r, false, false, w, None, "window", &t).0.remove(0);
         // Waiting first.
-        let line = first(cards[1], 60);
-        assert!(line.to_string().ends_with("devbox:~/source/company/project"), "{line}");
+        let second = |r: &Row, w: u16| row_lines(r, false, false, w, None, "window", &t).0.remove(1);
+        let line = second(cards[1], 60);
+        assert!(line.to_string().contains("devbox:~/source/company/project "), "{line}");
         assert_eq!(line.spans.iter().find(|s| s.content == "devbox:").unwrap().style, Style::new().fg(t.hint));
-        assert!(first(cards[1], 24).to_string().contains("devbox:"), "the host outlasts the path");
+        assert!(second(cards[1], 24).to_string().contains("devbox:"), "the host outlasts the path");
+        assert!(!first(cards[1], 60).to_string().contains('@'), "the folder says it: {}", first(cards[1], 60));
         assert!(first(cards[0], 60).to_string().ends_with("@devbox"), "no path to carry it: {}", first(cards[0], 60));
         assert!(!first(cards[2], 60).to_string().contains('@'));
         assert_eq!(crate::rows::pane_title(&snap, "%1"), "ml:1.0 @devbox · claude");
@@ -1278,8 +1327,8 @@ mod tests {
         let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Folder, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
         let text: Vec<String> = rows.iter().flat_map(|r| row_lines(r, false, false, 60, None, "window", &t).0).map(|l| l.to_string()).collect();
         assert!(text.contains(&" devbox:~/source/company/project 1".to_string()), "{text:#?}");
-        assert!(text.iter().any(|l| l.contains("fit") && l.ends_with(" ml:train")), "{text:#?}");
-        assert!(text.iter().any(|l| l.contains("serve") && l.ends_with(" web:api")), "{text:#?}");
+        assert!(text.windows(2).any(|l| l[0].ends_with("fit") && l[1].ends_with(" ml:train")), "{text:#?}");
+        assert!(text.windows(2).any(|l| l[0].ends_with("serve") && l[1].ends_with(" web:api")), "{text:#?}");
         for width in 0..80 {
             for r in rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })) {
                 assert!(row_lines(r, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
