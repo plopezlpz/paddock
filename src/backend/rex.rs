@@ -348,8 +348,8 @@ enum Job {
     /// The listener started Nth listens: a snapshot that waited for it is
     /// taken.
     Listening(u64),
-    /// A listener ended: the thread looks to it.
-    Ended,
+    /// The listener started Nth ended: the thread starts another.
+    Ended(u64),
     /// Capture a block for the preview.
     Capture(String),
     /// paddock is closing.
@@ -590,7 +590,7 @@ fn serve(spawn: &Spawn, queue: &Sender<Job>, jobs: &Receiver<Job>, latest: &Arc<
                             if !why.is_empty() {
                                 deaf(Some(why));
                             }
-                            let _ = q.send(Job::Ended);
+                            let _ = q.send(Job::Ended(nth));
                         }
                     }
                 });
@@ -653,7 +653,11 @@ fn serve(spawn: &Spawn, queue: &Sender<Job>, jobs: &Receiver<Job>, latest: &Arc<
             None | Some(Job::Stop) => return,
             // An earlier listener's (it said so, then ended) is not this one's.
             Some(Job::Listening(nth)) if nth == listeners => unheard = None,
-            Some(Job::Listening(_) | Job::Ended) => {}
+            // Its output ended, but it may not have exited yet: seen
+            // running, it would be waited on with nothing due, so no
+            // other starts until some request came. Reaped, it is down.
+            Some(Job::Ended(nth)) if nth == listeners => stop(lock().listener.as_mut()),
+            Some(Job::Listening(_) | Job::Ended(_)) => {}
             Some(Job::Call(_, by, reply)) if Instant::now() > by => {
                 let _ = reply.send((Err(format!("{} is not answering", spawn.name())), false));
             }

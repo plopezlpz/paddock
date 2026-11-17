@@ -6,6 +6,10 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Rex: a listener that ended just as paddock looked at it could leave paddock waiting without news (state changes, new tabs) until something else woke it; it is started again at once.
+
 ## [0.10.0] - 2026-11-17
 
 ### Changed
