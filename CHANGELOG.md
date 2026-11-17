@@ -6,6 +6,10 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Rex: paddock opened from one server's action into another host's pane (a Mac's `cmd+j` on a devbox session) failed with `client target "client:…" not found`: the app's ID is each server's own. An ID this server doesn't know now stands for the one app connected to it, by its label.
+
 ## [0.10.2] - 2026-11-17
 
 ### Changed

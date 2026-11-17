@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -187,6 +187,35 @@ struct Worker {
     /// It has taken a snapshot: its next can keep what that one read.
     read: bool,
 }
+
+/// CLIENT as this server knows it: a label stays; an ID is this server's
+/// app by its label (or ID), or, an ID another server gave the app (the
+/// action that opened paddock may run on one, its pane on this), the one
+/// app connected here. None without one: `rex -C` with a client the server
+/// doesn't know fails, and paddock with it.
+fn resolve_client(program: &Path, client: &str) -> Option<String> {
+    if !client.starts_with("client:") {
+        return Some(client.to_string());
+    }
+    let script = format!("local id = {}\n{RESOLVE_CLIENT}", lua_string(client));
+    let out = Command::new(program).args(["do", "-e", &script]).stderr(Stdio::null()).output().ok()?;
+    serde_json::from_slice::<String>(&out.stdout).ok().filter(|c| !c.is_empty())
+}
+
+const RESOLVE_CLIENT: &str = r#"local _, found = pcall(rex.call, "client.inspect", { client_id = id })
+local c = found and found.client
+if not c then
+  local _, list = pcall(rex.call, "client.list", {})
+  for _, x in ipairs((list or {}).clients or {}) do
+    if (x.info or {}).kind == "app" and x.connection_state == "connected" then
+      if c then return "" end
+      c = x
+    end
+  end
+end
+if not c then return "" end
+local label = (c.info or {}).label
+return (label and label ~= "") and label or (c.client_id or id)"#;
 
 /// `rex` for SPAWN's host.
 fn rex(spawn: &Spawn) -> Command {
@@ -1138,13 +1167,14 @@ pub fn connect(opts: Opts, events: impl Fn(u64, Msg) + Send + Sync + 'static) ->
     let me = get("REX_BLOCK").unwrap_or_default();
     let wake: Arc<dyn Fn(Msg) + Send + Sync> = Arc::new(move |msg| events(0, msg));
     let program = PathBuf::from("rex");
-    let local = Host::start(Spawn { program: program.clone(), host: None, client: opts.client.clone(), me: me.clone(), here: here.clone(), from: opts.from.clone(), retry: RETRY_HERE }, Arc::clone(&wake));
+    let client = opts.client.as_deref().and_then(|c| resolve_client(&program, c));
+    let local = Host::start(Spawn { program: program.clone(), host: None, client: client.clone(), me: me.clone(), here: here.clone(), from: opts.from.clone(), retry: RETRY_HERE }, Arc::clone(&wake));
     // The first answer says whether the server is there at all; the first
     // snapshot comes once the listener listens.
     let hosts = local.call(json!({ "op": "hosts" })).map(items)?;
     // The app is a client of each host too, under the same label (an ID is
     // this server's own).
-    let label = opts.client.as_ref().and_then(|c| match c.starts_with("client:") {
+    let label = client.as_ref().and_then(|c| match c.starts_with("client:") {
         true => local.call(json!({ "op": "client_label", "client": c })).map(text).ok(),
         false => Some(c.clone()),
     }).filter(|l| !l.is_empty());
