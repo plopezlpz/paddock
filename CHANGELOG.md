@@ -6,6 +6,10 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Rex: the docs no longer offer agent-status.tmux's pane titles (`AGENT_AUTO_TITLE`), which it dropped: an agent's title on Rex is its pane's label, else the one it gives its terminal, as before.
+
 ## [0.10.1] - 2026-11-17
 
 ### Changed

@@ -47,11 +47,7 @@ selected row's menu, with everything you can do with it, and `Esc` clears
 the filter before it closes.
 
 An agent's title is its pane's label when it has one, else the title the
-agent sets for its terminal (Claude Code writes a short topic there). With
-[agent-status.tmux](https://github.com/plopezlpz/agent-status.tmux) 0.9.0 and
-`AGENT_AUTO_TITLE=on` in your shell's environment, each Claude Code or pi
-session's first prompt names its pane with a few words pi writes, as T3 Code
-titles its threads; a label you gave stays.
+agent sets for its terminal (Claude Code writes a short topic there).
 
 A tab without a name is named after its focused pane: an agent's title, else
 the program running there, as tmux names a window.
