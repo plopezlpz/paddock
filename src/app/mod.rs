@@ -220,7 +220,11 @@ pub struct App {
     pub(crate) query: LineEdit,
     pub(crate) rows: Vec<Row>,
     pub(crate) selected: usize,
-    pub(crate) preview_on: bool,
+    /// The preview as toggled; None: shown unless the layout is compact (a
+    /// phone, where the list needs the room).
+    pub(crate) preview: Option<bool>,
+    /// Whether the last draw was in the compact layout (the loop keeps it).
+    pub(crate) compact: bool,
     /// Whether the last draw had room for the preview (the loop keeps it):
     /// the menu offers to toggle it only then.
     pub(crate) preview_fits: bool,
@@ -270,7 +274,8 @@ impl App {
             query: LineEdit::default(),
             rows: Vec::new(),
             selected: 0,
-            preview_on: true,
+            preview: None,
+            compact: false,
             preview_fits: true,
             mode: Mode::List,
             status: None,
@@ -305,10 +310,15 @@ impl App {
         self.rows.get(self.selected)?.target.as_ref()
     }
 
+    /// Whether the preview is wanted, in the layout COMPACT or not.
+    pub fn preview_on(&self, compact: bool) -> bool {
+        self.preview.unwrap_or(!compact)
+    }
+
     /// The pane to preview, if the preview is on screen: the one typed
     /// into, else the selected row's.
     pub fn preview_pane(&self, view: &View) -> Option<&str> {
-        if !(self.preview_on && view.preview_fits) {
+        if !(self.preview_on(view.compact) && view.preview_fits) {
             return None;
         }
         if let Mode::Type(t) = &self.mode {
@@ -336,7 +346,7 @@ impl App {
         if !self.preview_fits {
             return self.note("no room for the preview here");
         }
-        self.preview_on = true;
+        self.preview = Some(true);
         // Listed whatever the filter says, so the preview stays: an answered
         // agent no longer matches "asking".
         self.keep = self.selected_target().cloned();
@@ -1167,7 +1177,7 @@ impl App {
                 self.group = self.group.next();
                 self.rebuild(false);
             }
-            Command::Preview => self.preview_on = !self.preview_on,
+            Command::Preview => self.preview = Some(!self.preview_on(self.compact)),
             Command::Type => self.start_typing(),
             Command::Next => self.go_next(),
             Command::Close => return Action::Quit,

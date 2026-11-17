@@ -179,7 +179,7 @@ impl App {
             (Command::NewSession, "new session"),
             (Command::Undo, "undo"),
             (Command::Group, &group),
-            (Command::Preview, if self.preview_on { "hide preview" } else { "show preview" }),
+            (Command::Preview, if self.preview_on(self.compact) { "hide preview" } else { "show preview" }),
             (Command::Tab(self.tab.other()), &tab),
         ]
         .into_iter()

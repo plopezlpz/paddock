@@ -89,7 +89,7 @@ working in the same project, one per worktree, sit together.
 
 The selected pane, live, beside the list when the popup is at least 102
 columns wide, else below it when the popup is at least 24 rows high (`ctrl-o`
-toggles it). Move down the list and the preview follows,
+toggles it; under 80 columns it starts hidden, leaving the list the room). Move down the list and the preview follows,
 so you can read what an agent is doing, or asking, before you jump to it.
 
 <img src="docs/brand/preview.svg" alt="paddock's agents tab with the selected agent's pane shown live beside the list; moving down the list changes the preview, and nothing is opened or switched." width="100%">
@@ -165,7 +165,8 @@ notification (with alerter, terminal-notifier or notify-send installed).
 ### On your phone
 
 Under 80 columns paddock switches to a compact two-line layout with tappable
-words (see [Use](#use)).
+words (see [Use](#use)), and leaves the preview out until you ask for it
+("show preview" in the menu, or `ctrl-l` to type into a pane).
 
 <p align="center">
   <img src="docs/brand/frame-phone.svg" alt="paddock's agents tab on a 40-column phone screen: the compact layout, with the agents grouped by state and a card waiting for you." width="300">
@@ -285,8 +286,9 @@ is not checked: keep it at the clone's version, and update the two together.
 - **Agents tab**: one card per agent, grouped by status, session or folder, or not at all; it opens on the agent you are in.
 - **Preview**: the selected pane, live, beside the list when the popup is at
   least 102 columns wide, else below it when it is at least 24 rows high.
-- **Phones**: under 80 columns, a compact two-line layout; under 60, footer
-  hints are words alone, to tap.
+- **Phones**: under 80 columns, a compact two-line layout without the
+  preview until you ask for it (`ctrl-o`, or typing into a pane); under 60,
+  footer hints are words alone, to tap.
 
 The selected row is marked `▌`, its name bold in the accent colour; the
 session the client shows is marked `*`. While filtering, the characters that

@@ -404,6 +404,7 @@ fn run(tab: Option<Tab>, server: Server) -> Result<(), String> {
                 tui.0.draw(|f| ui::draw(f, &popup.app, &mut view, &preview, &popup.theme)).map_err(|e| e.to_string())?;
                 popup.dirty = false;
                 popup.app.set_preview_fits(view.preview_fits);
+                popup.app.compact = view.compact;
                 if popup.app.preview_pane(&view) != popup.live.pane.as_deref() {
                     // The preview just appeared or went away: follow it now.
                     popup.dirty = true;
@@ -989,7 +990,7 @@ mod tests {
         assert_eq!(fake.captured, ["%1", "%2"], "captured at once, not at the next due time");
         assert!(p.dirty);
         // Off: nothing is captured.
-        p.app.preview_on = false;
+        p.app.preview = Some(false);
         p.tick(&mut fake, &view).unwrap();
         assert_eq!((fake.captured.len(), p.live.pane.as_deref()), (2, None));
     }

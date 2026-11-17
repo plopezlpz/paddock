@@ -6,8 +6,11 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-17
+
 ### Changed
 
+- On a phone (under 80 columns), the preview starts hidden, leaving the list the room: "show preview" in the menu (`ctrl-o`) shows it, and so does typing into a pane (`ctrl-l`).
 - Rex: the docs no longer offer agent-status.tmux's pane titles (`AGENT_AUTO_TITLE`), which it dropped: an agent's title on Rex is its pane's label, else the one it gives its terminal, as before.
 
 ## [0.10.1] - 2026-11-17
@@ -237,7 +240,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/plopezlpz/paddock/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/plopezlpz/paddock/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/plopezlpz/paddock/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/plopezlpz/paddock/compare/v0.8.1...v0.9.0

@@ -180,7 +180,7 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
     let beside = body.width >= PREVIEW_FROM;
     view.preview_fits = beside || area.height >= PREVIEW_BELOW_FROM;
     // Nothing listed: no preview either, and the list's hint has the room.
-    let (list, side) = if !(app.preview_on && view.preview_fits) || app.rows.is_empty() {
+    let (list, side) = if !(app.preview_on(view.compact) && view.preview_fits) || app.rows.is_empty() {
         (body, None)
     } else if beside {
         let [l, r] = Layout::horizontal([Constraint::Length((body.width / 2).min(LIST_MAX)), Constraint::Fill(1)]).areas(body);
@@ -1269,7 +1269,8 @@ mod tests {
 
     #[test]
     fn the_preview_title_is_fitted_beside_the_list_too() {
-        let app = many_agents();
+        let mut app = many_agents();
+        app.preview = Some(true);
         let title = format!("session:1.1 · {}", "x".repeat(200));
         for (width, height) in [(120, 20), (70, 30)] {
             let mut view = View::new();

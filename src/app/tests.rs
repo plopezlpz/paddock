@@ -1110,23 +1110,29 @@ fn esc_clears_the_filter_then_closes() {
 
 #[test]
 fn narrow_and_tall_the_preview_goes_below_the_list() {
-    let app = agents_app();
+    let mut app = agents_app();
     let mut view = View::new();
-    let draw_preview = |view: &mut View, width, height| {
+    let draw_preview = |app: &App, view: &mut View, width, height| {
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
         let body = Text::raw("pane text");
-        term.draw(|f| ui::draw(f, &app, view, &Preview { title: "s:1.0 · claude", body: &body }, &Theme::default())).unwrap();
+        term.draw(|f| ui::draw(f, app, view, &Preview { title: "s:1.0 · claude", body: &body }, &Theme::default())).unwrap();
         screen(&term)
     };
-    let lines = draw_preview(&mut view, 70, 30);
+    // A phone's compact layout leaves it out until asked for (ctrl-o).
+    let lines = draw_preview(&app, &mut view, 70, 30);
+    assert!(view.preview_fits && !lines.iter().any(|l| l.contains("pane text")), "{lines:#?}");
+    app.compact = true;
+    assert_eq!(app.menu_items(true).iter().find(|h| h.key == "^o").map(|h| h.label.as_str()), Some("show preview"));
+    app.run(Command::Preview);
+    let lines = draw_preview(&app, &mut view, 70, 30);
     assert!(view.preview_fits);
     let rule = lines.iter().position(|l| l.contains("s:1.0 · claude ─")).unwrap_or_else(|| panic!("{lines:#?}"));
     assert!(lines[rule + 1..].iter().any(|l| l.contains("pane text")), "{lines:#?}");
     assert!(lines[..rule].iter().any(|l| l.contains("one")), "the list above: {lines:#?}");
-    let lines = draw_preview(&mut view, 70, 20);
+    let lines = draw_preview(&app, &mut view, 70, 20);
     assert!(!view.preview_fits);
     assert!(!lines.iter().any(|l| l.contains("pane text")), "{lines:#?}");
-    let lines = draw_preview(&mut view, 120, 20);
+    let lines = draw_preview(&app, &mut view, 120, 20);
     assert!(view.preview_fits && lines.iter().any(|l| l.contains("│ s:1.0 · claude")), "beside: {lines:#?}");
 }
 
@@ -2097,9 +2103,9 @@ fn typing_needs_the_preview_and_the_pane() {
     assert!(matches!(app.mode, Mode::List));
     assert!(matches!(&app.status, Some(Status::Note(n)) if n.contains("no room")));
     app.set_preview_fits(true);
-    app.preview_on = false;
+    app.preview = Some(false);
     ctrl(&mut app, 'l');
-    assert!(matches!(app.mode, Mode::Type(_)) && app.preview_on, "the preview comes on");
+    assert!(matches!(app.mode, Mode::Type(_)) && app.preview_on(false), "the preview comes on");
     app.set_preview_fits(false);
     assert!(matches!(app.mode, Mode::List), "no typing blind");
     ctrl(&mut app, 'l');

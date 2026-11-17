@@ -1,7 +1,7 @@
 window.PADDOCK_FRAMES = window.PADDOCK_FRAMES || {};
 window.PADDOCK_FRAMES["feat-rename"] = {
 v: 1, name: "feat-rename", cols: 132, rows: 36,
-source: {"paddock":"0.10.1","commit":"ffb9f99-dirty","sha256":"7370e4175224203783b836a061e1cb9aaad77f2f1d2f93e44e0838824bc11103","tmux":"3.8","recorded":"2026-11-17","conf":"gruber.conf","suggest":"demo stub tools/demo/suggest.sh: canned titles after a 0.8 s wait; agent-status.tmux's real @agent-suggest-command is describe.sh suggest, which asks pi","cols":132,"rows":36},
+source: {"paddock":"0.10.2","commit":"b8b7891-dirty","sha256":"083c47e1af100cde4af3a6e9f4e9a83779597bf77c76f5cac31c96a50422464a","tmux":"3.8","recorded":"2026-11-17","conf":"gruber.conf","suggest":"demo stub tools/demo/suggest.sh: canned titles after a 0.8 s wait; agent-status.tmux's real @agent-suggest-command is describe.sh suggest, which asks pi","cols":132,"rows":36},
 styles: [
 {},
 {"b":1},
