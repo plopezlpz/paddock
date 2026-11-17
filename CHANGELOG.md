@@ -6,6 +6,8 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-17
+
 ### Fixed
 
 - Rex: paddock opened from one server's action into another host's pane (a Mac's `cmd+j` on a devbox session) failed with `client target "client:…" not found`: the app's ID is each server's own. An ID this server doesn't know now stands for the one app connected to it, by its label.
@@ -244,7 +246,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/plopezlpz/paddock/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/plopezlpz/paddock/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/plopezlpz/paddock/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/plopezlpz/paddock/compare/v0.9.0...v0.10.0
