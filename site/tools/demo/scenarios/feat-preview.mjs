@@ -45,7 +45,7 @@ export default {
     {
       chapter: 'skim',
       keys: ['Down'],
-      snap: { expect: [{ selected: 'move staging' }, 'infra:1.0 · pi', 'read envs/staging/main.tf', 'Working...', '$0.021'], hold: 1500, key: '↓', poster: true },
+      snap: { expect: [{ selected: 'Staging VPC' }, 'infra:1.0 · pi', 'read envs/staging/main.tf', 'Working...', '$0.021'], hold: 1500, key: '↓', poster: true },
     },
     { write: ['infra:1.0', 'pi-1.ans'], snap: { expect: ['edit envs/staging/main.tf', '$0.034'], hold: 1100 } },
     { write: ['infra:1.0', 'pi-2.ans'], snap: { expect: ['$ terraform plan', '$0.046'], hold: 1100 } },
@@ -54,11 +54,11 @@ export default {
     {
       chapter: 'onward',
       keys: ['Down'],
-      snap: { expect: [{ selected: 'migrate the cart' }, 'webshop:2.0 · opencode', 'Checking the payments package'], hold: 1500, key: '↓', poster: true },
+      snap: { expect: [{ selected: 'Cart Page Payment' }, 'webshop:2.0 · opencode', 'Checking the payments package'], hold: 1500, key: '↓', poster: true },
     },
     {
       keys: ['Down'],
-      snap: { expect: [{ selected: 'cosine lr' }, 'ml:1.0 · kimi', 'epoch 4/20'], hold: 1800, key: '↓' },
+      snap: { expect: [{ selected: 'Cosine LR' }, 'ml:1.0 · kimi', 'epoch 4/20'], hold: 1800, key: '↓' },
     },
   ],
 };

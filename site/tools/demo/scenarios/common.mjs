@@ -31,10 +31,10 @@ export function sessions(ctx, { split }) {
 // so 7m stays 7m. (The recorder checks.)
 export const AGENTS = {
   api: ['webshop:1.0', { state: 'working', kind: 'claude', title: 'add rate limiting to the checkout API', ageSec: 5 }],
-  web: ['webshop:2.0', { state: 'working', kind: 'opencode', title: 'migrate the cart page to the payment element', ageSec: 185 }],
-  infra: ['infra:1.0', { state: 'idle', unseen: true, kind: 'pi', title: 'move staging onto the new vpc module', ageSec: 7 * 60 + 5 }],
-  ml: ['ml:1.0', { state: 'working', kind: 'kimi', title: 'try a cosine lr schedule with warmup', ageSec: 10 * 60 + 5 }],
-  docs: ['docs:1.0', { state: 'idle', kind: 'claude', title: 'rewrite the getting-started guide', ageSec: 65 * 60 + 5 }],
+  web: ['webshop:2.0', { state: 'working', kind: 'opencode', title: 'Cart Page Payment Element', ageSec: 185 }],
+  infra: ['infra:1.0', { state: 'idle', unseen: true, kind: 'pi', title: 'Staging VPC Migration', ageSec: 7 * 60 + 5 }],
+  ml: ['ml:1.0', { state: 'working', kind: 'kimi', title: 'Cosine LR Warmup Schedule', ageSec: 10 * 60 + 5 }],
+  docs: ['docs:1.0', { state: 'idle', kind: 'claude', title: 'Getting Started Guide Rewrite', ageSec: 65 * 60 + 5 }],
 };
 
 /** Sets every agent and writes the idle ones' transcripts; the caller writes the rest. EXTRA goes to each setAgent (limit: false when no age is shown). */

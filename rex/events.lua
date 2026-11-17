@@ -128,5 +128,6 @@ local function alive()
   rex.after(ALIVE, alive)
 end
 rex.after(ALIVE, alive)
--- From the event loop: the handlers above are heard by then.
-rex.after(0.05, function() say("ready") end)
+-- From the event loop: the handlers above are heard by then (no wait: an
+-- event caused the moment paddock reads "ready" is heard).
+rex.after(0, function() say("ready") end)

@@ -121,10 +121,12 @@ Elsewhere it is `Enter`.
 
 ### What it said, and what it changed
 
-A waiting or finished agent's card ends with what it last said: the tool call
-it waits on (`Bash: cargo test`, or its question), else the first line of its
-last answer, muted once you have seen it. A settled agent's card shows the
-changes waiting in its folder, `+12 −3` against HEAD and `· 2 new` for
+A working, waiting or finished agent's card follows its title with what it
+last said, after `›`: the tool call it waits on (`Bash: cargo test`, or its
+question), else the first line of its last answer. Once you have seen it (the
+agent is idle), the preview has those words and the card names it by its title
+alone (an untitled one keeps them, muted, as its name). A settled agent's card shows the
+changes waiting in its folder, `+12 −3` against HEAD and `· 2 untracked` for
 untracked files, so a finished card says whether there is something to review.
 On tmux the words come from the agent's transcript, as agent-status.tmux names
 it (Claude Code, pi, Codex); on Rex, from its status message. Both are read off
@@ -292,19 +294,23 @@ matched are underlined in the accent colour. State has a colour: its mark is
 room).
 
 Agent cards use two lines: a state mark, agent mark and directory/branch
-identity above state-colored elapsed time and a muted topic label. The first
+identity above state-colored elapsed time, the topic, and where the agent runs
+(`session:window`, or the Rex session and tab) at the right. A window tmux
+names after what runs in it shows its number; grouped by session, the window
+alone. Short of room, where it runs gives way first. The first
 mark means **state**, not agent type. The provider name remains searchable and appears in
 the preview header, without repeating it on the card. Editing the topic keeps
-the directory on the first line. Grouped by folder, a card whose directory
-would only repeat its group's header shows its session and window instead.
+the directory on the first line.
 When the list goes on past the popup's edge, `↑ N more` and `↓ N more` say
 how many rows there are that way.
 
-Title suggestions from agent-status.tmux request stable one- or two-word topics
-such as `Branch labels` or `Token expiry`. Existing titles are preserved, not
-cut to their first two words: use `ctrl-r` twice to suggest a short replacement,
-then Enter to keep it (or Escape to cancel). Filtering still uses the full stored
-title, even when it is visually truncated.
+An agent's automatic title is its first prompt's start, or, with
+agent-status.tmux's `@agent-auto-title on`, a short title pi writes from that
+prompt a few seconds after it, as T3 Code titles its threads (`Checkout
+Totals Bug`). Suggestions (`ctrl-r` twice) follow the same rules, 3 to 8
+words, and keep a title that is still accurate; Enter keeps one, Escape
+cancels. Filtering still uses the full stored title, even when it is visually
+truncated.
 
 Both tabs use the same path formatter. In Sessions, a window's path comes from
 its active pane, beside the window name in wide layouts and below it in compact
@@ -490,7 +496,7 @@ Any tool can feed paddock by setting these options on the agent's pane
 | `@agent-unseen` | `1` when an idle agent finished a turn you haven't looked at |
 | `@agent-stale` | `1` when the state hasn't been confirmed recently (shown with a `?`, e.g. `working?`); paddock also shows a `?` while a shell is the pane's foreground command, as after an agent killed without its exit hook, so a wrapper script or launch command should `exec` the agent, e.g. `exec claude 2>/dev/null` (bash runs a command with a redirection, and bash 3.2 one after `&&` or `;`, in a child), not `agent; exec $SHELL` |
 | `@agent-kind` | the agent's name, e.g. `claude` |
-| `@agent-auto-description` | an automatic title, e.g. the first prompt |
+| `@agent-auto-description` | an automatic title, e.g. the first prompt, or a title written from it |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
 | `@agent-transcript` | the agent's transcript file (JSON lines: Claude Code's, pi's or Codex's), for what a waiting or finished agent last said |
 | `@agent-command` | what ran in the pane when the agent registered (agent-status.tmux records it); something else in front, such as an editor started after the agent died without its exit hook, shows the agent with a `?` |

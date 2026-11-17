@@ -4,7 +4,7 @@
 
 import { AGENTS, dot, sessions, startAgents } from './common.mjs';
 
-const TESTS = ['webshop:3.0', { state: 'working', kind: 'claude', title: 'fix the flaky checkout test', ageSec: 5 }];
+const TESTS = ['webshop:3.0', { state: 'working', kind: 'claude', title: 'Flaky Checkout Test', ageSec: 5 }];
 
 export default {
   name: 'feat-notify',
@@ -48,7 +48,7 @@ export default {
       keys: ['C-b', 'a'],
       snap: { expect: ['sessions  agents', 'waiting 1', 'working 2', 'finished 2', 'idle 1', { selected: 'add rate limiting' }], hold: 2400, key: 'prefix a', poster: true },
     },
-    (ctx) => ctx.pressUntil('Up', { selected: 'migrate the cart' }, { expect: ['Allow command?', 'webshop:2.0 · opencode'], hold: 2200, cap: 'The one waiting shows what it asks' }),
-    (ctx) => ctx.pressUntil('Down', { selected: 'fix the flaky' }, { expect: ['webshop:3.0 · claude', 'Done. The test waited'], hold: 2200, cap: 'The finished one shows what it did' }),
+    (ctx) => ctx.pressUntil('Up', { selected: 'Cart Page Payment' }, { expect: ['Allow command?', 'webshop:2.0 · opencode'], hold: 2200, cap: 'The one waiting shows what it asks' }),
+    (ctx) => ctx.pressUntil('Down', { selected: 'Flaky Checkout' }, { expect: ['webshop:3.0 · claude', 'Done. The test waited'], hold: 2200, cap: 'The finished one shows what it did' }),
   ],
 };

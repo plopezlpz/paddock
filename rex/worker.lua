@@ -65,11 +65,19 @@ end
 
 local ops = {}
 
+-- Each block's height as last read, and how many more captures may use it:
+-- read each time, it would cost a far host's capture a third of its time,
+-- and panes seldom change height but when the layout does (which a layout
+-- snapshot follows: then they are read again).
+local SIZE_EVERY = 8
+local heights = {}
+
 -- A snapshot: everything read (a whole one); or with `layout`, the sessions
 -- and tabs read again and the panes kept as last read, but for new ones; or
 -- the last one. Then BLOCKS, if any, are read again.
 function ops.snapshot(req)
   fresh = {}
+  if req.layout or not req.blocks then heights = {} end
   if req.layout then
     snapshot(req.skip, true)
   elseif not req.blocks then
@@ -124,7 +132,14 @@ end
 local TAIL = 32768
 function ops.capture(req)
   local session = block_session(req.block)
-  local rows = (block_call(session, req.block, "size") or {}).rows or 60
+  local h = heights[req.block]
+  if not h or h.left <= 0 then
+    local rows = (block_call(session, req.block, "size") or {}).rows
+    h = { rows = rows or 60, left = rows and SIZE_EVERY or 0 }
+    heights[req.block] = h
+  end
+  h.left = h.left - 1
+  local rows = h.rows
   local r = check(block_call(session, req.block, "format", { format = "vt", max_bytes = 1 }))
   local text = r.content or ""
   if r.id and r.total then

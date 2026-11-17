@@ -6,6 +6,14 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-17
+
+### Changed
+
+- An agent card's second line says where the agent runs, `session:window` (Rex: session and tab) at its right, so two agents in one folder are told apart; grouped by session, the window alone, and a window named after what runs in it by its number; grouped by folder, the first line keeps its path. Its topic is in plain text, and what the agent last said follows it after `›` only while it is news (working, waiting, finished): an idle agent's last words are in the preview (an untitled one keeps them, muted, as its name). Untracked files show as `N untracked`, not `N new`.
+- Agents get T3 Code-style titles with agent-status.tmux 0.9.0's `@agent-auto-title on`: a few words pi writes from the first prompt, shown in place of the prompt's start. On Rex too, with `AGENT_AUTO_TITLE=on`: the title names the agent's pane.
+- Rex: the popup opens about 50 ms sooner (the event listener says it listens at once, not after 50 ms), and other hosts start connecting while it does. A far host's first snapshot makes one call fewer per session, and its preview captures a third fewer (a pane's height is read every 8 captures, not each).
+
 ## [0.9.0] - 2026-11-17
 
 ### Added
@@ -215,7 +223,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/plopezlpz/paddock/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/plopezlpz/paddock/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/plopezlpz/paddock/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/plopezlpz/paddock/compare/v0.7.0...v0.8.0

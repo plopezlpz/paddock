@@ -13,10 +13,14 @@ TERMINAL = "com.superlogical.terminal"
 -- A connection reads and changes another session, and calls its blocks,
 -- only once attached to it; block calls also name the session. An attach
 -- that failed is tried again next time.
-local attached = {}
+-- An attach answers with the session's view: the snapshot that attached
+-- takes it, one call fewer per session (a round trip each on a far host).
+local attached, views = {}, {}
 function on(session)
   if session and not attached[session] then
-    attached[session] = rex.session.attach { session_id = session } ~= nil
+    local a = rex.session.attach { session_id = session }
+    attached[session] = a ~= nil
+    views[session] = a and a.view
   end
   return session
 end
@@ -101,6 +105,8 @@ fresh = {}
 -- snapshot in a tenth of a second and one that takes that for each pane.
 function snapshot(skip, keep)
   local before = keep and listed or {}
+  -- Only the views of attaches this snapshot makes are fresh.
+  views = {}
   places = { blocks = {}, windows = {} }
   listed = {}
   local sessions = {}
@@ -109,7 +115,8 @@ function snapshot(skip, keep)
   if not list then error(tostring(err or "rex.call failed"), 0) end
   for _, s in ipairs(list.sessions or {}) do
     local id = on(s.session_id)
-    local v = rex.session.view { session_id = id } or {}
+    local v = views[id] or rex.session.view { session_id = id } or {}
+    views[id] = nil
     local windows = {}
     for _, w in ipairs(v.windows or {}) do
       places.windows[w.window_id] = id

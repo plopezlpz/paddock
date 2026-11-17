@@ -17,14 +17,14 @@ impl Diff {
         *self == Diff::default()
     }
 
-    /// `+12 −3 · 2 new`, without what is zero; empty when clean.
+    /// `+12 −3 · 2 untracked`, without what is zero; empty when clean.
     pub fn label(&self) -> String {
         let mut parts = Vec::new();
         if self.added > 0 || self.removed > 0 {
             parts.push(format!("+{} −{}", self.added, self.removed));
         }
         if self.new > 0 {
-            parts.push(format!("{} new", self.new));
+            parts.push(format!("{} untracked", self.new));
         }
         parts.join(" · ")
     }
@@ -72,9 +72,9 @@ mod tests {
 
     #[test]
     fn labels_say_only_what_is_there() {
-        assert_eq!(Diff { added: 12, removed: 3, new: 2 }.label(), "+12 −3 · 2 new");
+        assert_eq!(Diff { added: 12, removed: 3, new: 2 }.label(), "+12 −3 · 2 untracked");
         assert_eq!(Diff { added: 0, removed: 4, new: 0 }.label(), "+0 −4");
-        assert_eq!(Diff { added: 0, removed: 0, new: 1 }.label(), "1 new");
+        assert_eq!(Diff { added: 0, removed: 0, new: 1 }.label(), "1 untracked");
         assert!(Diff::default().label().is_empty() && Diff::default().is_clean());
     }
 

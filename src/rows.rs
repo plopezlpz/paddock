@@ -66,13 +66,13 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, path: AgentPath, panes: usize, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    /// `note`: what the agent says about its state (Rex), after the title.
+    /// `note`: what the agent last said (shown while it is news: not idle).
     /// `host`: its session's Rex host, if not paddock's own server. `place`:
-    /// "session · window", shown instead of the path its folder's header
-    /// already shows.
+    /// where it runs, `session:window` (the window alone under its
+    /// session's header; an automatically named window by its index).
     /// DIFF: the changes waiting in its folder (`+12 −3`), empty if none or
     /// not known.
-    Agent { state: State, stale: bool, kind: String, title: String, note: String, path: AgentPath, age: String, host: String, place: Option<String>, diff: String },
+    Agent { state: State, stale: bool, kind: String, title: String, note: String, path: AgentPath, age: String, host: String, place: String, diff: String },
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
     /// One selectable heading for all hidden cards, without internal headers.
@@ -437,6 +437,19 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
 /// mark when it was read), and what.
 pub type Notes = HashMap<String, (Mark, String)>;
 
+/// Where an agent runs, as its card shows it: `session:window`, or the
+/// window alone (IN_SESSION: under its session's header). A window named
+/// after what runs in it says nothing an agent card doesn't: its index.
+fn place(s: &crate::model::Session, w: &crate::model::Window, in_session: bool) -> String {
+    let auto = w.auto || w.name.is_empty();
+    let window = if auto { &w.index } else { &w.name };
+    match (in_session, auto) {
+        (true, true) => format!(":{window}"),
+        (true, false) => window.clone(),
+        (false, _) => format!("{}:{window}", s.name),
+    }
+}
+
 /// `agents`, with an agent that has no note of its own given what its
 /// transcript says in NOTES (shown and searched alike).
 #[allow(clippy::too_many_arguments)]
@@ -454,9 +467,9 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
         let kind = p.label();
         // The state as shown, and asking as tools and notifications say it.
         let asking = if a.state == State::Asking { " asking" } else { "" };
-        // Its window and host too: a card can show them (its place under a
-        // folder's header, `@host`).
-        let score = filter.score(&format!("{} {} {} {} {} {} {}{asking}{} {}", a.title, s.name, w.name, s.host, path_text(&p.path, &path), kind, a.state.label(), if a.stale { " stale" } else { "" }, note));
+        // Its session, window and host too: a card shows them (its place,
+        // `@host`).
+        let score = filter.score(&format!("{} {} {} {} {} {}{asking}{} {}", a.title, place(s, w, false), s.host, path_text(&p.path, &path), kind, a.state.label(), if a.stale { " stale" } else { "" }, note));
         if score.is_none() && keep != Some(&target) {
             continue;
         }
@@ -485,8 +498,7 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
                 path,
                 age: age(a.since, now),
                 host: s.host.clone(),
-                // Kept below only where it stands in for the path.
-                place: (group == Group::Folder).then(|| format!("{} · {}", s.name, w.name)),
+                place: place(s, w, group == Group::Session && !a.hidden),
                 diff: String::new(),
             },
             preview: Some(p.id.clone()),
@@ -522,15 +534,6 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
         while let Some(it) = items.next_if(|it| it.0 == key) {
             group_rows.push(it.3);
         }
-        // A card shows its session and window where its path would repeat
-        // the header.
-        for row in &mut group_rows {
-            if let RowKind::Agent { path, place, .. } = &mut row.kind
-                && path.display(usize::MAX) != label
-            {
-                *place = None;
-            }
-        }
         if group != Group::Flat {
             out.push(Row { target: None, kind: RowKind::Header { label, count: group_rows.len(), gap: !out.is_empty() }, preview: None, score: None });
         }
@@ -541,13 +544,7 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
         let expanded = hidden_expanded || filter.active();
         out.push(Row { target: None, kind: RowKind::Hidden { count: hidden.len(), expanded, gap: !out.is_empty() }, preview: None, score: None });
         if expanded {
-            // Under no header: each shows its path.
-            out.extend(hidden.into_iter().map(|mut it| {
-                if let RowKind::Agent { place, .. } = &mut it.3.kind {
-                    *place = None;
-                }
-                it.3
-            }));
+            out.extend(hidden.into_iter().map(|it| it.3));
         }
     }
     out
@@ -899,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_groups_tell_hosts_apart_and_cards_show_their_place_instead() {
+    fn folder_groups_tell_hosts_apart_and_cards_say_where_they_run() {
         let mut snap = fixture(&[
             "$1|ml|@1|1|train|1|0|%1|0|1|claude||working|0|claude|a||||one:/home/me/source/company/project",
             "$2|ml|@2|1|train|1|0|%2|0|1|claude||working|0|claude|b||||two:/home/me/source/company/project",
@@ -911,8 +908,8 @@ mod tests {
         let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 0, false);
         let headers: Vec<String> = rows.iter().filter_map(|r| match &r.kind { RowKind::Header { label, .. } => Some(label.clone()), _ => None }).collect();
         assert_eq!(headers, ["~/a/src", "one:…/company/project", "two:…/company/project"]);
-        let places: Vec<Option<String>> = rows.iter().filter_map(|r| match &r.kind { RowKind::Agent { place, .. } => Some(place.clone()), _ => None }).collect();
-        assert_eq!(places, [Some("web · api".into()), Some("web · api".into()), Some("ml · train".into()), Some("ml · train".into())]);
+        let places = |rows: &[Row]| -> Vec<String> { rows.iter().filter_map(|r| match &r.kind { RowKind::Agent { place, .. } => Some(place.clone()), _ => None }).collect() };
+        assert_eq!(places(&rows), ["web:api", "web:api", "ml:train", "ml:train"]);
         let hosts: Vec<String> = rows.iter().filter_map(|r| match &r.kind { RowKind::Agent { host, .. } => Some(host.clone()), _ => None }).collect();
         assert_eq!(hosts, ["", "", "one", "two"]);
         // What a card shows finds it: its window, and a host no path names.
@@ -921,11 +918,13 @@ mod tests {
         snap.sessions[0].windows[0].panes[0].path.clear();
         snap.sessions[0].host = "zq".into();
         assert_eq!(found(&snap, "zq"), 1);
-        for group in [Group::Status, Group::Session, Group::Flat] {
-            assert!(agents(&snap, &mut filter(""), group, None, "/h", 0, false).iter().all(|r| !matches!(&r.kind, RowKind::Agent { place: Some(_), .. })), "the path shows");
-        }
-        // A repository's folder below its root is not the header: its path shows.
+        // Under its session's header, the window alone; a window named after
+        // what runs in it, by its index.
+        snap.sessions[2].windows[0].auto = true;
+        assert_eq!(places(&agents(&snap, &mut filter(""), Group::Session, None, "/h", 0, false)), ["train", "train", ":1", ":1"]);
+        assert_eq!(places(&agents(&snap, &mut filter(""), Group::Status, None, "/h", 0, false)), ["ml:train", "ml:train", "web:1", "web:1"]);
+        // Hidden cards have no header: they say their session.
         let hidden = crate::backend::tmux::fixture_hidden(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|a||||/h/a"], &["%1"]);
-        assert!(agents(&hidden, &mut filter(""), Group::Folder, None, "/h", 0, true).iter().all(|r| !matches!(&r.kind, RowKind::Agent { place: Some(_), .. })), "hidden cards have no header");
+        assert_eq!(places(&agents(&hidden, &mut filter(""), Group::Session, None, "/h", 0, true)), ["s:w"]);
     }
 }

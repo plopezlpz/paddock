@@ -50,7 +50,7 @@ export default {
       snap: { expect: ['finished 2', 'working 1'], hold: 1800, cap: 'States update live' },
     },
     (ctx) =>
-      ctx.pressUntil('Up', { selected: 'migrate the cart' }, { expect: ['Allow command?', 'webshop:2.0 · opencode'], hold: 1800, poster: true, cap: 'The preview shows what it is asking' }),
+      ctx.pressUntil('Up', { selected: 'Cart Page Payment' }, { expect: ['Allow command?', 'webshop:2.0 · opencode'], hold: 1800, poster: true, cap: 'The preview shows what it is asking' }),
     {
       chapter: 'jump',
       keys: ['Enter'],

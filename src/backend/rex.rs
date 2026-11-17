@@ -1138,19 +1138,22 @@ pub fn connect(opts: Opts, events: impl Fn(u64, Msg) + Send + Sync + 'static) ->
     // The first answer says whether the server is there at all; the first
     // snapshot comes once the listener listens.
     let hosts = local.call(json!({ "op": "hosts" })).map(items)?;
-    local.settle();
-    let window = if me.is_empty() { String::new() } else { local.call(json!({ "op": "where", "block": me })).map(text).unwrap_or_default() };
     // The app is a client of each host too, under the same label (an ID is
     // this server's own).
     let label = opts.client.as_ref().and_then(|c| match c.starts_with("client:") {
         true => local.call(json!({ "op": "client_label", "client": c })).map(text).ok(),
         false => Some(c.clone()),
     }).filter(|l| !l.is_empty());
-    let mut all = vec![local];
+    // The hosts start connecting (a far one takes a while) as the popup
+    // waits for its own server's first snapshot.
+    let mut all = Vec::with_capacity(hosts.len() + 1);
     for host in hosts.iter().filter_map(Value::as_str) {
         let spawn = Spawn { program: program.clone(), host: Some(host.into()), client: label.clone(), me: String::new(), here: String::new(), from: String::new(), retry: RETRY };
         all.push(Host::start(spawn, Arc::clone(&wake)));
     }
+    local.settle();
+    let window = if me.is_empty() { String::new() } else { local.call(json!({ "op": "where", "block": me })).map(text).unwrap_or_default() };
+    all.insert(0, local);
     let state_path = Saved::path();
     let state = Saved::parse(&std::fs::read_to_string(&state_path).unwrap_or_default());
     let start = Start {

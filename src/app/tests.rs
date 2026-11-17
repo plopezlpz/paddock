@@ -331,7 +331,7 @@ fn clicks_hit_list_rows_only() {
     assert!(view.preview_fits);
     let (rect, _, _) = view.rows.iter().find(|(_, _, target)| *target == pane("$1", "@2", "%3")).unwrap();
     let (x, y) = (rect.x + 4, rect.y);
-    assert!(screen(&term)[y as usize].contains("s · w"), "only the identity line fits (its folder is the header)");
+    assert!(screen(&term)[y as usize].contains("/b"), "only the identity line fits");
     assert!(!screen(&term).iter().any(|l| l.contains("three")), "the topic is below the list");
     let before = app.selected;
     click(&mut app, &view, MouseButton::Left, (x, y - 1));

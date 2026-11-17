@@ -4,7 +4,7 @@ import { AGENTS, sessions, startAgents } from './common.mjs';
 
 // A second agent in the docs session that works in another project's folder, so
 // grouping by session and by folder differ.
-const DOCS_WEB = ['docs:2.0', { state: 'working', kind: 'opencode', title: 'document the payment element props', ageSec: 2 * 60 + 5 }];
+const DOCS_WEB = ['docs:2.0', { state: 'working', kind: 'opencode', title: 'Payment Element Props Docs', ageSec: 2 * 60 + 5 }];
 
 export default {
   name: 'feat-group',

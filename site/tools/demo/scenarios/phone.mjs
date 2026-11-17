@@ -38,12 +38,12 @@ export default {
       snap: { expect: ['waiting 1'], hold: 1600 },
     },
     {
-      tap: (screen) => [10, findText(screen, 'migrate the cart').row],
-      snap: { expect: [{ selected: 'migrate the cart' }], hold: 900, poster: true },
+      tap: (screen) => [10, findText(screen, 'Cart Page Payment').row],
+      snap: { expect: [{ selected: 'Cart Page Payment' }], hold: 900, poster: true },
     },
     {
       chapter: 'jump',
-      tap: (screen) => [10, findText(screen, 'migrate the cart').row],
+      tap: (screen) => [10, findText(screen, 'Cart Page Payment').row],
       snap: { expect: [{ notText: 'sessions  agents' }, { client: { window: 'webshop:2' } }, 'Allow command?'], hold: 1800, poster: true },
     },
   ],
