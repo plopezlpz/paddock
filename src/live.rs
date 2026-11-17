@@ -32,6 +32,8 @@ use ratatui::text::Text;
 use crate::backend::Backend;
 
 const FAST: Duration = Duration::from_millis(33);
+/// How long after a key the pane is looked at: time for it to echo.
+const ECHO: Duration = Duration::from_millis(15);
 const SLOW: Duration = Duration::from_millis(250);
 /// How long a screen stays the same before captures back off.
 const QUIET: Duration = Duration::from_millis(500);
@@ -112,6 +114,14 @@ impl Live {
         self.interval = FAST;
         self.changed = now;
         self.asked = false;
+    }
+
+    /// Something was typed into the pane: capture it soon (once its program
+    /// has had a moment to answer) and at the busy pace, as it changes.
+    pub fn poke(&mut self) {
+        let now = Instant::now();
+        (self.interval, self.changed) = (FAST, now);
+        self.next = self.next.min(now + ECHO);
     }
 
     /// When the next capture is due, if there is a pane to capture.
@@ -220,6 +230,9 @@ mod tests {
         }
         fn run(&mut self, _: &Op) -> Ran {
             Ran { moved: Vec::new(), result: Ok(None), unsure: false }
+        }
+        fn send(&mut self, _: &str, _: &crate::keys::Input) -> Result<(), String> {
+            Ok(())
         }
         fn closed(&mut self, _: Tab) {}
         fn activate(&mut self, _: &Target) -> Result<(), String> {

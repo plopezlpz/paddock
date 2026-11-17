@@ -3,7 +3,8 @@
 # was last closed on) and @paddock-agents-key (agents tab) to the paddock popup,
 # and with @paddock-click on, a click on the session name (status-left). With
 # none of the three set, @paddock-key is a, unless the config binds prefix a to
-# something else. The binary must report this plugin's version: the popup's
+# something else. @paddock-next-key (A unless taken; off: none) jumps to the
+# next agent that needs you, without the popup. The binary must report this plugin's version: the popup's
 # flags and env are a contract between the two.
 set -euf
 CURRENT_DIR='' VERSION='' BIN='' install=''
@@ -49,7 +50,7 @@ SEP=$'\037'
 if ! out=$(tmux set-option -gqo @paddock-popup-width '#{?#{e|<:#{client_width},128},100%,80%}' \; \
     set-option -gqo @paddock-popup-height '#{?#{e|<:#{client_height},30},100%,80%}' \; \
     set-option -gqo @paddock-popup-style 'bg=terminal,fg=terminal' \; \
-    display-message -p "#{@paddock-key}$SEP#{@paddock-agents-key}$SEP#{@paddock-click}$SEP#{@paddock-popup-width}$SEP#{@paddock-popup-height}$SEP#{@paddock-popup-style}" \; \
+    display-message -p "#{@paddock-key}$SEP#{@paddock-agents-key}$SEP#{@paddock-next-key}$SEP#{@paddock-click}$SEP#{@paddock-popup-width}$SEP#{@paddock-popup-height}$SEP#{@paddock-popup-style}" \; \
     show-hooks -g client-closed \; \
     list-keys -aN -P prefix -T prefix \; \
     list-keys -aN -P root -T root 2>/dev/null); then
@@ -76,9 +77,9 @@ keyarg() {
   case $v in *\\\;) ;; *\;) v="${v%;}\\;" ;; esac
   printf -v "$1" %s "$v"
 }
-taken=
+taken= next_taken=
 {
-  IFS=$SEP read -r key agents_key click width height style
+  IFS=$SEP read -r key agents_key next_key click width height style
   # Bindings with a paddock note are ours, from the last run: dropped, as the
   # options may have changed. One the config has since rebound has its own.
   while read -r table k desc; do
@@ -87,7 +88,10 @@ taken=
         keyarg k "$k"
         later unbind -T "$table" -- "$k"
         ;;
-      prefix:*) [ "$k" != a ] || taken=1 ;;
+      prefix:*)
+        [ "$k" != a ] || taken=1
+        [ "$k" != A ] || next_taken=1
+        ;;
     esac
   done
 } <<EOF
@@ -99,6 +103,13 @@ if [ -z "$key$agents_key$click" ]; then
   if [ -z "$taken" ]; then key=a
   else later display-message "paddock: prefix a is taken; set @paddock-key to choose a key"; fi
 fi
+
+case $next_key in
+  off) next_key= ;;
+  # Unset: prefix A, unless the config binds it, or opens paddock with it
+  # (then quietly none).
+  '') [ -n "$next_taken" ] || [ "$key" = A ] || [ "$agents_key" = A ] || next_key=A ;;
+esac
 
 # arg NAME VALUE: set NAME to VALUE as one single-quoted tmux argument.
 arg() { local q="'" e="'\\''"; printf -v "$1" "'%s'" "${2//$q/$e}"; }
@@ -153,4 +164,10 @@ bind_tab prefix "$agents_key" agents
 # On release, not press: the popup opens once the click is over, so the
 # release can't land on a paddock row. Copy mode lets it through too.
 bind_tab root "${click:+MouseUp1StatusLeft}"
+# Not a popup: a jump, in the background. run-shell expands the client's
+# name (#{q:} quotes it for the shell) and leaves the doubled # in $bin as one.
+if [ -n "$next_key" ] && [ -n "$BIN" ] && [ -x "$BIN" ]; then
+  keyarg k "$next_key"
+  later bind -N "paddock next" -T prefix "$k" run-shell -b "$bin next -c #{q:client_name}"
+fi
 [ ${#writes[@]} -eq 0 ] || tmux "${writes[@]}"

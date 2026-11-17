@@ -6,6 +6,25 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-17
+
+### Added
+
+- Type into the previewed pane: `ctrl-l` (or "type into it" in the row's menu) sends every key and paste to the pane in the preview, so you can answer an agent's question, approve a tool call or send a follow-up without leaving the popup. `ctrl-h` (back, as `ctrl-l` went in), `ctrl-]`, or a click or tap anywhere, stops. tmux and Rex.
+- `Shift+Enter` while typing reaches the pane as itself (a new line in an agent's prompt, not a send): on Rex, and on tmux 3.5+ with `extended-keys` on and `extended-keys-format csi-u`. On Rex, keys go as Rex's key events, which Rex encodes as the pane's program asked (the kitty protocol, application cursor keys).
+- `ctrl-f` selects the next agent that needs you, as `prefix A` would jump (also "next needing you" in the menu, and a footer hint while one does). `ctrl-a` `a`, tmux's `prefix a` pressed in the popup, closes it; `ctrl-a` `A` is `ctrl-f`.
+- `paddock next` and `prefix A` (`@paddock-next-key`; `off` for none): jump to the agent waiting longest for you, else the one that finished longest ago, without opening the popup; pressed again, the next one. tmux.
+- On tmux, a waiting or finished agent's card shows what it last said: the tool call it waits on (`Bash: cargo test`, or its question), or the first line of its last answer (muted once you have seen it). Read from the transcript agent-status.tmux names (Claude Code, pi, Codex), off the popup's thread.
+- A waiting card names the call the agent waits on as agent-status.tmux records it (`@agent-asks`): a subagent's ask shows as `subagent: <tool>`, and a new ask updates the card at once.
+- A settled agent's card shows the changes waiting in its folder: `+12 −3` against HEAD, and untracked files as `· 2 new`. git runs off the popup's thread, again when the agent changes state, and once a minute.
+
+### Fixed
+
+- A jump (from the popup, or `prefix A`) marks the agent seen through agent-status.tmux's own script: tmux sends no focus change when another terminal already shows the pane, so it stayed "finished".
+- Rex: a failed agent is finished, with its "failed: …" note, not waiting; visiting it, or its tab or session, makes it idle, as a finished one. A blocked sub-task under a working program shows as the agent's wait.
+- A jump to a pane stays in your own session when it shows the pane too (grouped sessions, linked windows).
+- An agent that died without its exit hook no longer looks alive once another program (an editor) runs in its pane: on tmux, against `@agent-command` (agent-status.tmux records it); on Rex, against the process that sent its status.
+
 ## [0.8.1] - 2026-11-16
 
 ### Changed
@@ -196,7 +215,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/plopezlpz/paddock/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/plopezlpz/paddock/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/plopezlpz/paddock/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/plopezlpz/paddock/compare/v0.6.0...v0.7.0

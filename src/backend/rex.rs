@@ -38,6 +38,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use super::{Backend, Caps, Msg, Ran, Start};
+use crate::keys::{self, Input};
 use crate::model::{self, Agent, Op, Pane, Session, Snapshot, State, Tab, Target, Window};
 use crate::theme::{self, AgentIcons, Theme};
 
@@ -788,6 +789,9 @@ struct RexPane {
     /// The foreground program, as started.
     #[serde(default)]
     argv0: String,
+    /// Its process ID.
+    #[serde(default)]
+    pid: Option<u64>,
     #[serde(default)]
     cwd: String,
     status: Option<RexStatus>,
@@ -810,6 +814,17 @@ struct RexStatus {
     msg: String,
     #[serde(default)]
     updated_at: String,
+    /// The foreground process when the report arrived.
+    #[serde(default)]
+    owner: Option<RexOwner>,
+}
+
+#[derive(Deserialize)]
+struct RexOwner {
+    #[serde(default)]
+    pid: Option<u64>,
+    #[serde(default)]
+    name: String,
 }
 
 fn list<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
@@ -893,8 +908,9 @@ fn state(s: &RexStatus) -> (State, String) {
         "blocked" => State::Asking,
         "working" => State::Working,
         "done" => State::Finished,
-        // A failed program needs the user too.
-        "error" => return (State::Asking, if msg.is_empty() { "failed".into() } else { format!("failed: {msg}") }),
+        // A failed program is done, the note says how: seen once visited,
+        // as a finished one is, and shown as tmux shows a failed turn.
+        "error" => return (State::Finished, if msg.is_empty() { "failed".into() } else { format!("failed: {msg}") }),
         _ => State::Idle,
     };
     // A blocked program without a message still says what it waits for.
@@ -954,9 +970,14 @@ impl RexPane {
                 renamed: label.is_some(),
                 since,
                 hidden: saved.hidden.contains_key(&self.id),
-                // Its program has gone back to the shell (exited, crashed).
-                stale: model::is_shell(&command),
+                // Its program has gone back to the shell (exited, crashed),
+                // or another one runs where it reported from: an editor,
+                // after it died without saying. A shell's report (a prompt
+                // hook) is for what it runs next.
+                stale: model::is_shell(&command) || status.owner.as_ref().is_some_and(|owner| owner.pid.filter(|p| *p != 0).zip(self.pid).is_some_and(|(owner, pid)| owner != pid) && !model::is_shell(&owner.name)),
                 note,
+                transcript: String::new(),
+                asks: String::new(),
             }
         });
         let path = local_path(&self.cwd);
@@ -1081,11 +1102,25 @@ pub struct Rex {
     /// The last snapshot's panes, each with its status record's time (0:
     /// none), and whether each host was in it.
     live: HashMap<String, u64>,
+    /// The pane each tab and session of the last snapshot shows: a jump
+    /// there is a visit to it.
+    fronts: HashMap<String, String>,
     answered: Vec<bool>,
     /// The trouble `health` last told of.
     trouble: Option<String>,
     /// The last op's answer was lost (`Ran::unsure`).
     unsure: bool,
+}
+
+/// The pane SESSION's each tab shows (its active one, else its first), and
+/// the one the session shows (its active tab's), by tab and session id.
+fn fronts(session: &RexSession) -> Vec<(String, String)> {
+    let front = |w: &RexWindow| w.panes.iter().find(|p| p.active).or(w.panes.first()).map(|p| p.id.clone());
+    let mut out: Vec<(String, String)> = session.windows.iter().filter_map(|w| Some((w.id.clone(), front(w)?))).collect();
+    if let Some(pane) = session.windows.iter().find(|w| w.active).or(session.windows.first()).and_then(front) {
+        out.push((session.id.clone(), pane));
+    }
+    out
 }
 
 /// A request's answer as text: an ID, or nothing.
@@ -1125,8 +1160,10 @@ pub fn connect(opts: Opts, events: impl Fn(u64, Msg) + Send + Sync + 'static) ->
         hidden_expanded: state.hidden_expanded,
         session: here,
         window,
+        // Rex speaks it: Shift+Enter comes as itself.
+        keys: crate::keys::Protocol::Kitty,
     };
-    let rex = Rex { hosts: all, routes: HashMap::new(), state, state_path, live: HashMap::new(), answered: Vec::new(), trouble: None, unsure: false };
+    let rex = Rex { hosts: all, routes: HashMap::new(), state, state_path, live: HashMap::new(), fronts: HashMap::new(), answered: Vec::new(), trouble: None, unsure: false };
     Ok((rex, start))
 }
 
@@ -1245,7 +1282,7 @@ impl Rex {
 
 impl Backend for Rex {
     fn caps(&self) -> Caps {
-        Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true }
+        Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true }
     }
 
     /// Each server's latest sessions, paddock's first, a host's under its
@@ -1254,6 +1291,7 @@ impl Backend for Rex {
         let mut sessions = Vec::new();
         self.routes.clear();
         self.live.clear();
+        self.fronts.clear();
         self.answered.clear();
         for (i, host) in self.hosts.iter().enumerate() {
             let latest = host.lock();
@@ -1269,6 +1307,7 @@ impl Backend for Rex {
                 session.away = away;
                 let panes = session.windows.iter().flat_map(|w| &w.panes);
                 self.live.extend(panes.map(|p| (p.id.clone(), p.status.as_ref().and_then(|s| epoch(&s.updated_at)).unwrap_or(0))));
+                self.fronts.extend(fronts(&session));
                 if host.label.is_some() {
                     self.routes.extend(session.ids().map(|id| (id.to_string(), i)));
                     session.host.clone_from(&host.label);
@@ -1309,6 +1348,22 @@ impl Backend for Rex {
         Ran { moved: Vec::new(), result, unsure: self.unsure }
     }
 
+    /// A key as Rex's key event, which Rex encodes as the pane's program
+    /// asked (Shift+Enter included), or a paste.
+    fn send(&mut self, pane: &str, input: &Input) -> Result<(), String> {
+        let request = match input {
+            Input::Key(key) => match keys::rex(key) {
+                Some(key) => json!({ "op": "send", "block": pane, "key": key }),
+                None => return Ok(()),
+            },
+            Input::Paste(text) => json!({ "op": "send", "block": pane, "text": text, "paste": true }),
+        };
+        // Not behind a long read: the loop would wait on each key.
+        let host = self.host(pane);
+        host.busy()?;
+        host.call(request).map(|_| ())
+    }
+
     fn closed(&mut self, tab: Tab) {
         let _ = self.update(|state| state.last_tab = Some(tab.label().to_string()));
     }
@@ -1324,7 +1379,13 @@ impl Backend for Rex {
         let host = self.host(session);
         host.busy()?;
         host.call(json!({ "op": "jump", "session": session, "window": window, "block": block }))?;
-        if !block.is_empty() {
+        // A tab or session shows a pane: going there visits it too.
+        let shown = match target {
+            Target::Pane { .. } => Some(block),
+            Target::Window { window, .. } => self.fronts.get(window).map(String::as_str),
+            Target::Session { session } => self.fronts.get(session).map(String::as_str),
+        };
+        if let Some(block) = shown.filter(|b| !b.is_empty()) {
             let (block, host) = (block.to_string(), host.label.clone().unwrap_or_default());
             let seen = self.live.get(&block).copied().unwrap_or(0);
             let _ = self.update(|state| {
@@ -1489,13 +1550,13 @@ mod tests {
 
     #[test]
     fn statuses_map_to_states_and_notes() {
-        let s = |state: &str, kind: &str, msg: &str| RexStatus { state: state.into(), app: String::new(), effective_app: String::new(), kind: kind.into(), msg: msg.into(), updated_at: String::new() };
+        let s = |state: &str, kind: &str, msg: &str| RexStatus { state: state.into(), app: String::new(), effective_app: String::new(), kind: kind.into(), msg: msg.into(), updated_at: String::new(), owner: None };
         assert_eq!(state(&s("working", "", "Reading files")), (State::Working, "Reading files".into()));
         assert_eq!(state(&s("blocked", "question", "Which branch?")), (State::Asking, "Which branch?".into()));
         assert_eq!(state(&s("blocked", "permission", "")), (State::Asking, "permission".into()));
         assert_eq!(state(&s("done", "", "3 files changed")), (State::Finished, "3 files changed".into()));
-        assert_eq!(state(&s("error", "", "tests failed")), (State::Asking, "failed: tests failed".into()), "a failure needs the user");
-        assert_eq!(state(&s("error", "", "")), (State::Asking, "failed".into()));
+        assert_eq!(state(&s("error", "", "tests failed")), (State::Finished, "failed: tests failed".into()), "a failure is done, and says so");
+        assert_eq!(state(&s("error", "", "")), (State::Finished, "failed".into()));
         assert_eq!(state(&s("idle", "", "")), (State::Idle, String::new()));
         assert_eq!(state(&s("sleeping", "", "zzz")), (State::Idle, "zzz".into()), "one Rex adds later: idle");
         assert_eq!(state(&s("", "", "")), (State::Idle, String::new()));
@@ -1509,12 +1570,31 @@ mod tests {
             label: String::new(),
             title: String::new(),
             argv0: "-zsh".into(),
+            pid: None,
             cwd: String::new(),
-            status: Some(RexStatus { state: "done".into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: String::new(), updated_at: String::new() }),
+            status: Some(RexStatus { state: "done".into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: String::new(), updated_at: String::new(), owner: None }),
         };
         let agent = pane.pane(1, None, &Saved::default()).agent.unwrap();
         assert!(agent.stale);
         assert_eq!((agent.kind.as_str(), agent.since, agent.title.as_str()), ("claude", None, ""));
+    }
+
+    #[test]
+    fn another_program_in_front_makes_an_agent_stale() {
+        let stale = |argv0: &str, pid: Option<u64>, owner: Option<u64>| {
+            let name = if owner == Some(1) { "zsh" } else { "claude" };
+            let status = RexStatus { state: "done".into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: String::new(), updated_at: String::new(), owner: owner.map(|pid| RexOwner { pid: Some(pid), name: name.into() }) };
+            let pane = RexPane { id: "block:9".into(), active: true, label: String::new(), title: String::new(), argv0: argv0.into(), pid, cwd: String::new(), status: Some(status) };
+            pane.pane(1, None, &Saved::default()).agent.unwrap().stale
+        };
+        assert!(!stale("claude", Some(7), Some(7)), "the program that reported");
+        assert!(stale("nvim", Some(8), Some(7)), "an editor, after the agent died");
+        assert!(!stale("nvim", Some(8), None), "a record without its owner: as before");
+        assert!(!stale("claude", None, Some(7)), "a worker without the pid: as before");
+        assert!(!stale("cargo", Some(8), Some(1)), "a shell's report, for what it runs next");
+        assert!(!stale("nvim", Some(8), Some(0)), "an owner Rex couldn't tell");
+        let odd: Result<RexStatus, _> = serde_json::from_value(json!({ "state": "done", "updated_at": "", "owner": {} }));
+        assert!(odd.is_ok(), "an owner without a pid is no reason to drop the server's sessions");
     }
 
     #[test]
@@ -1579,6 +1659,22 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_or_session_jump_visits_the_pane_it_shows() {
+        let session: RexSession = serde_json::from_value(json!({
+            "id": "session:1",
+            "windows": [
+                { "id": "window:1", "panes": [{ "id": "block:1" }, { "id": "block:2", "active": true }] },
+                { "id": "window:2", "active": true, "panes": [{ "id": "block:3" }] },
+                { "id": "window:3", "panes": [] },
+            ],
+        }))
+        .unwrap();
+        let got: HashMap<String, String> = fronts(&session).into_iter().collect();
+        let want = [("window:1", "block:2"), ("window:2", "block:3"), ("session:1", "block:3")];
+        assert_eq!(got, want.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(), "a tab without panes shows none");
+    }
+
+    #[test]
     fn a_done_agent_visited_since_is_idle() {
         let pane = |state: &str| RexPane {
             id: "block:1".into(),
@@ -1586,8 +1682,9 @@ mod tests {
             label: String::new(),
             title: String::new(),
             argv0: "claude".into(),
+            pid: None,
             cwd: String::new(),
-            status: Some(RexStatus { state: state.into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: "all done".into(), updated_at: "2026-11-04T10:00:00Z".into() }),
+            status: Some(RexStatus { state: state.into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: "all done".into(), updated_at: "2026-11-04T10:00:00Z".into(), owner: None }),
         };
         let done_at = epoch("2026-11-04T10:00:00Z").unwrap();
         let visited = |seen: u64| Saved { visited: BTreeMap::from([("block:1".to_string(), (seen, String::new()))]), ..Saved::default() };
@@ -1597,7 +1694,8 @@ mod tests {
         assert_eq!(state("done", &visited(done_at - 60)), State::Finished, "done again since the visit");
         assert_eq!(state("done", &visited(0)), State::Finished, "visited before it had a status");
         assert_eq!(state("working", &visited(done_at)), State::Working);
-        assert_eq!(state("error", &visited(done_at)), State::Asking, "a failure still needs the user");
+        assert_eq!(state("error", &Saved::default()), State::Finished, "a failure, unseen");
+        assert_eq!(state("error", &visited(done_at)), State::Idle, "seen once visited, as done");
     }
 
     /// A scripted `rex` in a folder of its own, logging what it does to

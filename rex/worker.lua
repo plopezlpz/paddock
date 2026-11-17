@@ -255,6 +255,34 @@ function ops.new_window(req)
   return made.window_id
 end
 
+-- Type TEXT into BLOCK as if the user had (keys as a terminal's bytes), or
+-- with PASTE paste it (bracketed, if its program asked).
+function ops.send(req)
+  local session = block_session(req.block)
+  if req.key then
+    -- Pressed and let go, as a keyboard does: Rex encodes it as the
+    -- pane's program asked (legacy bytes, or the kitty protocol).
+    for _, action in ipairs({ "press", "release" }) do
+      req.key.action = action
+      -- Only the press types.
+      if action == "release" then req.key.text = "" end
+      check(rex.call("block.event", {
+        session_id = on(session),
+        block_id = req.block,
+        event = { type = "key", payload = req.key },
+      }))
+    end
+  elseif req.paste then
+    check(rex.call("block.event", {
+      session_id = on(session),
+      block_id = req.block,
+      event = { type = "paste", payload = { text = req.text } },
+    }))
+  else
+    check(block_call(session, req.block, "write", { data = req.text }))
+  end
+end
+
 -- Focus the target, then ask the app to show its session. Showing a session
 -- other than paddock's own needs Remote Control on in Rex.app.
 function ops.jump(req)

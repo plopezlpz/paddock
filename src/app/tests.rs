@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::backend::tmux::fixture;
 use crate::model::Pane;
 use crate::theme::Theme;
+use crate::diffstat::Diff;
 use crate::ui::{self, Preview};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -762,8 +763,9 @@ fn a_menu_is_picked_by_key_by_click_or_by_dragging_onto_an_item() {
     // Keys: ↓ ↓ then ⏎; any other key closes it and acts.
     app.open_menu(Position::default(), true);
     app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
+    app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
     app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(renaming(&app).is_some(), "the second item, rename");
+    assert!(renaming(&app).is_some(), "the third item (after open and type), rename");
     app.run(Command::Cancel);
     app.open_menu(Position::default(), true);
     type_(&mut app, "t");
@@ -1178,9 +1180,10 @@ fn a_servers_trouble_stays_on_the_bottom_edge_under_any_status() {
 }
 
 #[test]
-fn alt_letters_are_not_typed_and_ctrl_h_deletes() {
+fn alt_and_command_letters_are_not_typed_and_ctrl_h_leaves_the_query() {
     let mut app = agents_app();
     app.on_key(key(KeyCode::Char('x'), KeyModifiers::ALT));
+    app.on_key(key(KeyCode::Char('j'), KeyModifiers::SUPER));
     assert_eq!(app.query.text(), "");
     app.on_key(key(KeyCode::Char('T'), KeyModifiers::SHIFT));
     assert_eq!(app.query.text(), "T");
@@ -1188,8 +1191,25 @@ fn alt_letters_are_not_typed_and_ctrl_h_deletes() {
     type_(&mut app, "x");
     assert_eq!(app.query.text(), "Tx", "the query is typed at its end");
     ctrl(&mut app, 'h');
-    ctrl(&mut app, 'h');
-    assert_eq!(app.query.text(), "", "^h is Backspace");
+    assert_eq!(app.query.text(), "Tx", "^h leaves typing; held, it would eat the query");
+    app.on_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(app.query.text(), "T");
+}
+
+#[test]
+fn kitty_control_keys_act_as_a_legacy_terminal_sends_them() {
+    let mut app = needy_app(Tab::Agents);
+    ctrl(&mut app, 'i');
+    assert_eq!(app.tab, Tab::Sessions, "^i is Tab");
+    ctrl(&mut app, 'a');
+    assert!(matches!(app.mode, Mode::Menu(_)));
+    ctrl(&mut app, '[');
+    assert!(matches!(app.mode, Mode::List), "^[ is Esc");
+    assert!(matches!(ctrl(&mut app, 'm'), Action::Activate(_)), "^m is Enter");
+    // Typing, the pane gets them as they are.
+    let mut app = needy_app(Tab::Agents);
+    ctrl(&mut app, 'l');
+    assert!(matches!(ctrl(&mut app, '['), Action::Send(_, Input::Key(k)) if k.code == KeyCode::Char('[')));
 }
 
 #[test]
@@ -1421,7 +1441,7 @@ fn panes_drop_into_windows_beside_panes_or_on_their_own() {
 #[test]
 fn a_server_that_keeps_moves_in_their_session_is_offered_no_others() {
     let mut app = sessions_app("@1");
-    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true };
+    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true };
     app.expanded.insert(window("$1", "@1"));
     app.refresh();
     let shift = |app: &mut App, code| app.on_key(key(code, KeyModifiers::SHIFT));
@@ -1868,6 +1888,8 @@ fn rex_app(tab: Tab) -> App {
             hidden: false,
             stale: false,
             note: String::new(),
+            transcript: String::new(),
+            asks: String::new(),
         }),
     };
     let window = |id: &str, index: &str, name: &str, panes| Window { id: id.into(), index: index.into(), name: name.into(), active: index == "1", auto: false, panes };
@@ -1880,7 +1902,7 @@ fn rex_app(tab: Tab) -> App {
         session("session:2", "devbox", vec![window("window:3", "1", "web", vec![pane("block:4", "1", "codex", Some("deploy"))])]),
     ]);
     let mut app = App::new(snap, tab, "session:1".into(), "window:1".into(), String::new(), true, false);
-    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true };
+    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true };
     app
 }
 
@@ -1960,4 +1982,183 @@ fn rex_moves_are_offered_within_their_session_only() {
     select(&mut app, Target::Window { session: "session:2".into(), window: "window:3".into() });
     assert!(matches!(shift(&mut app, KeyCode::Up), Action::None));
     assert_eq!(app.status, Some(Status::Note("already the first tab in its session".into())));
+}
+
+#[test]
+fn typing_sends_every_key_but_the_one_that_leaves() {
+    let mut app = agents_app();
+    let view = View::new();
+    let pane = app.rows[app.selected].preview.clone().unwrap();
+    assert!(matches!(ctrl(&mut app, 'l'), Action::None));
+    assert!(matches!(&app.mode, Mode::Type(t) if t.pane == pane), "{:?}", app.mode);
+    for k in [key(KeyCode::Char('y'), KeyModifiers::NONE), key(KeyCode::Esc, KeyModifiers::NONE), key(KeyCode::Enter, KeyModifiers::NONE), key(KeyCode::Char('c'), KeyModifiers::CONTROL), key(KeyCode::Down, KeyModifiers::NONE)] {
+        assert!(matches!(app.on_key(k), Action::Send(p, Input::Key(sent)) if p == pane && sent == k), "{k:?}");
+    }
+    assert!(matches!(app.paste("a\nb"), Action::Send(p, Input::Paste(t)) if p == pane && t == "a\nb"));
+    assert!(matches!(app.mode, Mode::Type(_)), "esc and ^c went to the pane");
+    // The preview stays on the pane typed into, whatever is selected.
+    app.selected = app.rows.iter().position(|r| r.preview.as_deref() != Some(pane.as_str()) && r.preview.is_some()).unwrap();
+    assert_eq!(app.preview_pane(&view), Some(pane.as_str()));
+    assert_eq!(app.hints(&view).1.key, "^h");
+    // ^] arrives as ^5.
+    assert!(matches!(ctrl(&mut app, '5'), Action::None));
+    assert!(matches!(app.mode, Mode::List));
+    assert!(app.query.is_empty(), "nothing typed went to the filter");
+    // ^h, back from ^l; Backspace goes to the pane.
+    ctrl(&mut app, 'l');
+    let backspace = key(KeyCode::Backspace, KeyModifiers::NONE);
+    assert!(matches!(app.on_key(backspace), Action::Send(_, Input::Key(k)) if k == backspace));
+    assert!(matches!(ctrl(&mut app, 'h'), Action::None));
+    assert!(matches!(app.mode, Mode::List));
+}
+
+/// Agents that need you: %3 waiting longest, %1 waiting since, %2 finished;
+/// %4 works.
+fn needy_app(tab: Tab) -> App {
+    let snap = fixture(&[
+        "$1|s|@1|1|w|1|0|%1|0|1|claude||asking|0|claude|one||200||/a",
+        "$1|s|@1|1|w|1|0|%2|1|0|claude||idle|1|claude|two||100||/a",
+        "$1|s|@2|2|w|0|0|%3|0|1|claude||asking|0|claude|three||100||/b",
+        "$1|s|@2|2|w|0|0|%4|1|0|claude||working|0|claude|four||||/b",
+    ]);
+    new(snap, tab, "@1")
+}
+
+fn selected_pane(app: &App) -> String {
+    match app.selected_target() {
+        Some(Target::Pane { pane, .. }) => pane.clone(),
+        other => panic!("not an agent: {other:?}"),
+    }
+}
+
+#[test]
+fn ctrl_f_walks_the_agents_that_need_you() {
+    let mut app = needy_app(Tab::Sessions);
+    let view = View::new();
+    assert!(app.hints(&view).0.iter().any(|h| h.command == Command::Next && h.key == "^f"));
+    ctrl(&mut app, 'f');
+    assert_eq!((app.tab, selected_pane(&app)), (Tab::Agents, "%3".to_string()), "to the agents tab, waiting longest first");
+    ctrl(&mut app, 'f');
+    assert_eq!(selected_pane(&app), "%1");
+    ctrl(&mut app, 'f');
+    assert_eq!(selected_pane(&app), "%2", "then the finished");
+    ctrl(&mut app, 'f');
+    assert_eq!(selected_pane(&app), "%3", "round again");
+    // A query that hides the next one is cleared.
+    type_(&mut app, "four");
+    ctrl(&mut app, 'f');
+    assert!(app.query.is_empty());
+    assert_eq!(selected_pane(&app), "%3", "from a card not queued: the first");
+
+    let mut calm = agents_app();
+    ctrl(&mut calm, 'f');
+    assert_eq!(calm.status, Some(Status::Note("no other agent needs you".into())));
+    assert!(!calm.hints(&view).0.iter().any(|h| h.command == Command::Next), "offered only when someone needs you");
+}
+
+#[test]
+fn ctrl_a_then_a_closes_as_prefix_a_opened() {
+    let mut app = needy_app(Tab::Agents);
+    ctrl(&mut app, 'a');
+    assert!(matches!(app.mode, Mode::Menu(_)));
+    assert!(matches!(app.on_key(key(KeyCode::Char('a'), KeyModifiers::NONE)), Action::Quit));
+    // ^a A: prefix A, the next agent.
+    let mut app = needy_app(Tab::Agents);
+    ctrl(&mut app, 'a');
+    app.on_key(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert!(matches!(app.mode, Mode::List));
+    assert_eq!(selected_pane(&app), "%2", "opened on %1, waiting since; then the finished");
+    // A menu opened by a tap: a is typed into the filter.
+    let mut app = needy_app(Tab::Agents);
+    app.run(Command::Menu);
+    assert!(matches!(app.on_key(key(KeyCode::Char('a'), KeyModifiers::NONE)), Action::None));
+    assert_eq!(app.query.text(), "a");
+}
+
+#[test]
+fn a_click_only_ends_typing() {
+    let mut app = agents_app();
+    let mut view = View::new();
+    draw(&app, &mut view, 120, 30);
+    ctrl(&mut app, 'l');
+    let before = app.selected;
+    let term = draw(&app, &mut view, 120, 30);
+    let at = find(&term, "four");
+    assert!(matches!(mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, Instant::now()), Action::None));
+    assert!(matches!(app.mode, Mode::List));
+    assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), at, Instant::now()), Action::None), "its release opens nothing");
+    assert_eq!(app.selected, before);
+}
+
+#[test]
+fn typing_needs_the_preview_and_the_pane() {
+    let mut app = agents_app();
+    app.set_preview_fits(false);
+    ctrl(&mut app, 'l');
+    assert!(matches!(app.mode, Mode::List));
+    assert!(matches!(&app.status, Some(Status::Note(n)) if n.contains("no room")));
+    app.set_preview_fits(true);
+    app.preview_on = false;
+    ctrl(&mut app, 'l');
+    assert!(matches!(app.mode, Mode::Type(_)) && app.preview_on, "the preview comes on");
+    app.set_preview_fits(false);
+    assert!(matches!(app.mode, Mode::List), "no typing blind");
+    ctrl(&mut app, 'l');
+    app.set_preview_fits(true);
+    ctrl(&mut app, 'l');
+    let Mode::Type(t) = &app.mode else { panic!("typing") };
+    let gone = t.pane.clone();
+    let lines: Vec<String> = ["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a", "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/a", "$1|s|@2|2|w|0|0|%3|0|1|claude||working|0|claude|three||||/b", "$1|s|@2|2|w|0|0|%4|1|0|claude||working|0|claude|four||||/b"]
+        .into_iter()
+        .filter(|l| !l.contains(&format!("|{gone}|")))
+        .map(String::from)
+        .collect();
+    app.set_snapshot(fixture(&lines.iter().map(String::as_str).collect::<Vec<_>>()));
+    assert!(matches!(app.mode, Mode::List));
+    assert!(matches!(&app.status, Some(Status::Failed(f)) if f.contains("closed")));
+    app.caps.send = false;
+    let view = View::new();
+    assert!(!app.hints(&view).0.iter().any(|h| h.command == Command::Type), "not offered where it can't be done");
+}
+
+#[test]
+fn settled_cards_show_what_was_said_and_the_changes_waiting() {
+    let mut snap = fixture(&[
+        "$1|s|@1|1|w|1|0|%1|0|1|claude||asking|0|claude|one||||/a",
+        "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|two||||/a",
+    ]);
+    for (p, file) in [(0, "/t1"), (1, "/t2")] {
+        snap.sessions[0].windows[0].panes[p].agent.as_mut().unwrap().transcript = file.into();
+    }
+    let mut app = new(snap, Tab::Agents, "@1");
+    let card = |app: &App, pane: &str| {
+        app.rows.iter().find_map(|r| match (&r.kind, r.preview.as_deref()) {
+            (RowKind::Agent { note, diff, .. }, Some(p)) if p == pane => Some((note.clone(), diff.clone())),
+            _ => None,
+        })
+    };
+    assert!(app.set_note("/t1".into(), (State::Asking, None, String::new()), "Bash: cargo test".into()));
+    assert!(app.set_note("/t2".into(), (State::Asking, None, String::new()), "read for another state".into()));
+    assert!(app.set_diff("/a".into(), Some(Diff { added: 3, removed: 1, new: 0 })));
+    assert_eq!(card(&app, "%1"), Some(("Bash: cargo test".into(), "+3 −1".into())));
+    assert_eq!(card(&app, "%2"), Some((String::new(), String::new())), "working: neither");
+    assert!(app.set_note("/t1".into(), (State::Asking, Some(9), String::new()), "an older ask".into()));
+    assert_eq!(card(&app, "%1").unwrap().0, "", "read for the agent's state since another time");
+    app.set_note("/t1".into(), (State::Asking, None, String::new()), "Bash: cargo test".into());
+    type_(&mut app, "cargo");
+    assert_eq!(app.rows.iter().filter(|r| r.target.is_some()).count(), 1, "what it said is searched too");
+    app.run(Command::Clear);
+    assert!(!app.set_diff("/a".into(), Some(Diff { added: 3, removed: 1, new: 0 })), "the same: no redraw");
+    assert!(app.set_diff("/a".into(), Some(Diff::default())), "clean");
+    assert_eq!(card(&app, "%1").unwrap().1, "");
+}
+
+#[test]
+fn a_jump_to_a_pane_stays_in_the_clients_own_session() {
+    // Window @1 is in $2 (listed first, by name) and in $1, where the client is.
+    let snap = fixture(&["$2|a|@1|1|w|1|0|%1|0|1|claude||asking|0|claude|||||/a", "$1|b|@1|1|w|1|0|%1|0|1|claude||asking|0|claude|||||/a", "$1|b|@2|2|v|0|0|%2|0|1|zsh|||||||||/a"]);
+    let app = new(snap, Tab::Agents, "@2");
+    assert_eq!(app.local(pane("$2", "@1", "%1")), pane("$1", "@1", "%1"));
+    assert_eq!(app.local(pane("$1", "@2", "%2")), pane("$1", "@2", "%2"));
+    assert_eq!(app.local(window("$2", "@1")), window("$2", "@1"), "only panes");
 }

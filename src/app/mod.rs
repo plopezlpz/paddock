@@ -11,16 +11,18 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 
 use crate::backend::Caps;
+use crate::diffstat::Diff;
 use crate::edit::{Edited, LineEdit};
+use crate::keys::{self, Input};
 pub use crate::model::{Op, Tab};
-use crate::model::{Session, Snapshot, Target, Window};
+use crate::model::{Mark, Session, Snapshot, State, Target, Window};
 use crate::rows::{self, Filter, Group, New, Row, RowKind, Tree};
 
 pub use commands::{Command, Hint, Menu};
@@ -39,6 +41,8 @@ pub enum Action {
     /// Ask the suggest command for PANE's title; the answer comes back
     /// through `suggested` with the same ID.
     Suggest { pane: String, id: u64 },
+    /// Type into PANE (typing mode).
+    Send(String, Input),
 }
 
 /// An Op, what undoes it, what to say once it is done, and what to select
@@ -157,9 +161,18 @@ pub struct Create {
     pub error: Option<String>,
 }
 
+/// Typing into the previewed pane: keys and pastes go to PANE, LABEL
+/// (session:window.pane · what runs) says where.
+#[derive(Debug)]
+pub struct Typing {
+    pub pane: String,
+    pub label: String,
+}
+
 #[derive(Debug)]
 pub enum Mode {
     List,
+    Type(Typing),
     Rename(Rename),
     Menu(Menu),
     Confirm(Confirm),
@@ -239,6 +252,12 @@ pub struct App {
     last_click: Option<(Target, Instant)>,
     /// A window or pane to select once the next snapshot shows where it is.
     follow: Option<String>,
+    /// Changes waiting in agents' folders (local ones), by folder: none
+    /// listed when clean.
+    diffs: HashMap<String, Diff>,
+    /// What each transcript last said, by file, for the state it was read
+    /// for (tmux; Rex agents have their note).
+    notes: rows::Notes,
 }
 
 impl App {
@@ -271,6 +290,8 @@ impl App {
             press: None,
             last_click: None,
             follow: None,
+            diffs: HashMap::new(),
+            notes: HashMap::new(),
         };
         app.rebuild(true);
         app
@@ -284,12 +305,53 @@ impl App {
         self.rows.get(self.selected)?.target.as_ref()
     }
 
-    /// The pane to preview, if the preview is on screen.
+    /// The pane to preview, if the preview is on screen: the one typed
+    /// into, else the selected row's.
     pub fn preview_pane(&self, view: &View) -> Option<&str> {
         if !(self.preview_on && view.preview_fits) {
             return None;
         }
+        if let Mode::Type(t) = &self.mode {
+            return Some(&t.pane);
+        }
         self.rows.get(self.selected)?.preview.as_deref()
+    }
+
+    /// Whether the last draw had room for the preview: without it, typing
+    /// would be blind, so it ends.
+    pub fn set_preview_fits(&mut self, fits: bool) {
+        self.preview_fits = fits;
+        if !fits && matches!(self.mode, Mode::Type(_)) {
+            self.mode = Mode::List;
+            self.note("no room for the preview: typing ended");
+        }
+    }
+
+    /// Start typing into the selected row's pane, with the preview on.
+    fn start_typing(&mut self) {
+        let Some(pane) = self.rows.get(self.selected).and_then(|r| r.preview.clone()) else { return };
+        if !self.caps.send {
+            return self.note("can't type into panes here");
+        }
+        if !self.preview_fits {
+            return self.note("no room for the preview here");
+        }
+        self.preview_on = true;
+        // Listed whatever the filter says, so the preview stays: an answered
+        // agent no longer matches "asking".
+        self.keep = self.selected_target().cloned();
+        let label = rows::pane_title(&self.snap, &pane);
+        self.mode = Mode::Type(Typing { pane, label });
+    }
+
+    /// TARGET as reached from where the client is: a pane in its own session
+    /// when that shows it too (grouped sessions, linked windows), not in
+    /// whichever lists it first.
+    pub fn local(&self, target: Target) -> Target {
+        match &target {
+            Target::Pane { pane, .. } => self.snap.place_in(pane, &self.current_session).unwrap_or(target),
+            _ => target,
+        }
     }
 
     /// The suggestion the loop should still be waiting for.
@@ -316,6 +378,12 @@ impl App {
                 self.mode = Mode::List;
                 self.status = Some(Status::Failed(why));
             }
+        }
+        if let Mode::Type(t) = &self.mode
+            && self.snap.pane(&t.pane).is_none()
+        {
+            self.mode = Mode::List;
+            self.status = Some(Status::Failed("that pane has closed".into()));
         }
         if let Mode::Move(c) = &self.mode
             && self.find(id_of(&c.target)).is_none()
@@ -384,6 +452,32 @@ impl App {
         self.current_session = session.to_string();
     }
 
+    /// The changes waiting in folder DIR (None: unknown, or not a
+    /// repository); whether that changed what is shown.
+    pub fn set_diff(&mut self, dir: String, diff: Option<Diff>) -> bool {
+        let diff = diff.filter(|d| !d.is_clean());
+        let old = match diff {
+            Some(d) => self.diffs.insert(dir, d),
+            None => self.diffs.remove(&dir),
+        };
+        let changed = old != diff;
+        if changed && self.tab == Tab::Agents {
+            self.rebuild(false);
+        }
+        changed
+    }
+
+    /// What transcript FILE says for an agent with MARK (`Agent::mark`);
+    /// whether that changed what is shown.
+    pub fn set_note(&mut self, file: String, mark: Mark, said: String) -> bool {
+        let old = self.notes.insert(file, (mark.clone(), said.clone()));
+        let changed = old != Some((mark, said));
+        if changed && self.tab == Tab::Agents {
+            self.rebuild(false);
+        }
+        changed
+    }
+
     /// Rebuild from the same snapshot (ages tick over).
     pub fn refresh(&mut self) {
         self.rebuild(false);
@@ -413,7 +507,17 @@ impl App {
             }
             Tab::Agents => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                rows::agents(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &mut self.paths, now, self.hidden_expanded)
+                let mut rows = rows::agents_noted(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &mut self.paths, now, self.hidden_expanded, &self.notes);
+                // The changes in a settled agent's folder (a working one's
+                // are on the move), as the worker found them.
+                for row in &mut rows {
+                    let (RowKind::Agent { diff, .. }, Some(pane)) = (&mut row.kind, &row.preview) else { continue };
+                    let Some((s, _, p)) = self.snap.pane(pane) else { continue };
+                    if let Some(d) = self.diffs.get(&p.path).filter(|_| s.host.is_empty() && p.agent.as_ref().is_some_and(|a| a.state != State::Working)) {
+                        *diff = d.label();
+                    }
+                }
+                rows
             }
         };
         // When a search ends, a hidden card may fold away: keep the user on
@@ -583,9 +687,11 @@ impl App {
     }
 
     /// Pasted text joins the query or the title being edited (bracketed
-    /// paste: a newline in it must not act as Enter).
-    pub fn paste(&mut self, text: &str) {
+    /// paste: a newline in it must not act as Enter); typing, it goes to
+    /// the pane.
+    pub fn paste(&mut self, text: &str) -> Action {
         match &mut self.mode {
+            Mode::Type(t) => return Action::Send(t.pane.clone(), Input::Paste(text.to_string())),
             Mode::Rename(_) | Mode::Create(_) => self.edit_name(|f| f.insert(text)),
             Mode::Menu(_) | Mode::Confirm(_) => {}
             Mode::List | Mode::Move(_) => {
@@ -594,6 +700,7 @@ impl App {
                 }
             }
         }
+        Action::None
     }
 
     /// Edit the title or name being typed with EDIT, which says whether the
@@ -620,6 +727,35 @@ impl App {
             self.tab = tab;
             self.keep = None;
             self.rebuild(true);
+        }
+    }
+
+    /// The agent after the selected one that needs you, as `paddock next`
+    /// goes: waiting longest first, then finished.
+    fn next_need(&self) -> Option<String> {
+        let here = self.selected_agent().map(|(_, pane)| pane).unwrap_or_default();
+        match self.snap.needs_you(&here)? {
+            Target::Pane { pane, .. } => Some(pane),
+            _ => None,
+        }
+    }
+
+    /// Select the next agent that needs you, on the agents tab: its card
+    /// and preview, to answer it (^l) or go there (⏎). A query that hides
+    /// it is cleared.
+    fn go_next(&mut self) {
+        let Some(pane) = self.next_need() else {
+            self.note("no other agent needs you");
+            return;
+        };
+        self.set_tab(Tab::Agents);
+        let card = |app: &App| app.rows.iter().position(|r| matches!(r.kind, RowKind::Agent { .. }) && matches!(&r.target, Some(Target::Pane { pane: p, .. }) if *p == pane));
+        if card(self).is_none() && !self.query.is_empty() {
+            self.query.set("");
+            self.requery();
+        }
+        if let Some(i) = card(self) {
+            self.selected = i;
         }
     }
 
@@ -963,6 +1099,11 @@ impl App {
     /// Do what COMMAND says, whether by key, tap or menu.
     pub fn run(&mut self, command: Command) -> Action {
         match (&mut self.mode, command) {
+            (Mode::Type(_), Command::Cancel) => {
+                self.mode = Mode::List;
+                return Action::None;
+            }
+            (Mode::Type(_), _) => return Action::None,
             (Mode::Rename(_), Command::Save) => return self.finish_rename(true),
             (Mode::Rename(_), Command::Cancel) => return self.finish_rename(false),
             (Mode::Rename(_), Command::Suggest) => return self.suggest(),
@@ -1027,6 +1168,8 @@ impl App {
                 self.rebuild(false);
             }
             Command::Preview => self.preview_on = !self.preview_on,
+            Command::Type => self.start_typing(),
+            Command::Next => self.go_next(),
             Command::Close => return Action::Quit,
             Command::Rename => self.rename(),
             Command::RenameSuggest => {
@@ -1052,8 +1195,27 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         self.status = None;
+        // The kitty protocol (Rex) tells ^[, ^m and ^i from Esc, Enter and
+        // Tab; the list takes them as a legacy terminal sends them. Typing,
+        // the pane gets them as they are.
+        let key = match (&self.mode, key.code) {
+            (Mode::Type(_), _) => key,
+            (_, KeyCode::Char(c @ ('[' | 'm' | 'i'))) if key.modifiers == KeyModifiers::CONTROL => {
+                let code = match c {
+                    '[' => KeyCode::Esc,
+                    'm' => KeyCode::Enter,
+                    _ => KeyCode::Tab,
+                };
+                KeyEvent { code, modifiers: KeyModifiers::NONE, ..key }
+            }
+            _ => key,
+        };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match &mut self.mode {
+            // Every key goes to the pane (its program may need esc, ^c, ⏎),
+            // but the one that leaves.
+            Mode::Type(_) if keys::is_leave(&key) => return self.run(Command::Cancel),
+            Mode::Type(t) => return Action::Send(t.pane.clone(), Input::Key(key)),
             Mode::Rename(_) | Mode::Create(_) => {
                 return match key.code {
                     KeyCode::Enter => self.run(Command::Save),
@@ -1073,6 +1235,9 @@ impl App {
                 match key.code {
                     KeyCode::Esc => return self.run(Command::Cancel),
                     KeyCode::Char('c' | 'a') if ctrl => return self.run(Command::Cancel),
+                    // ^a a: tmux's prefix a again, which opened the popup.
+                    KeyCode::Char('a') if menu.by_key && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => return self.run(Command::Close),
+                    KeyCode::Char('A') if menu.by_key && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => return self.run(Command::Next),
                     KeyCode::Enter => {
                         let command = menu.items[menu.selected].command;
                         return self.run(command);
@@ -1107,12 +1272,20 @@ impl App {
             // A query first, then the popup.
             KeyCode::Esc => return self.run(if self.query.is_empty() { Command::Close } else { Command::Clear }),
             KeyCode::Char('c') if ctrl => return self.run(Command::Close),
-            KeyCode::Char('a') if ctrl => return self.run(Command::Menu),
+            KeyCode::Char('a') if ctrl => {
+                let action = self.run(Command::Menu);
+                if let Mode::Menu(m) = &mut self.mode {
+                    m.by_key = true;
+                }
+                return action;
+            }
+            KeyCode::Char('f') if ctrl => return self.run(Command::Next),
             KeyCode::Enter => return self.run(Command::Open),
             KeyCode::Tab | KeyCode::BackTab => return self.run(Command::Tab(self.tab.other())),
             KeyCode::Char('g') if ctrl => return self.run(Command::Group),
             KeyCode::Char('e') if ctrl => return self.run(if self.selected_agent_hidden() { Command::Show } else { Command::Hide }),
             KeyCode::Char('r') if ctrl => return self.run(Command::Rename),
+            KeyCode::Char('l') if ctrl => return self.run(Command::Type),
             KeyCode::Char('z') if ctrl => return self.run(Command::Undo),
             KeyCode::Char('x') if ctrl => return self.run(Command::Kill),
             KeyCode::Delete => return self.run(Command::Kill),
@@ -1132,10 +1305,11 @@ impl App {
             KeyCode::Right => return self.expand(Some(true)),
             KeyCode::Left => return self.expand(Some(false)),
             // The query is typed at its end (←/→ belong to the tree): text,
-            // Backspace (^h), ^w and ^u.
+            // Backspace, ^w and ^u. Not ^h: it leaves typing, and one held or
+            // pressed twice would eat the query and move the selection.
             KeyCode::Backspace => self.edit_query(key),
-            KeyCode::Char('h' | 'w' | 'u') if ctrl => self.edit_query(key),
-            KeyCode::Char(_) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.edit_query(key),
+            KeyCode::Char('w' | 'u') if ctrl => self.edit_query(key),
+            KeyCode::Char(_) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => self.edit_query(key),
             _ => {}
         }
         Action::None

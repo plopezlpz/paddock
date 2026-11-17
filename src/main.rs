@@ -8,15 +8,20 @@
 
 mod app;
 mod backend;
+mod diffstat;
 mod edit;
+mod keys;
 mod live;
 mod model;
 mod notification;
 mod paths;
 mod rows;
 mod theme;
+mod transcript;
 mod ui;
+mod worker;
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -45,11 +50,15 @@ enum Ev {
     Backend(u64, Msg),
     /// The suggest command's answer to suggestion ID.
     Suggested(u64, Result<String, String>),
+    /// The changes waiting in a folder (diffstat).
+    Diff(String, Option<diffstat::Diff>),
+    /// What a transcript says, for an agent with that mark (`Agent::mark`).
+    Note(String, model::Mark, String),
 }
 
 /// Without --tab (or with --tab last), paddock opens on the tab it was last
 /// closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init [--rex] | paddock --version\n       paddock --rex [--tab sessions|agents] [--client CLIENT] [--suggest COMMAND] [--color ROLE=COLOUR]... [--icons unicode|nerd]\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]";
+const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init [--rex] | paddock --version\n       paddock --rex [--tab sessions|agents] [--client CLIENT] [--suggest COMMAND] [--color ROLE=COLOUR]... [--icons unicode|nerd]\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]\n       paddock next [-c CLIENT]";
 
 /// For `paddock init`: a binary installed without the plugin checkout
 /// (Homebrew) still binds the keys, by running this script itself.
@@ -64,6 +73,8 @@ enum Cmd {
     Init,
     InitRex,
     Notification { state: String, kind: String, path: String, icons: theme::AgentIcons },
+    /// Jump CLIENT (else tmux's current one) to the next agent that needs you.
+    Next(Option<String>),
     Version,
     Help,
 }
@@ -82,6 +93,8 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
         ["notification", state @ ("finished" | "asking" | "waiting" | "failed"), kind, path, mode @ ("unicode" | "nerd")] => {
             Ok(Cmd::Notification { state: (*state).into(), kind: (*kind).into(), path: (*path).into(), icons: if *mode == "nerd" { theme::AgentIcons::Nerd } else { theme::AgentIcons::Unicode } })
         }
+        ["next"] => Ok(Cmd::Next(None)),
+        ["next", "-c", client] => Ok(Cmd::Next(Some((*client).to_string()))),
         ["--version" | "-V"] => Ok(Cmd::Version),
         ["--help" | "-h"] => Ok(Cmd::Help),
         _ => Err(USAGE.to_string()),
@@ -114,7 +127,7 @@ fn version_mismatch(plugin: Option<&str>, ours: &str, rex: bool) -> Option<Strin
 /// version is what to fix.
 fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
     let cmd = parse(args);
-    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. })) {
+    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. } | Cmd::Next(_))) {
         return cmd;
     }
     version_mismatch(plugin, ours, args.first() == Some(&"--rex")).map_or(cmd, Err)
@@ -216,6 +229,7 @@ fn main() {
             println!("{}", notification::format(&state, &kind, &path, &env::var("HOME").unwrap_or_default(), icons));
             Ok(())
         }
+        Cmd::Next(client) => backend::tmux::next(client.as_deref()),
         Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -225,6 +239,7 @@ fn main() {
             println!("init: bind the keys from ~/.tmux.conf with run-shell 'paddock init' (no plugin checkout needed)");
             println!("init --rex: install the Rex action (rex/paddock.lua) beside Rex's init.lua, and print how to load it");
             println!("notification: print two plain-text lines (title, path/branch); sends nothing and needs no tmux connection");
+            println!("next: take the client to the agent waiting longest for you, else the one that finished longest ago (tmux)");
             Ok(())
         }
     });
@@ -242,6 +257,9 @@ fn fail(e: &str, popup: bool) -> ! {
     }
     std::process::exit(1);
 }
+
+/// How long after an agent changes state its transcript is read again.
+const SETTLE: Duration = Duration::from_millis(1500);
 
 /// How long a suggestion may take before it is given up (and stopped).
 const SUGGEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -305,25 +323,26 @@ fn suggest(command: &str, pane: &str, id: u64, tx: Sender<Ev>) -> Result<Suggest
 const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
-/// The terminal in raw mode on the alternate screen, with mouse reporting
-/// and bracketed paste. Dropping it restores the terminal, also when a
-/// panic unwinds (ratatui's panic hook restores the rest first).
-struct Tui(ratatui::DefaultTerminal);
+/// The terminal in raw mode on the alternate screen, with mouse reporting,
+/// bracketed paste and the key protocol the backend chose. Dropping it
+/// restores the terminal, also when a panic unwinds (ratatui's panic hook
+/// restores the rest first).
+struct Tui(ratatui::DefaultTerminal, keys::Protocol);
 
 impl Tui {
-    fn new() -> Result<Tui, String> {
+    fn new(keys: keys::Protocol) -> Result<Tui, String> {
         let terminal = ratatui::try_init().map_err(|e| format!("cannot open the terminal: {e}"))?;
         let mut out = std::io::stdout();
-        let _ = write!(out, "{MOUSE_ON}");
+        let _ = write!(out, "{MOUSE_ON}{}", keys.codes().0);
         let _ = execute!(out, EnableBracketedPaste);
-        Ok(Tui(terminal))
+        Ok(Tui(terminal, keys))
     }
 }
 
 impl Drop for Tui {
     fn drop(&mut self) {
         let mut out = std::io::stdout();
-        let _ = write!(out, "{MOUSE_OFF}");
+        let _ = write!(out, "{}{MOUSE_OFF}", self.1.codes().1);
         let _ = execute!(out, DisableBracketedPaste);
         ratatui::restore();
     }
@@ -359,9 +378,10 @@ fn run(tab: Option<Tab>, server: Server) -> Result<(), String> {
         Server::Tmux => backend::tmux::connect(post).map(|(b, s)| (Box::new(b) as Box<dyn Backend>, s))?,
         Server::Rex(opts) => backend::rex::connect(opts, post).map(|(b, s)| (Box::new(b) as Box<dyn Backend>, s))?,
     };
+    let keys = start.keys;
     let mut popup = Popup::new(backend.as_mut(), start, tab, env::var("HOME").unwrap_or_default(), tx.clone())?;
 
-    let mut tui = Tui::new()?;
+    let mut tui = Tui::new(keys)?;
     // Terminal input joins the server's notifications on one channel.
     thread::spawn(move || {
         while let Ok(ev) = event::read() {
@@ -383,7 +403,7 @@ fn run(tab: Option<Tab>, server: Server) -> Result<(), String> {
                 let preview = Preview { title: &title, body: &live.body };
                 tui.0.draw(|f| ui::draw(f, &popup.app, &mut view, &preview, &popup.theme)).map_err(|e| e.to_string())?;
                 popup.dirty = false;
-                popup.app.preview_fits = view.preview_fits;
+                popup.app.set_preview_fits(view.preview_fits);
                 if popup.app.preview_pane(&view) != popup.live.pane.as_deref() {
                     // The preview just appeared or went away: follow it now.
                     popup.dirty = true;
@@ -436,6 +456,19 @@ struct Popup {
     minute: Instant,
     /// Something changed since the last draw.
     dirty: bool,
+    /// Each settled local agent's folder's changes, and what its transcript
+    /// says, off the loop's thread.
+    diffs: worker::Worker<String>,
+    notes: worker::Worker<(String, model::Mark)>,
+    /// Each local agent's mark (state, since when, open asks), as last asked
+    /// about: a change asks again.
+    asked: HashMap<String, model::Mark>,
+    /// When to read transcripts again after agents changed state: their
+    /// tools may write the last of it just after saying so.
+    settle: Option<Instant>,
+    /// Folders' changes were asked for: they show on the agents tab only,
+    /// so not before it is.
+    diffed: bool,
 }
 
 impl Popup {
@@ -446,7 +479,48 @@ impl Popup {
         let mut app = App::new(backend.fetch()?, tab, start.session, start.window, home, can_suggest, start.hidden_expanded);
         app.caps = backend.caps();
         let (theme, fetched, live) = (start.theme, backend.replied(), Live::new());
-        Ok(Popup { app, theme, fetched, live, suggest_command: start.suggest_command, suggestion: None, answers, minute: next_minute(), dirty: true })
+        let to = answers.clone();
+        let diffs = worker::Worker::new(|dir: &String| diffstat::diff(dir), move |dir, diff| {
+            let _ = to.send(Ev::Diff(dir, diff));
+        });
+        let to = answers.clone();
+        let notes = worker::Worker::new(|(file, (state, _, asks)): &(String, model::Mark)| transcript::note(file, *state, asks), move |(file, mark), said| {
+            let _ = to.send(Ev::Note(file, mark, said));
+        });
+        let mut popup = Popup { app, theme, fetched, live, suggest_command: start.suggest_command, suggestion: None, answers, minute: next_minute(), dirty: true, diffs, notes, asked: HashMap::new(), settle: None, diffed: false };
+        popup.ask(true, true);
+        Ok(popup)
+    }
+
+    /// Ask the workers about each settled local agent (not working: its
+    /// folder and transcript are on the move): ALL of them, else those new
+    /// or changed in state since they were last asked about (and then again
+    /// once they settle); for their folders' changes too with DIFFS.
+    fn ask(&mut self, all: bool, diffs: bool) {
+        let diffs = diffs && self.app.tab == Tab::Agents;
+        // The tab's first showing: every folder.
+        let all = all || (diffs && !self.diffed);
+        self.diffed |= diffs;
+        let mut asked = HashMap::new();
+        let mut changed = false;
+        for (s, _, p) in self.app.snap.unique_panes() {
+            let Some(a) = p.agent.as_ref().filter(|_| s.host.is_empty()) else { continue };
+            let mark = a.mark();
+            if a.state != model::State::Working && (all || self.asked.get(&p.id) != Some(&mark)) {
+                changed |= !all;
+                if diffs && !p.path.is_empty() {
+                    self.diffs.ask(p.path.clone());
+                }
+                if !a.transcript.is_empty() {
+                    self.notes.ask((a.transcript.clone(), mark.clone()));
+                }
+            }
+            asked.insert(p.id.clone(), mark);
+        }
+        self.asked = asked;
+        if changed {
+            self.settle = Some(Instant::now() + SETTLE);
+        }
     }
 
     /// The preview follows the selection while it is on screen (the last
@@ -472,7 +546,7 @@ impl Popup {
     /// When to wake with no event: the next minute (ages tick over), the
     /// preview's next capture, or a suggestion's deadline.
     fn deadline(&self) -> Instant {
-        [Some(self.minute), self.live.due(), self.suggestion.as_ref().map(|s| s.deadline)].into_iter().flatten().min().unwrap_or(self.minute)
+        [Some(self.minute), self.live.due(), self.suggestion.as_ref().map(|s| s.deadline), self.settle].into_iter().flatten().min().unwrap_or(self.minute)
     }
 
     /// Handle EV (None: woken by the deadline) and everything already
@@ -491,11 +565,14 @@ impl Popup {
                     let action = match input {
                         Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                         Event::Mouse(m) => app.on_mouse(m, view, Instant::now()),
-                        Event::Paste(text) => {
-                            app.paste(&text);
-                            Action::None
-                        }
+                        Event::Paste(text) => app.paste(&text),
                         _ => Action::None,
+                    };
+                    let action = match action {
+                        // Agents: from the session that lists the pane first.
+                        // Sessions: where the user chose.
+                        Action::Activate(t) if app.tab == Tab::Agents => Action::Activate(app.local(t)),
+                        other => other,
                     };
                     match action {
                         Action::Quit => return Ok(Flow::Close(None)),
@@ -533,10 +610,17 @@ impl Popup {
                             Ok(s) => self.suggestion = Some(s),
                             Err(e) => app.suggested(id, Err(e)),
                         },
+                        Action::Send(pane, input) => match backend.send(&pane, &input) {
+                            // The answer shows in the preview: look soon.
+                            Ok(()) => self.live.poke(),
+                            Err(e) => app.status = Some(app::Status::Failed(e)),
+                        },
                         Action::None => {}
                     }
                     self.dirty = true;
                 }
+                Ev::Diff(dir, diff) => self.dirty |= app.set_diff(dir, diff),
+                Ev::Note(file, mark, said) => self.dirty |= app.set_note(file, mark, said),
                 Ev::Suggested(id, result) => {
                     if self.suggestion.as_ref().is_some_and(|s| s.id == id) {
                         self.suggestion = None;
@@ -581,11 +665,21 @@ impl Popup {
         if let Some(snap) = snap.filter(|s| ran || *s != app.snap) {
             app.set_snapshot(snap);
             self.dirty = true;
+            self.ask(false, true);
+        }
+        if self.settle.is_some_and(|at| Instant::now() >= at) {
+            self.settle = None;
+            self.ask(true, false);
+        }
+        if self.app.tab == Tab::Agents && !self.diffed {
+            self.ask(true, true);
         }
         if Instant::now() >= self.minute {
-            app.refresh();
+            self.app.refresh();
             self.minute = next_minute();
             self.dirty = true;
+            // Folders change by hand too, and transcripts late.
+            self.ask(true, true);
         }
         Ok(Flow::Stay)
     }
@@ -606,6 +700,9 @@ mod tests {
         assert!(matches!(parse(&["--rex", "--tab", "agents"]), Ok(Cmd::Rex(o)) if o.tab == Some(Tab::Agents)));
         assert!(parse(&["--rex", "--nope"]).is_err());
         assert!(parse(&["init", "x"]).is_err());
+        assert!(matches!(parse(&["next"]), Ok(Cmd::Next(None))));
+        assert!(matches!(command(&["next", "-c", "/dev/ttys1"], Some("old"), "new"), Ok(Cmd::Next(Some(c))) if c == "/dev/ttys1"), "no version check");
+        assert!(parse(&["next", "x"]).is_err());
         assert!(matches!(parse(&["--tab", "agents"]), Ok(Cmd::Run(Some(Tab::Agents)))));
         assert!(matches!(parse(&["--tab", "sessions"]), Ok(Cmd::Run(Some(Tab::Sessions)))));
         assert!(parse(&["--tab", "nope"]).is_err());
@@ -754,6 +851,8 @@ mod tests {
         unsure: bool,
         /// What `run` made, if it succeeds.
         made: Option<Target>,
+        /// What was typed into which pane.
+        sent: Vec<(String, keys::Input)>,
     }
 
     impl Backend for Fake {
@@ -791,6 +890,11 @@ mod tests {
             Ran { moved: Vec::new(), result: self.fail.clone().map_or_else(|| Ok(self.made.clone()), Err), unsure: self.fail.is_some() && self.unsure }
         }
 
+        fn send(&mut self, pane: &str, input: &keys::Input) -> Result<(), String> {
+            self.sent.push((pane.into(), input.clone()));
+            self.fail.clone().map_or(Ok(()), Err)
+        }
+
         fn closed(&mut self, _: Tab) {}
 
         fn activate(&mut self, target: &Target) -> Result<(), String> {
@@ -817,7 +921,7 @@ mod tests {
     /// selection on TARGET; and the channel its events come on.
     fn popup(fake: &mut Fake, target: Target) -> (Popup, Sender<Ev>, Receiver<Ev>) {
         let (tx, rx) = mpsc::channel();
-        let start = Start { last_tab: None, theme: theme::Theme::default(), suggest_command: String::new(), hidden_expanded: false, session: "$1".into(), window: "@1".into() };
+        let start = Start { last_tab: None, theme: theme::Theme::default(), suggest_command: String::new(), hidden_expanded: false, session: "$1".into(), window: "@1".into(), keys: keys::Protocol::Legacy };
         let mut p = Popup::new(fake, start, Some(Tab::Sessions), String::new(), tx.clone()).unwrap();
         p.app.selected = p.app.rows.iter().position(|r| r.target.as_ref() == Some(&target)).unwrap();
         (p, tx, rx)
@@ -974,5 +1078,20 @@ mod tests {
         p.handle(Some(Ev::Suggested(7, Ok("title".into()))), &rx, &mut fake, &view).unwrap();
         assert!(p.dirty && p.suggestion.is_none());
         assert_eq!(fake.fetches, 1, "no snapshot without news");
+    }
+
+    #[test]
+    fn what_is_typed_goes_to_the_pane_and_a_refusal_says_why() {
+        let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), ..Fake::default() };
+        let (mut p, _tx, rx) = popup(&mut fake, window("@2"));
+        let view = View::new();
+        p.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL), &rx, &mut fake, &view).unwrap();
+        p.handle(key(KeyCode::Char('y'), KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+        p.handle(Some(Ev::Input(Event::Paste("two\nlines".into()))), &rx, &mut fake, &view).unwrap();
+        assert_eq!(fake.sent, [("%2".to_string(), keys::Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))), ("%2".to_string(), keys::Input::Paste("two\nlines".into()))]);
+        fake.fail = Some("the pane is gone".into());
+        p.handle(key(KeyCode::Enter, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
+        assert_eq!(p.app.status, Some(Status::Failed("the pane is gone".into())));
+        assert!(fake.ops.is_empty() && fake.activated.is_empty(), "⏎ went to the pane, not to a jump");
     }
 }

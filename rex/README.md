@@ -5,9 +5,11 @@ floating pane: the same fuzzy finder over sessions, tabs and panes, and the
 agents grouped by state. Agent state is Rex's own program status (OSC 7501),
 so agent-status.tmux isn't needed: Claude Code and pi already report it. Each
 agent card also shows the status message: what the agent is doing, why it
-waits ("Allow edit to main.rs?"), or what failed. A failed agent counts as
-asking (it needs you); a finished one turns idle once paddock has taken you
-to it, until it reports something new.
+waits ("Allow edit to main.rs?"), or what failed. A failed agent is
+finished, its note saying how ("failed: …"); a finished one turns idle once
+paddock has taken you to it, or to its tab or session, until it reports
+something new. A sub-task that waits on you (a program's blocked record
+under one that works on) shows as the agent's wait.
 
 ## Setup
 

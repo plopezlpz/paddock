@@ -32,16 +32,35 @@ function block_call(session, block, method, args)
   return rex.block.call(TERMINAL, method, args)
 end
 
--- The root record, else the most recent one; and whether the call was
--- answered at all (no record is an answer too).
-local function status(session, block)
+local SHELLS = { sh = true, bash = true, zsh = true, fish = true, dash = true, ksh = true, tcsh = true, csh = true, nu = true }
+
+-- The record that says what the program is doing: the most recent blocked
+-- one (a sub-task, such as a subagent, may wait on the user while the root
+-- works on), else the root record, else the most recent one; and whether the
+-- call was answered at all (no record is an answer too). Records outlive
+-- their program, so those of the process in front (PID) come first: a dead
+-- agent's open question doesn't hide the next one's state. Without any,
+-- the choice is made from them all, and paddock shows it unconfirmed.
+local function status(session, block, pid)
   local answer = block_call(session, block, "program_status")
-  local best
-  for _, r in ipairs((answer or {}).records or {}) do
-    if r.id == nil or r.id == "" then return r, true end
-    if not best or (r.updated_at or "") > (best.updated_at or "") then best = r end
+  local records = (answer or {}).records or {}
+  local function current(r)
+    local o = r.owner
+    return not o or not o.pid or o.pid == 0 or o.pid == pid or SHELLS[(o.name or ""):gsub("^%-", "")] ~= nil
   end
-  return best, answer ~= nil
+  local function pick(only)
+    local root, newest, blocked
+    local function newer(r, than) return not than or (r.updated_at or "") > (than.updated_at or "") end
+    for _, r in ipairs(records) do
+      if not only or current(r) then
+        if r.id == nil or r.id == "" then root = r end
+        if newer(r, newest) then newest = r end
+        if r.state == "blocked" and newer(r, blocked) then blocked = r end
+      end
+    end
+    return blocked or root or newest
+  end
+  return (pid and pick(true)) or pick(false), answer ~= nil
 end
 
 -- Blocks last read with a call unanswered (a connection's hiccup): what was
@@ -53,7 +72,7 @@ local function pane(session, block, active)
   local process = block_call(session, id, "process")
   local fg = (process or {}).foreground or {}
   local cwd = fg.cwd or (block_call(session, id, "pwd") or {}).pwd
-  local st, answered = status(session, id)
+  local st, answered = status(session, id, fg.pid)
   shaky[id] = (not process or not answered) or nil
   return {
     id = id,
@@ -62,6 +81,7 @@ local function pane(session, block, active)
     -- Only an agent's title is shown.
     title = st and (block_call(session, id, "title") or {}).title or nil,
     argv0 = fg.argv0 or fg.name,
+    pid = fg.pid,
     cwd = cwd,
     status = st,
   }

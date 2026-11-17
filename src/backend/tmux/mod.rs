@@ -11,6 +11,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::{Backend, Msg, Ran, Start};
+use crate::keys::{self, Input, Protocol, TmuxKey};
 use crate::model::{Op, Snapshot, Tab, Target};
 use crate::theme::{AgentIcons, Theme};
 use control::{field, quote, Control, SEP, SESSION};
@@ -283,6 +284,8 @@ pub struct Tmux {
     control: Control,
     /// The client paddock was opened from.
     client: String,
+    /// agent-status.tmux's scripts (@agent-scripts-dir), if it is loaded.
+    scripts: String,
 }
 
 /// Attach, subscribe, and read what the popup starts from. EVENTS gets the
@@ -301,8 +304,12 @@ pub fn connect(events: impl Fn(u64, Msg) + Send + 'static) -> Result<(Tmux, Star
     let row = Some(tmux.row_for(Some(&ctx.client), &ctx.window, &names)).filter(|r| !r.is_empty()).unwrap_or_else(|| tmux.row(&ctx.window, &names));
     let theme = theme(|name| names.iter().position(|n| *n == name).and_then(|i| row.get(i)).map_or("", String::as_str));
     let hidden_expanded = tmux.cmd(&format!("show-option -gqv {HIDDEN_EXPANDED}"))?.first().is_some_and(|v| v == "1");
-    let start = Start { last_tab, theme, suggest_command, hidden_expanded, session: ctx.session, window: ctx.window };
-    Ok((Tmux { control: tmux, client: ctx.client }, start))
+    let scripts = tmux.cmd("show-option -gqv @agent-scripts-dir").unwrap_or_default().pop().unwrap_or_default();
+    // Each its own command: a reply is read for each line sent.
+    let option = |tmux: &mut Control, name: &str| tmux.cmd(&format!("show-options -sqv {name}")).unwrap_or_default().pop().unwrap_or_default();
+    let keys = protocol(&option(&mut tmux, "extended-keys"), &option(&mut tmux, "extended-keys-format"));
+    let start = Start { last_tab, theme, suggest_command, hidden_expanded, session: ctx.session, window: ctx.window, keys };
+    Ok((Tmux { control: tmux, client: ctx.client, scripts }, start))
 }
 
 impl Backend for Tmux {
@@ -359,6 +366,26 @@ impl Backend for Tmux {
         Ran { moved, result, unsure: false }
     }
 
+    fn send(&mut self, pane: &str, input: &Input) -> Result<(), String> {
+        let pane = quote(pane);
+        let line = match input {
+            Input::Key(key) => match keys::tmux(key) {
+                Some(TmuxKey::Text(text)) => format!("send-keys -l -t {pane} -- {}", quote(&text)),
+                Some(TmuxKey::Name(name)) => format!("send-keys -t {pane} {}", quote(&name)),
+                None => return Ok(()),
+            },
+            // Through a buffer, so the pane's program gets it bracketed if
+            // it asked (-p); its newlines go as Enter. Two commands, not a
+            // `;` list: each is answered on its own, and every command
+            // takes one answer.
+            Input::Paste(text) => {
+                self.control.cmd(&format!("set-buffer -b paddock -- {}", double_quoted(text)))?;
+                format!("paste-buffer -p -d -b paddock -t {pane}")
+            }
+        };
+        self.control.cmd(&line).map(|_| ())
+    }
+
     fn closed(&mut self, tab: Tab) {
         let _ = self.control.cmd(&format!("set-option -gq {LAST_TAB} {}", tab.label()));
     }
@@ -373,9 +400,111 @@ impl Backend for Tmux {
             let shown = self.control.cmd(&format!("display-message -c {} {}", quote(&self.client), literal(&message)));
             // Unseen, the error goes to the popup (-EE keeps it open).
             shown.map_err(|_| e)?;
+        } else if !self.scripts.is_empty() {
+            let _ = self.control.cmd(&format!("run-shell -b -t {} {}", arg(target), quote(&seen(&self.scripts))));
         }
         Ok(())
     }
+}
+
+/// `paddock next`: take CLIENT (else the one tmux says is current) to the
+/// agent that has waited longest for an answer, else the one that finished
+/// longest ago unseen, but not the one it is on. Two tmux calls, no control
+/// client: it runs from a key, outside the popup.
+pub fn next(client: Option<&str>) -> Result<(), String> {
+    let tmux = |args: &[&str]| -> Result<String, String> {
+        // -u: whatever the locale (a hotkey daemon's may be none), the
+        // separators come back as they are.
+        let out = Command::new("tmux").arg("-u").args(args).output().map_err(|e| format!("cannot run tmux: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    };
+    let client = match client {
+        Some(c) => c.to_string(),
+        None => tmux(&["display-message", "-p", "#{client_name}"])?.trim().to_string(),
+    };
+    if client.is_empty() {
+        return Err("no tmux client to move".into());
+    }
+    // The client's pane and session and agent-status's scripts, then the
+    // server's snapshot, one per line.
+    let only = format!("#{{==:#{{client_name}},{client}}}");
+    let here = format!("#{{pane_id}}{SEP}#{{session_id}}{SEP}#{{@agent-scripts-dir}}");
+    let out = tmux(&["list-clients", "-f", &only, "-F", &here, ";", "display-message", "-c", &client, "-p", &snapshot::format()])?;
+    let (here, text) = out.split_once('\n').unwrap_or(("", ""));
+    let mut here = here.trim().split(SEP);
+    let (pane, session, scripts) = (here.next().unwrap_or_default(), here.next().unwrap_or_default(), here.next().unwrap_or_default());
+    let snap = snapshot::parse(text);
+    let Some(target) = pick(&snap, pane) else {
+        return tmux(&["display-message", "-c", &client, "paddock: no other agent needs you"]).map(|_| ());
+    };
+    // In the client's own session, if it shows the pane too (grouped or
+    // linked): not off to another one.
+    let target = match &target {
+        Target::Pane { pane, .. } => snap.place_in(pane, session).unwrap_or(target),
+        _ => target,
+    };
+    tmux(&["switch-client", "-Z", "-c", &client, "-t", &plain(&target)])?;
+    if !scripts.is_empty() {
+        let _ = tmux(&["run-shell", "-b", "-t", &plain(&target), &seen(scripts)]);
+    }
+    Ok(())
+}
+
+/// The shell command (for run-shell -t, which expands its formats for the
+/// target) that marks the target pane's agent as seen: agent-status.tmux's
+/// own, from SCRIPTS (@agent-scripts-dir). Its focus hook does the same, but
+/// tmux sends no focus change when another client already shows the pane.
+/// Silent and never failing: run-shell -t shows output and a failure in
+/// the pane it lands in, and the option can outlive the scripts it names.
+fn seen(scripts: &str) -> String {
+    let script = format!("{scripts}/clear-finished.sh").replace('#', "##");
+    format!("s={}; [ -x \"$s\" ] && \"$s\" #{{pane_id}} >/dev/null 2>&1; :", quote(&script))
+}
+
+/// TEXT as a tmux double-quoted string, its newlines and other control
+/// characters escaped: a command sent over control mode is one line.
+fn double_quoted(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' | '"' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\x7f' => out.push_str(&format!("\\{:03o}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// TARGET as a `-t` argument given as is, not through control mode's quoting.
+fn plain(target: &Target) -> String {
+    match target {
+        Target::Session { session } => session.clone(),
+        Target::Window { session, window } => format!("{session}:{window}"),
+        Target::Pane { session, window, pane } => format!("{session}:{window}.{pane}"),
+    }
+}
+
+/// The next agent that needs you after pane HERE (`Snapshot::needs_you`).
+fn pick(snap: &Snapshot, here: &str) -> Option<Target> {
+    snap.needs_you(here)
+}
+
+/// The popup's key protocol from tmux's extended-keys and
+/// extended-keys-format (tmux 3.5+): asked, tmux sends Shift+Enter and the
+/// like extended, which crossterm reads in its csi-u form only.
+fn protocol(on: &str, format: &str) -> Protocol {
+    if matches!(on.trim(), "on" | "always") && format.trim() == "csi-u" { Protocol::ModifyOtherKeys } else { Protocol::Legacy }
 }
 
 /// How many of HISTORY's lines to show above SCREEN, so that it shows FILL
@@ -398,6 +527,15 @@ fn blank(line: &str) -> bool {
 mod tests {
     use super::*;
     use crate::model::State;
+
+    #[test]
+    fn extended_keys_are_asked_for_only_in_the_form_crossterm_reads() {
+        assert_eq!(protocol("on", "csi-u"), Protocol::ModifyOtherKeys);
+        assert_eq!(protocol("always", "csi-u\n"), Protocol::ModifyOtherKeys);
+        assert_eq!(protocol("on", "xterm"), Protocol::Legacy, "CSI 27;2;13~ is no key to crossterm");
+        assert_eq!(protocol("off", "csi-u"), Protocol::Legacy);
+        assert_eq!(protocol("", ""), Protocol::Legacy, "tmux before 3.5");
+    }
 
     #[test]
     fn a_short_screen_is_topped_up_from_the_history_there_is() {
@@ -457,6 +595,38 @@ mod tests {
     fn state_marks_are_the_status_bar_icons_that_fit() {
         let t = themed(&[("@agent-icon-idle", "-"), ("@agent-icon-finished", "◉"), ("@agent-icon-working", "●"), ("@agent-icon-asking", "??")]);
         assert_eq!(State::ALL.map(|s| t.icon(s)), ["-", "◉", "●", "●"]);
+    }
+
+    #[test]
+    fn next_goes_to_the_longest_waiting_then_the_longest_finished() {
+        let snap = fixture_hidden(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||idle|1|claude|||300||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|claude||asking|0|claude|||200||/a",
+            "$1|s|@1|1|w|1|0|%3|2|0|claude||asking|0|claude|||100||/a",
+            "$1|s|@1|1|w|1|0|%4|3|0|claude||idle|1|claude|||50||/a",
+            "$1|s|@1|1|w|1|0|%5|4|0|claude||asking|0|claude|||10|1|/a",
+            "$1|s|@1|1|w|1|0|%6|5|0|claude||asking|0|claude|||5||/a",
+            "$1|s|@1|1|w|1|0|%7|6|0|claude||working|0|claude|||1||/a",
+            "$1|s|@1|1|w|1|0|%8|7|0|claude||idle|0|claude|||1||/a",
+        ], &["%6"]);
+        let pane = |id: &str| Some(Target::Pane { session: "$1".into(), window: "@1".into(), pane: id.into() });
+        assert_eq!(pick(&snap, ""), pane("%3"), "waiting longest; not stale %5 nor hidden %6");
+        assert_eq!(pick(&snap, "%7"), pane("%3"), "from a pane not queued: the first");
+        // The queue: %3 %2 (waiting), %4 %1 (finished), round again.
+        assert_eq!(pick(&snap, "%3"), pane("%2"));
+        assert_eq!(pick(&snap, "%2"), pane("%4"), "past the waiting, to the finished");
+        assert_eq!(pick(&snap, "%4"), pane("%1"));
+        assert_eq!(pick(&snap, "%1"), pane("%3"), "round to the first");
+        let alone = fixture(&["$1|s|@1|1|w|1|0|%2|1|0|claude||asking|0|claude|||200||/a"]);
+        assert_eq!(pick(&alone, "%2"), None, "on the only one: nowhere else to go");
+        let answered = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||idle|1|claude|||300||/a", "$1|s|@1|1|w|1|0|%4|3|0|claude||idle|1|claude|||50||/a"]);
+        assert_eq!(pick(&answered, ""), pane("%4"), "then finished longest ago");
+        assert_eq!(pick(&fixture(&["$1|s|@1|1|w|1|0|%8|7|0|claude||idle|0|claude|||1||/a"]), ""), None, "seen idle and working need no one");
+    }
+
+    #[test]
+    fn pastes_are_one_line_and_literal() {
+        assert_eq!(double_quoted("a\nb\t\"$HOME\" \\ #{x}\x1b"), r#""a\nb\t\"\$HOME\" \\ #{x}\033""#);
     }
 
     #[test]

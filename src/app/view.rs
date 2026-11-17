@@ -128,6 +128,13 @@ impl App {
     pub fn on_mouse(&mut self, ev: MouseEvent, view: &View, now: Instant) -> Action {
         let at = Position::new(ev.column, ev.row);
         let hit = view.hit(at);
+        // Typing: a click or tap only ends it (on a phone, the way out).
+        if matches!(self.mode, Mode::Type(_)) {
+            if matches!(ev.kind, MouseEventKind::Down(_)) {
+                self.mode = Mode::List;
+            }
+            return Action::None;
+        }
         match ev.kind {
             MouseEventKind::Down(button) => {
                 self.status = None;
@@ -253,7 +260,7 @@ impl App {
                         menu.selected = (menu.selected as isize + delta).rem_euclid(n) as usize;
                     }
                     Mode::List | Mode::Move(_) => self.move_by(delta, false),
-                    Mode::Rename(_) | Mode::Confirm(_) | Mode::Create(_) => {}
+                    Mode::Rename(_) | Mode::Confirm(_) | Mode::Create(_) | Mode::Type(_) => {}
                 }
                 Action::None
             }

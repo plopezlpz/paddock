@@ -94,6 +94,49 @@ so you can read what an agent is doing, or asking, before you jump to it.
 
 <img src="docs/brand/preview.svg" alt="paddock's agents tab with the selected agent's pane shown live beside the list; moving down the list changes the preview, and nothing is opened or switched." width="100%">
 
+### Answer an agent from the preview
+
+`ctrl-l` types into the previewed pane: every key and paste goes to it, `Enter`,
+`Esc` and `ctrl-c` too, and the preview shows the answer as it comes. Approve a
+tool call, answer a question or send a follow-up, then `ctrl-h` (back, as
+`ctrl-l` went in), `ctrl-]`, or a click or tap anywhere to stop. (Without
+extended keys, a terminal sends `ctrl-Backspace` as `ctrl-h`, and so does
+`Backspace` with tmux's `backspace` option set to `C-h`: there, that leaves
+too.)
+
+`ctrl-f` selects the next agent that needs you, the way `prefix A` jumps
+(waiting longest first, then finished), so a round of answers is `ctrl-f`,
+`ctrl-l`, the answer, `ctrl-h`, `ctrl-f` again, without leaving the popup.
+
+`Shift+Enter` (a new line in an agent's prompt) reaches the pane as itself on
+Rex, and on tmux 3.5+ with extended keys in csi-u form, which paddock then
+asks for:
+
+```tmux
+set -s extended-keys on
+set -s extended-keys-format csi-u
+```
+
+Elsewhere it is `Enter`.
+
+### What it said, and what it changed
+
+A waiting or finished agent's card ends with what it last said: the tool call
+it waits on (`Bash: cargo test`, or its question), else the first line of its
+last answer, muted once you have seen it. A settled agent's card shows the
+changes waiting in its folder, `+12 −3` against HEAD and `· 2 new` for
+untracked files, so a finished card says whether there is something to review.
+On tmux the words come from the agent's transcript, as agent-status.tmux names
+it (Claude Code, pi, Codex); on Rex, from its status message. Both are read off
+the popup's thread.
+
+### Next agent that needs you, without the popup
+
+`prefix A` jumps to the agent that has waited longest for you, else the one
+that finished longest ago; press it again for the next. Hidden and unconfirmed
+agents are skipped. It is `paddock next`, so you can bind it yourself; on tmux
+only.
+
 ### Rename an agent, with a suggested title
 
 `ctrl-r` renames the selected agent in place; press it again and paddock fills
@@ -356,7 +399,7 @@ The section's saved expansion uses the global `@paddock-hidden-expanded` option.
 
 | Key | Action |
 |---|---|
-| type | fuzzy filter on names, folders, commands, agent kinds and states (a waiting agent also matches `asking`, an unconfirmed one `stale`): `'exact`, `^prefix`, `suffix$`, `!not`; `Backspace` or `ctrl-h`, `ctrl-w`, `ctrl-u` edit it |
+| type | fuzzy filter on names, folders, commands, agent kinds and states (a waiting agent also matches `asking`, an unconfirmed one `stale`): `'exact`, `^prefix`, `suffix$`, `!not`; `Backspace`, `ctrl-w`, `ctrl-u` edit it |
 | `↑` `↓`, `ctrl-p` `ctrl-n` (`ctrl-k` `ctrl-j`), PageUp/PageDown | move |
 | `Enter` | jump there (a zoomed window stays zoomed); toggle a selected Hidden heading |
 | `Tab` | switch tabs |
@@ -370,7 +413,9 @@ The section's saved expansion uses the global `@paddock-hidden-expanded` option.
 | `ctrl-z` | undo the last rename, move, hide or show |
 | `ctrl-g` | change the agents' grouping |
 | `ctrl-o` | toggle the preview |
-| `ctrl-a` | the selected row's menu: everything you can do with it (also in the footer) |
+| `ctrl-l` | type into the previewed pane: every key and paste goes there; `ctrl-h`, `ctrl-]`, a click or a tap stops |
+| `ctrl-f` | select the next agent that needs you (waiting longest first, then finished), on the agents tab |
+| `ctrl-a` | the selected row's menu: everything you can do with it (also in the footer); `ctrl-a` `a` (tmux's `prefix a` again) closes the popup, `ctrl-a` `A` is `ctrl-f` |
 | `Esc` | back out: close a menu, cancel a rename, move, new name or question, else clear the filter, else close |
 | `ctrl-c` | as `Esc`, but it closes rather than clear the filter |
 
@@ -400,6 +445,7 @@ of room, its menu (`ctrl-a`) has the rest.
 | Option | Default | |
 |---|---|---|
 | `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
+| `@paddock-next-key` | `A` (if prefix `A` is free) | key that jumps to the next agent that needs you (`paddock next`), without the popup; `off`: none |
 | `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open; a format, expanded for the popup's client |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%`, or `100%` on a terminal under 128 columns (30 rows) | may be a format, as the defaults are: `#{?#{e\|<:#{client_width},128},100%,80%}` |
@@ -446,6 +492,8 @@ Any tool can feed paddock by setting these options on the agent's pane
 | `@agent-kind` | the agent's name, e.g. `claude` |
 | `@agent-auto-description` | an automatic title, e.g. the first prompt |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
+| `@agent-transcript` | the agent's transcript file (JSON lines: Claude Code's, pi's or Codex's), for what a waiting or finished agent last said |
+| `@agent-command` | what ran in the pane when the agent registered (agent-status.tmux records it); something else in front, such as an editor started after the agent died without its exit hook, shows the agent with a `?` |
 
 Only `@agent-state` is required. The tool that sets them:
 

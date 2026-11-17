@@ -2,7 +2,7 @@
 //! them, as a backend reports them; the targets ops act on, and the ops
 //! (a backend makes them; the app, which knows no backend, asks for them).
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum State {
     Idle,
     Finished,
@@ -46,8 +46,23 @@ pub struct Agent {
     /// without exec (`agent; exec $SHELL`, a wrapper script).
     pub stale: bool,
     /// What the agent says about its state, when its server reports it (Rex's
-    /// program status message: why it waits, what failed). Empty on tmux.
+    /// program status message: why it waits, what failed). Empty on tmux,
+    /// where the popup reads it from the TRANSCRIPT instead (transcript.rs).
     pub note: String,
+    /// The agent's transcript file (@agent-transcript), if its tool says.
+    pub transcript: String,
+    /// Its open asks, as its tool lists them (@agent-asks): what it waits on.
+    pub asks: String,
+}
+
+/// What a note read from a transcript is for: an agent in that state since
+/// then, with those asks open.
+pub type Mark = (State, Option<u64>, String);
+
+impl Agent {
+    pub fn mark(&self) -> Mark {
+        (self.state, self.since, self.asks.clone())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -218,6 +233,33 @@ impl Snapshot {
     /// Pane ID with its (first) session and window.
     pub fn pane(&self, id: &str) -> Option<(&Session, &Window, &Pane)> {
         self.sessions.iter().flat_map(|s| s.windows.iter().map(move |w| (s, w))).find_map(|(s, w)| Some((s, w, w.panes.iter().find(|p| p.id == id)?)))
+    }
+
+    /// Pane ID as a target in SESSION, if a window of SESSION holds it.
+    pub fn place_in(&self, id: &str, session: &str) -> Option<Target> {
+        let s = self.session(session)?;
+        let w = s.windows.iter().find(|w| w.panes.iter().any(|p| p.id == id))?;
+        Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: id.to_string() })
+    }
+
+    /// The next agent that needs you: the queue lists waiting agents before
+    /// finished ones, each the longest in its state first (hidden and
+    /// unconfirmed ones left out). From one of them, the next in the queue
+    /// (round to the first); from anywhere else, the first; never pane HERE.
+    pub fn needs_you(&self, here: &str) -> Option<Target> {
+        let mut queue: Vec<_> = self
+            .unique_panes()
+            .filter_map(|(s, w, p)| {
+                let a = p.agent.as_ref().filter(|a| !a.hidden && !a.stale && matches!(a.state, State::Asking | State::Finished))?;
+                // No time: last in its state.
+                let key = (a.state != State::Asking, a.since.is_none(), a.since);
+                Some((key, Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() }))
+            })
+            .collect();
+        queue.sort_by_key(|(key, _)| *key);
+        let at = queue.iter().position(|(_, t)| matches!(t, Target::Pane { pane, .. } if pane == here));
+        let next = at.map_or(0, |i| i + 1) % queue.len().max(1);
+        queue.into_iter().nth(next).map(|(_, t)| t).filter(|t| !matches!(t, Target::Pane { pane, .. } if pane == here))
     }
 
     /// The agent in pane ID.

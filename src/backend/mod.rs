@@ -7,6 +7,7 @@ pub mod tmux;
 
 use std::time::Duration;
 
+use crate::keys::Input;
 use crate::model::{Op, Snapshot, Tab, Target};
 use crate::theme::Theme;
 
@@ -37,6 +38,9 @@ pub struct Start {
     /// Where paddock was opened from.
     pub session: String,
     pub window: String,
+    /// How the popup asks its terminal for keys a legacy one can't tell
+    /// apart.
+    pub keys: crate::keys::Protocol,
 }
 
 /// What a server can do where tmux and Rex differ, so the popup offers
@@ -53,6 +57,8 @@ pub struct Caps {
     pub activate_open: bool,
     /// A Rex server: a window is called a tab, and setup advice is Rex's.
     pub rex: bool,
+    /// Keys and pastes can be sent to a pane (typing mode).
+    pub send: bool,
 }
 
 impl Caps {
@@ -64,7 +70,7 @@ impl Caps {
 
 impl Default for Caps {
     fn default() -> Caps {
-        Caps { cross_session_moves: true, tmux_session_names: true, activate_open: false, rex: false }
+        Caps { cross_session_moves: true, tmux_session_names: true, activate_open: false, rex: false, send: true }
     }
 }
 
@@ -113,6 +119,9 @@ pub trait Backend {
 
     /// Make OP's change on the server.
     fn run(&mut self, op: &Op) -> Ran;
+
+    /// Type INPUT into PANE, as if the user had there.
+    fn send(&mut self, pane: &str, input: &Input) -> Result<(), String>;
 
     /// The popup is on TAB, as it may close: the next one opens there.
     fn closed(&mut self, tab: Tab);

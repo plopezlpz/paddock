@@ -3,14 +3,14 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::model::{Snapshot, State, Target};
+use crate::model::{Mark, Snapshot, State, Target};
 use crate::paths::{AgentPath, PathCache};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,9 @@ pub enum RowKind {
     /// `host`: its session's Rex host, if not paddock's own server. `place`:
     /// "session · window", shown instead of the path its folder's header
     /// already shows.
-    Agent { state: State, stale: bool, kind: String, title: String, note: String, path: AgentPath, age: String, host: String, place: Option<String> },
+    /// DIFF: the changes waiting in its folder (`+12 −3`), empty if none or
+    /// not known.
+    Agent { state: State, stale: bool, kind: String, title: String, note: String, path: AgentPath, age: String, host: String, place: Option<String>, diff: String },
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
     /// One selectable heading for all hidden cards, without internal headers.
@@ -426,11 +428,27 @@ type GroupItem = (GroupKey, String, (State, Option<u64>), Row);
 /// Hidden cards have the same ordering, under one collapsible heading without
 /// internal group headers. Search reveals them without changing the preference.
 /// KEEP is listed whatever the filter says (see `Tree::keep`).
+#[cfg(test)]
 pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, paths: &mut PathCache, now: u64, hidden_expanded: bool) -> Vec<Row> {
+    agents_noted(snap, filter, group, keep, paths, now, hidden_expanded, &Notes::new())
+}
+
+/// What transcripts say (transcript.rs), by file: what for (the agent's
+/// mark when it was read), and what.
+pub type Notes = HashMap<String, (Mark, String)>;
+
+/// `agents`, with an agent that has no note of its own given what its
+/// transcript says in NOTES (shown and searched alike).
+#[allow(clippy::too_many_arguments)]
+pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, paths: &mut PathCache, now: u64, hidden_expanded: bool, notes: &Notes) -> Vec<Row> {
     let mut items: Vec<GroupItem> = Vec::new();
     let mut hidden: Vec<GroupItem> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
+        let note = match notes.get(&a.transcript) {
+            Some((mark, said)) if a.note.is_empty() && *mark == a.mark() => said,
+            _ => &a.note,
+        };
         let target = Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: p.id.clone() };
         let path = paths.get(&p.path);
         let kind = p.label();
@@ -438,7 +456,7 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
         let asking = if a.state == State::Asking { " asking" } else { "" };
         // Its window and host too: a card can show them (its place under a
         // folder's header, `@host`).
-        let score = filter.score(&format!("{} {} {} {} {} {} {}{asking}{} {}", a.title, s.name, w.name, s.host, path_text(&p.path, &path), kind, a.state.label(), if a.stale { " stale" } else { "" }, a.note));
+        let score = filter.score(&format!("{} {} {} {} {} {} {}{asking}{} {}", a.title, s.name, w.name, s.host, path_text(&p.path, &path), kind, a.state.label(), if a.stale { " stale" } else { "" }, note));
         if score.is_none() && keep != Some(&target) {
             continue;
         }
@@ -463,12 +481,13 @@ pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&
                 stale: a.stale,
                 kind: kind.to_string(),
                 title: a.title.clone(),
-                note: a.note.clone(),
+                note: note.clone(),
                 path,
                 age: age(a.since, now),
                 host: s.host.clone(),
                 // Kept below only where it stands in for the path.
                 place: (group == Group::Folder).then(|| format!("{} · {}", s.name, w.name)),
+                diff: String::new(),
             },
             preview: Some(p.id.clone()),
             score,

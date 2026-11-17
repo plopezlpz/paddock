@@ -1,7 +1,7 @@
 window.PADDOCK_FRAMES = window.PADDOCK_FRAMES || {};
 window.PADDOCK_FRAMES["status"] = {
 v: 1, name: "status", cols: 132, rows: 36,
-source: {"paddock":"0.8.1","commit":"c341a5b-dirty","sha256":"7bc814d1341014c08a0f3b4d4b62a57a21e0fa85b0e715e53945fa9872f73c11","tmux":"3.8","recorded":"2026-11-16","conf":"gruber.conf","cols":132,"rows":36},
+source: {"paddock":"0.9.0","commit":"25ff14f-dirty","sha256":"35d4911f211c8622d3422c0c5cffc18b7345ca509d75bc56fd3700a8e7b8a64b","tmux":"3.8","recorded":"2026-11-17","conf":"gruber.conf","cols":132,"rows":36},
 styles: [
 {},
 {"d":1},

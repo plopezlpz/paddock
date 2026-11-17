@@ -134,7 +134,7 @@ te run-shell "$TMP/plugin/paddock.tmux"
 check "no prefix table: the click binds" has "$(te list-keys -T root MouseUp1StatusLeft 2>/dev/null)" "$TMP/plugin/target/release/paddock"
 check "no prefix table: the key binds" has "$(te list-keys -T prefix P 2>/dev/null)" "$TMP/plugin/target/release/paddock"
 te run-shell "$TMP/plugin/paddock.tmux"
-check "no prefix table: a reload binds the key once" test "$(te list-keys -N -T prefix | grep -c paddock)" -eq 1
+check "no prefix table: a reload binds the key once" test "$(te list-keys -N -T prefix | grep -v 'paddock next' | grep -c paddock)" -eq 1
 te kill-server
 
 # Reloads: switching the click off removes paddock's binding, never a user's.
@@ -363,6 +363,91 @@ if [ -x "$PB" ]; then
   tmux -L "$OUT" send-keys Escape
   check "real paddock: closed, its session is gone" wait_gone "agents"
   check "real paddock: and so is its session" test -z "$(t list-sessions -F '#{session_name}' | grep _paddock)"
+  # Typing into the previewed pane: room for the preview beside the list,
+  # ^l, then keys (⏎ too) go to the pane; ^] (crossterm's ^5) leaves.
+  tmux -L "$OUT" resize-window -x 120 -y 30
+  t new-window -d -t main: -n typer 'cat'
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: opens wide" wait_screen "sessions"
+  tmux -L "$OUT" send-keys -l 'typer'
+  check "real paddock: the pane to type into is listed" wait_screen "typer"
+  tmux -L "$OUT" send-keys C-l
+  check "real paddock: ^l types into the previewed pane" wait_screen "typing to"
+  tmux -L "$OUT" send-keys -l 'hello paddock'
+  tmux -L "$OUT" send-keys Enter
+  typed() { [ "$(t capture-pane -p -t main:typer | grep -c 'hello paddock')" -ge 2 ]; }
+  check "real paddock: typed keys and ⏎ reach the pane (cat echoes the line)" until_ok typed
+  check "real paddock: still open, still typing" wait_screen "typing to"
+  # A bracketed paste of two lines, then a snapshot: replies stay in step.
+  tmux -L "$OUT" set-buffer -b p -- "$(printf 'pasted one\npasted two')"
+  tmux -L "$OUT" paste-buffer -p -d -b p
+  pasted() { has "$(t capture-pane -p -t main:typer)" "pasted two"; }
+  check "real paddock: a paste reaches the pane, lines and all" until_ok pasted
+  # (Its count in the popup's title: tmux's status line has window names.)
+  t new-window -d -t main: -n afterpaste 'sleep 600' \; set -p -t main:afterpaste @agent-state asking
+  check "real paddock: snapshots still come in after a paste" wait_screen "1 waiting"
+  t kill-window -t main:afterpaste
+  check "real paddock: and the next one" wait_gone "1 waiting"
+  tmux -L "$OUT" send-keys C-]
+  check "real paddock: ^] leaves typing" wait_gone "typing to"
+  tmux -L "$OUT" send-keys C-u Escape
+  check "real paddock: closes after typing" wait_gone "sessions"
+  t kill-window -t main:typer
+  # With tmux's extended keys in csi-u form, paddock asks for them: ⇧⏎ reaches
+  # a pane that asked for them too as itself (an agent's new line), not ⏎.
+  # ^h leaves typing, as ^] does.
+  t set -s extended-keys on \; set -s extended-keys-format csi-u
+  cat >"$TMP/keys.sh" <<'EOF'
+printf '\033[>4;1m'
+stty raw -echo
+exec perl -e '$|=1; open(F, ">>", $ARGV[0]) or die; select F; $|=1; while (sysread(STDIN, my $c, 1)) { printf "<%02x>", ord $c }' "$1"
+EOF
+  t new-window -d -t main: -n keyspane "sh $(tmq "$TMP/keys.sh") $(tmq "$TMP/keys.out")"
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: opens with extended keys" wait_screen "sessions"
+  tmux -L "$OUT" send-keys -l 'keyspane'
+  check "real paddock: the key-reading pane is listed" wait_screen "keyspane"
+  tmux -L "$OUT" send-keys C-l
+  check "real paddock: typing to it" wait_screen "typing to"
+  # ⇧⏎ as a terminal with extended keys sends it, then x.
+  tmux -L "$OUT" send-keys -H 1b 5b 31 33 3b 32 75 78
+  shifted() { has "$(cat "$TMP/keys.out" 2>/dev/null)" "<1b><5b><31><33><3b><32><75><78>"; }
+  check "real paddock: ⇧⏎ reaches the pane as ⇧⏎" until_ok shifted
+  tmux -L "$OUT" send-keys C-h
+  check "real paddock: ^h leaves typing" wait_gone "typing to"
+  tmux -L "$OUT" send-keys C-u Escape
+  check "real paddock: closes" wait_gone "sessions"
+  t kill-window -t main:keyspane \; set -s extended-keys off
+  # paddock next: the key binds it; it walks the agents that need you,
+  # waiting ones first, each the longest in its state first, round again.
+  check "real paddock init binds the next key" has "$(t list-keys -N -T prefix A 2>/dev/null)" "paddock next"
+  t new-window -d -t main: -n late 'sleep 600' \; set -p -t main:late @agent-state asking \; set -p -t main:late @agent-state-at 200
+  t new-window -d -t main: -n early 'sleep 600' \; set -p -t main:early @agent-state asking \; set -p -t main:early @agent-state-at 100
+  t new-window -d -t main: -n done 'sleep 600' \; set -p -t main:done @agent-state idle \; set -p -t main:done @agent-unseen 1 \; set -p -t main:done @agent-state-at 50
+  # agent-status's clear-finished.sh, standing in: it logs the pane it marks seen.
+  mkdir -p "$TMP/scripts"
+  printf '#!/bin/sh\necho "$1" >>%s\n' "$TMP/cleared" >"$TMP/scripts/clear-finished.sh"
+  chmod +x "$TMP/scripts/clear-finished.sh"
+  t set -g @agent-scripts-dir "$TMP/scripts"
+  cleared() { grep -qx "$(t display -p -t "main:$1" '#{pane_id}')" "$TMP/cleared" 2>/dev/null; }
+  on() { [ "$(t list-clients -F '#{window_name}')" = "$1" ]; }
+  next() { t run-shell "$(tmq "$PB") next -c $(tmq "$client")"; }
+  next; check "real paddock next: the longest waiting first" until_ok on early
+  next; check "real paddock next: then the next waiting" until_ok on late
+  next; check "real paddock next: then the finished one" until_ok on done
+  next; check "real paddock next: round again" until_ok on early
+  check "real paddock next: marks the pane it went to as seen" until_ok cleared done
+  # So does a jump from the popup.
+  tmux -L "$OUT" send-keys C-b a
+  check "real paddock: opens to jump" wait_screen "agents"
+  tmux -L "$OUT" send-keys -l 'late'
+  tmux -L "$OUT" send-keys Enter
+  check "real paddock: a jump marks the pane as seen" until_ok cleared late
+  t set -gu @agent-scripts-dir
+  t kill-window -t main:late \; kill-window -t main:early \; kill-window -t main:done
+  # On the client's status line (display-message is not logged).
+  next; check "real paddock next: says when none needs you" wait_screen "no other agent needs you"
+  tmux -L "$OUT" resize-window -x 60 -y 10
   t set-hook -gu pane-focus-in
   t set -gu @paddock-key
   # The binary refuses bindings from another version, with no tmux needed.

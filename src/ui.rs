@@ -34,6 +34,8 @@ const PREVIEW_BELOW_FROM: u16 = 24;
 const LIST_MAX: u16 = 72;
 /// Between footer hints.
 const GAP: &str = "   ";
+/// Columns a card's path keeps before the changes beside it give way.
+const PATH_MIN: usize = 24;
 
 fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
@@ -200,7 +202,9 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
             let title = if title.is_empty() { title } else { format!(" {title} ") };
             (Block::new().borders(Borders::TOP).title(Line::styled(title, t.muted())), pad(side), 0)
         };
-        let block = block.border_style(t.border());
+        // Typed into: its rule in the accent, as the focus.
+        let typing = matches!(app.mode, Mode::Type(_));
+        let block = block.border_style(if typing { Style::new().fg(t.accent) } else { t.border() });
         let inner = pad(block.inner(side));
         f.render_widget(block, side);
         let [head, text] = Layout::vertical([Constraint::Length(head), Constraint::Fill(1)]).areas(inner);
@@ -240,6 +244,16 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
         let line = Line::from(vec![Span::styled("✗ ", warn), Span::styled(fit(&c.question, (left.width as usize).saturating_sub(2)), warn.add_modifier(Modifier::BOLD))]);
         f.render_widget(Paragraph::new(line), left);
         f.render_widget(Paragraph::new(Line::styled(note, t.muted())).right_aligned(), side);
+        return;
+    }
+    // Typing into a pane: the line says which.
+    if let Mode::Type(typing) = &app.mode {
+        let lead = "› typing to ";
+        let line = Line::from(vec![
+            Span::styled(lead, Style::new().fg(t.accent)),
+            Span::styled(fit(&typing.label, (area.width as usize).saturating_sub(lead.width())), Style::new().fg(t.accent).add_modifier(Modifier::BOLD)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
         return;
     }
     // Typing goes to a name: the query is shown muted, without a cursor.
@@ -429,9 +443,12 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
         RowKind::Agent { title, note, state, .. } => {
             let mut second = agent_detail_prefix(row, mark.clone(), t);
             let room = width.saturating_sub(cols(&second));
+            // What an agent you have seen last said is a reminder, muted;
+            // otherwise news, in its state's colour.
+            let said = if *state == State::Idle { t.muted() } else { t.state(*state) };
             if title.is_empty() && !note.is_empty() {
                 // No title: the note has the line, not "untitled".
-                second.extend(marked(fit(note, room), t.state(*state)));
+                second.extend(marked(fit(note, room), said));
             } else {
                 // The note (on a waiting agent, what it waits for) gets what
                 // the title leaves, and half the line when both are long.
@@ -446,7 +463,7 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
                 }
                 if note_room > 3 {
                     second.push(Span::styled(" · ", t.muted()));
-                    second.extend(marked(fit(note, note_room - 3), t.state(*state)));
+                    second.extend(marked(fit(note, note_room - 3), said));
                 }
             }
             (card_lines(Line::from(second), mark, row, width, selected, filter, t), None)
@@ -522,7 +539,7 @@ fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'s
 /// colour, as Sessions shows `@host`; under a folder header the path would
 /// repeat, the session and window stand in for it, muted.
 fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
-    let RowKind::Agent { state, kind, path, host, place, .. } = &row.kind else { return vec![second] };
+    let RowKind::Agent { state, kind, path, host, place, diff, .. } = &row.kind else { return vec![second] };
     let identity = if selected { t.selected() } else { bold() };
     let icon = Span::styled(agent_icon(kind, t.agent_icons), bold());
     let padding = 3usize.saturating_sub(icon.width());
@@ -533,6 +550,17 @@ fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usiz
     let at = if host.is_empty() || (place.is_none() && split_host(&path.full).0 == host) { String::new() } else { format!("  @{host}") };
     let at = if at.width() > room / 2 { String::new() } else { at };
     let room = room - at.width();
+    // The changes waiting, after the identity: the first to go when the line
+    // is short (the path keeps PATH_MIN columns, or what it needs).
+    let changes = if diff.is_empty() { String::new() } else { format!("  {diff}") };
+    let changes = match place {
+        _ if changes.is_empty() => changes,
+        // What is drawn there: the place under a folder, else the path.
+        Some(place) if changes.width() + place.width().min(PATH_MIN) > room => String::new(),
+        None if changes.width() + path.display(usize::MAX).width().min(PATH_MIN) > room => String::new(),
+        _ => changes,
+    };
+    let room = room - changes.width();
     match place {
         Some(place) => first.extend(hl(fit(place, room), if selected { identity } else { t.muted() }, row, filter, t)),
         None => {
@@ -548,6 +576,9 @@ fn card_lines(second: Line<'static>, mark: Span<'static>, row: &Row, width: usiz
     }
     if !at.is_empty() {
         first.extend(hl(at, hinted, row, filter, t));
+    }
+    if !changes.is_empty() {
+        first.push(Span::styled(changes, t.muted()));
     }
     vec![Line::from(first), second]
 }
@@ -785,7 +816,7 @@ mod tests {
             RowKind::Session { name: "s".into(), host: "devbox".into(), away: false, windows: 2, current: true },
             RowKind::Window { index: "1".into(), name: "w".into(), path: AgentPath::plain("~/a", ""), panes: 2, state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), note: "n".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into(), host: String::new(), place: None },
+            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), note: "n".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into(), host: String::new(), place: None, diff: String::new() },
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
             RowKind::Hidden { count: 2, expanded: false, gap: false },
@@ -802,7 +833,7 @@ mod tests {
 
     #[test]
     fn an_untitled_agents_note_has_the_line() {
-        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: String::new(), note: "Allow edit to token.rs?".into(), path: AgentPath::plain("~/p", ""), age: "<1m".into(), host: String::new(), place: None };
+        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: String::new(), note: "Allow edit to token.rs?".into(), path: AgentPath::plain("~/p", ""), age: "<1m".into(), host: String::new(), place: None, diff: String::new() };
         let row = Row { target: None, kind, preview: None, score: None };
         let text: String = row_lines(&row, false, false, 40, None, "window", &Theme::default()).0.iter().map(|l| l.to_string() + "\n").collect();
         assert!(text.contains("Allow edit to token.rs?") && !text.contains("untitled"), "{text}");
@@ -826,7 +857,7 @@ mod tests {
                             target: None,
                             kind: RowKind::Agent {
                                 state: State::Working, stale, kind: kind.into(), title: "task".into(), note: String::new(),
-                                path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(), host: String::new(), place: None,
+                                path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(), host: String::new(), place: None, diff: String::new(),
                             },
                             preview: None, score: None,
                         };
@@ -863,7 +894,7 @@ mod tests {
             let row = Row {
                 target: None, preview: None, score: None,
                 kind: RowKind::Agent { state, stale: false, kind: "pi".into(),
-                    title: "Branch labels".into(), note: String::new(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into(), host: String::new(), place: None },
+                    title: "Branch labels".into(), note: String::new(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into(), host: String::new(), place: None, diff: String::new() },
             };
             for compact in [false, true] {
                 let lines = row_lines(&row, false, compact, 40, None, "window", &t).0;
@@ -954,7 +985,7 @@ mod tests {
     }
 
     fn agent(title: &str, note: &str, path: &str) -> Row {
-        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: title.into(), note: note.into(), path: AgentPath::plain(path, ""), age: "<1m".into(), host: String::new(), place: None };
+        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: title.into(), note: note.into(), path: AgentPath::plain(path, ""), age: "<1m".into(), host: String::new(), place: None, diff: String::new() };
         Row { target: None, kind, preview: None, score: None }
     }
 

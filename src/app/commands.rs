@@ -21,6 +21,10 @@ pub enum Command {
     Show,
     Group,
     Preview,
+    /// Type into the previewed pane.
+    Type,
+    /// Select the next agent that needs you (as `paddock next` picks).
+    Next,
     Close,
     Rename,
     /// Rename, starting with a suggestion (a menu item for the mouse).
@@ -68,6 +72,9 @@ pub struct Menu {
     pub selected: usize,
     /// The screen cell it hangs from (the click, or the selected row).
     pub anchor: Position,
+    /// Opened with ^a, tmux's usual prefix: a then closes the popup (as
+    /// prefix a opened it) and A goes on to the next agent (prefix A).
+    pub(super) by_key: bool,
 }
 
 impl App {
@@ -85,7 +92,7 @@ impl App {
     pub(super) fn open_menu(&mut self, anchor: Position, preview_fits: bool) {
         let items = self.menu_items(preview_fits);
         if !items.is_empty() {
-            self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), hidden: self.hidden_selected(), items, selected: 0, anchor });
+            self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), hidden: self.hidden_selected(), items, selected: 0, anchor, by_key: false });
         }
     }
 
@@ -103,6 +110,8 @@ impl App {
             Command::Undo => !self.undo.is_empty(),
             Command::Group => self.tab == Tab::Agents,
             Command::Preview => preview_fits,
+            Command::Type => self.caps.send && preview_fits && self.rows.get(self.selected).is_some_and(|r| r.preview.is_some()),
+            Command::Next => self.next_need().is_some(),
             _ => true,
         }
     }
@@ -111,6 +120,10 @@ impl App {
     fn key(&self, command: Command) -> &'static str {
         match command {
             Command::Open | Command::Save | Command::Confirm => "⏎",
+            // Typing, every other key goes to the pane.
+            Command::Cancel if matches!(self.mode, Mode::Type(_)) => "^h",
+            Command::Type => "^l",
+            Command::Next => "^f",
             // In the list, esc clears the query before it closes.
             Command::Close | Command::Cancel => "esc",
             Command::Clear if matches!(self.mode, Mode::List) => "esc",
@@ -151,6 +164,8 @@ impl App {
         [
             (Command::Open, "open"),
             (Command::Panes, if open { "hide panes" } else { "show panes" }),
+            (Command::Type, "type into it"),
+            (Command::Next, "next needing you"),
             (Command::Rename, "rename"),
             (Command::RenameSuggest, "suggest a title"),
             (Command::Hide, "hide"),
@@ -187,6 +202,7 @@ impl App {
                 return (out, cancel);
             }
             Mode::Menu(_) => return (vec![self.hint(Command::Open, "choose", 0)], self.hint(Command::Cancel, "back", 0)),
+            Mode::Type(_) => return (Vec::new(), self.hint(Command::Cancel, "back", 0)),
             Mode::Confirm(c) => return (vec![self.hint(Command::Confirm, if c.kills() { "kill" } else { "move" }, 0)], cancel),
             Mode::Move(_) => return (vec![self.hint(Command::Confirm, "drop here", 0)], cancel),
             Mode::Create(c) => {
@@ -200,9 +216,11 @@ impl App {
         let group = if view.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
         let hints = [
             (Command::Open, "open", 0),
+            (Command::Type, "type", 1),
+            (Command::Next, "next", 2),
             (Command::Tab(other), other.label(), 3),
             (Command::Panes, if open { "hide panes" } else { "panes" }, 4),
-            (Command::Group, &group, 5),
+            (Command::Group, &group, 4),
             (Command::Rename, "rename", 1),
             (Command::Hide, "hide", 4),
             (Command::Show, "show", 4),

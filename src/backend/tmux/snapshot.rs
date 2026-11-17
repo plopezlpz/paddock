@@ -10,7 +10,7 @@ const WINDOW_FIELDS: &[&str] = &["window_id", "window_index", "window_name", "wi
 /// A pane's fields, in order: these, the pane title, AGENT_FIELDS, the path.
 const PANE_FIELDS: &[&str] = &["pane_id", "pane_index", "pane_active", "pane_current_command"];
 /// Read for agent panes (with an @agent-state) only.
-const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale", "@paddock-hidden"];
+const AGENT_FIELDS: &[&str] = &["@agent-state", "@agent-unseen", "@agent-kind", "@agent-auto-description", "@agent-description", "@agent-state-at", "@agent-stale", "@paddock-hidden", "@agent-transcript", "@agent-asks", "@agent-command"];
 
 /// What starts a session, a window and a pane in a snapshot's text
 /// (`field` keeps them out of the values).
@@ -64,7 +64,7 @@ pub fn parse(text: &str) -> Snapshot {
             let mut window = Window { id: id.to_string(), index: index.to_string(), name: name.to_string(), active: active == "1", auto: auto == "1", panes: Vec::new() };
             for pane in panes {
                 let f: Vec<&str> = pane.splitn(n, SEP).collect();
-                let [id, index, active, command, pane_title, state, unseen, kind, auto, desc, at, stale, hidden, path] = f[..] else {
+                let [id, index, active, command, pane_title, state, unseen, kind, auto, desc, at, stale, hidden, transcript, asks, registered, path] = f[..] else {
                     continue;
                 };
                 let agent = agent_state(state, unseen).map(|state| {
@@ -78,8 +78,13 @@ pub fn parse(text: &str) -> Snapshot {
                         renamed: !desc.is_empty(),
                         since: at.parse().ok(),
                         hidden: hidden == "1",
-                        stale: stale == "1" || is_shell(command),
+                        // Or something else runs where it registered (agent-status
+                        // records what ran then): an editor, after it died
+                        // without its exit hook.
+                        stale: stale == "1" || is_shell(command) || (!registered.is_empty() && registered != command),
                         note: String::new(),
+                        transcript: transcript.to_string(),
+                        asks: asks.to_string(),
                     }
                 });
                 window.panes.push(Pane { id: id.to_string(), index: index.to_string(), active: active == "1", command: command.to_string(), path: path.to_string(), agent });
@@ -114,7 +119,10 @@ pub fn fixture(lines: &[&str]) -> Snapshot {
 #[cfg(test)]
 pub fn fixture_hidden(lines: &[&str], hidden: &[&str]) -> Snapshot {
     let (s, w) = (SESSION_FIELDS.len(), SESSION_FIELDS.len() + WINDOW_FIELDS.len());
-    let n = w + PANE_FIELDS.len() + AGENT_FIELDS.len() + 1;
+    // The pane's fields, its title, the agent's but @paddock-hidden,
+    // @agent-transcript, @agent-asks and @agent-command (added below), and
+    // the path.
+    let n = w + PANE_FIELDS.len() + 1 + AGENT_FIELDS.len() - 4 + 1;
     let sep = SEP.to_string();
     let mut text = String::from("host");
     let mut last: Vec<&str> = Vec::new();
@@ -133,7 +141,8 @@ pub fn fixture_hidden(lines: &[&str], hidden: &[&str]) -> Snapshot {
         }
         if let Some((path, rest)) = pane.split_last() {
             let flag = if rest.first().is_some_and(|id| hidden.contains(id)) { "1" } else { "" };
-            text += &format!("{PANE_MARK}{}{SEP}{flag}{SEP}{path}", rest.join(&sep));
+            // No transcript, asks or registered command.
+            text += &format!("{PANE_MARK}{}{SEP}{flag}{SEP}{SEP}{SEP}{SEP}{path}", rest.join(&sep));
         }
     }
     parse(&text)
@@ -211,6 +220,17 @@ mod tests {
         ]);
         let stale: Vec<_> = snap.unique_panes().filter_map(|(_, _, p)| p.agent.as_ref()).map(|a| a.stale).collect();
         assert_eq!(stale, [false, true, true, true], "killed without its exit hook, or the tool says so");
+    }
+
+    #[test]
+    fn an_agent_whose_pane_runs_something_else_is_unconfirmed() {
+        let pane = |command: &str, registered: &str| {
+            let flat = format!("host{SESSION_MARK}$1{SEP}s{WINDOW_MARK}@1{SEP}1{SEP}w{SEP}1{SEP}0{PANE_MARK}%1{SEP}0{SEP}1{SEP}{command}{SEP}{SEP}working{SEP}0{SEP}claude{SEP}{SEP}{SEP}{SEP}{SEP}{SEP}{SEP}{SEP}{registered}{SEP}/a");
+            parse(&flat).agent("%1").map(|a| a.stale)
+        };
+        assert_eq!(pane("claude", "claude"), Some(false));
+        assert_eq!(pane("nvim", "claude"), Some(true), "an editor where the agent was");
+        assert_eq!(pane("nvim", ""), Some(false), "nothing recorded (an older agent-status): as before");
     }
 
     #[test]
