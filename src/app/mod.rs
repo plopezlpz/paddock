@@ -425,7 +425,12 @@ impl App {
         } else {
             self.rebuild(first);
         }
-        // The menu's row went away: its items would act on the next one.
+        self.close_stale_menu();
+    }
+
+    /// The menu's row went away (a snapshot, or a note that no longer
+    /// matches the filter): its items would act on the next one.
+    fn close_stale_menu(&mut self) {
         if let Mode::Menu(m) = &self.mode
             && (m.target.as_ref() != self.selected_target() || m.hidden != self.hidden_selected())
         {
@@ -557,7 +562,7 @@ impl App {
                 // The agent in the window selected before (a tab change from
                 // sessions), else in the current one.
                 let window = match &keep {
-                    Some(Target::Window { window, .. }) => window.clone(),
+                    Some(Target::Window { window, .. } | Target::Pane { window, .. }) => window.clone(),
                     _ => self.current_window.clone(),
                 };
                 self.agent_in(&window)
@@ -570,6 +575,7 @@ impl App {
         {
             self.selected = i;
         }
+        self.close_stale_menu();
     }
 
     /// The card of WINDOW's active pane, else of its first agent.
@@ -1148,6 +1154,9 @@ impl App {
             (Mode::Menu(_), _) => self.mode = Mode::List,
             (Mode::Confirm(_), Command::Confirm) => {
                 let Mode::Confirm(c) = std::mem::replace(&mut self.mode, Mode::List) else { unreachable!() };
+                if c.dropped {
+                    self.keep = None;
+                }
                 return Action::Run(c.job);
             }
             // A question a drop asked: the row carried is put down.
@@ -1192,6 +1201,7 @@ impl App {
                 self.group = self.group.next();
                 self.rebuild(false);
             }
+            Command::Preview if !self.preview_fits => self.note("no room for the preview here"),
             Command::Preview => self.preview = Some(!self.preview_on(self.compact)),
             Command::Type => self.start_typing(),
             Command::Next => self.go_next(),

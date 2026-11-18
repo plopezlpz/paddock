@@ -1371,6 +1371,17 @@ fn kills_ask_first_and_say_what_runs_there() {
 }
 
 #[test]
+fn a_swap_with_a_row_the_filter_hides_names_it() {
+    let snap = fixture(&["$1|s|@1|1|edit|1|0|%1|0|1|zsh|||||||||/a", "$1|s|@2|2|logs|0|0|%2|0|1|zsh|||||||||/a", "$1|s|@3|3|mail|0|0|%3|0|1|zsh|||||||||/a"]);
+    let mut app = new(snap, Tab::Sessions, "@1");
+    type_(&mut app, "i");
+    select(&mut app, window("$1", "@1"));
+    let j = job(app.on_key(key(KeyCode::Down, KeyModifiers::SHIFT)));
+    assert_eq!(j.op, Op::SwapWindows { session: "$1".into(), a: "@1".into(), b: "@2".into() });
+    assert_eq!(j.done, "moved below logs");
+}
+
+#[test]
 fn shift_arrows_swap_neighbours_and_cross_at_the_ends() {
     let shift = |app: &mut App, code| app.on_key(key(code, KeyModifiers::SHIFT));
     let mut app = sessions_app("@1");

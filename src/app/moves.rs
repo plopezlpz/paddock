@@ -100,7 +100,8 @@ impl App {
         let neighbour = if down { ws.get(wi + 1) } else { wi.checked_sub(1).map(|i| &ws[i]) };
         if let Some(n) = neighbour.filter(|n| n.id != window) {
             let op = Op::SwapWindows { session: session.into(), a: window.into(), b: n.id.clone() };
-            return Ok((Job::new(op.clone(), if down { "moved down" } else { "moved up" }).undo(Some(op)).follow(window), None));
+            let listed = self.position(&Target::Window { session: session.into(), window: n.id.clone() }).is_some();
+            return Ok((Job::new(op.clone(), moved(down, listed, &n.name)).undo(Some(op)).follow(window), None));
         }
         if !self.caps.cross_session_moves {
             return Err(format!("already the {} {win} in its session", if down { "last" } else { "first" }));
@@ -138,7 +139,8 @@ impl App {
         let neighbour = if down { ps.get(pi + 1) } else { pi.checked_sub(1).map(|i| &ps[i]) };
         if let Some(n) = neighbour {
             let op = Op::SwapPanes(pane.into(), n.id.clone());
-            return Ok((Job::new(op.clone(), if down { "moved down" } else { "moved up" }).undo(Some(op)).follow(pane), None));
+            let listed = self.position(&Target::Pane { session: session.into(), window: window.into(), pane: n.id.clone() }).is_some();
+            return Ok((Job::new(op.clone(), moved(down, listed, &n.command)).undo(Some(op)).follow(pane), None));
         }
         // Into the next (previous) window, in tree order across sessions
         // (its own only, if panes stay in theirs).
@@ -266,6 +268,10 @@ impl App {
                 let action = self.maybe_confirm(job, question);
                 if let Mode::Confirm(c) = &mut self.mode {
                     c.dropped = true;
+                } else {
+                    // Kept no longer: moved, it is selected where it lands
+                    // (follow); refused, the filter lists it only if it matches.
+                    self.keep = None;
                 }
                 action
             }
@@ -290,5 +296,16 @@ impl App {
     /// Whether the selected row is a window or a pane to move (sessions tab).
     pub(super) fn movable(&self) -> bool {
         self.tab == Tab::Sessions && matches!(self.selected_target(), Some(Target::Window { .. } | Target::Pane { .. }))
+    }
+}
+
+/// What a swap with a neighbour says: the neighbour by NAME when the filter
+/// leaves it unlisted, as the list alone would not show the move.
+fn moved(down: bool, listed: bool, name: &str) -> String {
+    match (down, listed) {
+        (true, true) => "moved down".into(),
+        (false, true) => "moved up".into(),
+        (true, false) => format!("moved below {name}"),
+        (false, false) => format!("moved above {name}"),
     }
 }

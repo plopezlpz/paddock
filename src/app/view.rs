@@ -156,9 +156,9 @@ impl App {
                     }
                 }
                 if matches!(self.mode, Mode::Confirm(_)) && !matches!(hit, Some(Hit::Button(_))) {
-                    // Only the question's buttons answer it; anything else is no.
-                    self.mode = Mode::List;
-                    return Action::None;
+                    // Only the question's buttons answer it; anything else is
+                    // no (a drop's: the row carried is put down).
+                    return self.run(Command::Cancel);
                 }
                 // A click on the row being named does nothing (the "+ new" row
                 // names nothing, so it is no hit); elsewhere, how to finish.
