@@ -1133,11 +1133,12 @@ pub struct Rex {
     state: Saved,
     state_path: PathBuf,
     /// The last snapshot's panes, each with its status record's time (0:
-    /// none), and whether each host was in it.
+    /// none).
     live: HashMap<String, u64>,
     /// The pane each tab and session of the last snapshot shows: a jump
     /// there is a visit to it.
     fronts: HashMap<String, String>,
+    /// Whether each host was in the last snapshot.
     answered: Vec<bool>,
     /// The trouble `health` last told of.
     trouble: Option<String>,
@@ -1172,12 +1173,10 @@ pub fn connect(opts: Opts, events: impl Fn(u64, Msg) + Send + Sync + 'static) ->
     // The first answer says whether the server is there at all; the first
     // snapshot comes once the listener listens.
     let hosts = local.call(json!({ "op": "hosts" })).map(items)?;
-    // The app is a client of each host too, under the same label (an ID is
-    // this server's own).
-    let label = client.as_ref().and_then(|c| match c.starts_with("client:") {
-        true => local.call(json!({ "op": "client_label", "client": c })).map(text).ok(),
-        false => Some(c.clone()),
-    }).filter(|l| !l.is_empty());
+    // The app is a client of each host too, under the same label; an ID
+    // (resolve_client keeps one only for an app without a label) is this
+    // server's own.
+    let label = client.clone().filter(|c| !c.starts_with("client:"));
     // The hosts start connecting (a far one takes a while) as the popup
     // waits for its own server's first snapshot.
     let mut all = Vec::with_capacity(hosts.len() + 1);
@@ -1319,7 +1318,7 @@ impl Rex {
 
 impl Backend for Rex {
     fn caps(&self) -> Caps {
-        Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true }
+        Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true }
     }
 
     /// Each server's latest sessions, paddock's first, a host's under its
@@ -1393,7 +1392,7 @@ impl Backend for Rex {
                 Some(key) => json!({ "op": "send", "block": pane, "key": key }),
                 None => return Ok(()),
             },
-            Input::Paste(text) => json!({ "op": "send", "block": pane, "text": text, "paste": true }),
+            Input::Paste(text) => json!({ "op": "send", "block": pane, "text": text }),
         };
         // Not behind a long read: the loop would wait on each key.
         let host = self.host(pane);

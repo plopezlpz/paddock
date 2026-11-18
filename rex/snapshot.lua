@@ -4,7 +4,7 @@
 -- rex/worker.lua runs it for paddock. On its own it prints the snapshot as
 -- JSON, for debugging:
 --
---   rex do rex/snapshot.lua [skip=BLOCK_ID]
+--   rex do rex/snapshot.lua --json [skip=BLOCK_ID]
 --
 -- skip leaves out a block: paddock's own.
 

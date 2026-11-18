@@ -64,9 +64,9 @@ cat >"$TMP/requests" <<EOF
 {"op":"snapshot","skip":"","layout":true,"blocks":[]}
 {"op":"snapshot","skip":"$BLOCK","layout":true,"blocks":[]}
 {"op":"nonsense"}
-{"op":"send","block":"$BLOCK","text":"echo typed-$NAME","paste":false}
+{"op":"send","block":"$BLOCK","text":"echo typed-$NAME"}
 {"op":"send","block":"$BLOCK","key":{"key":"enter","mods":"","consumed_mods":"","text":"","unshifted_codepoint":0,"composing":false,"action":"press"}}
-{"op":"send","block":"$BLOCK","text":"echo pasted-$NAME","paste":true}
+{"op":"send","block":"$BLOCK","text":"echo pasted-$NAME"}
 {"op":"send","block":"$BLOCK","key":{"key":"enter","mods":"","consumed_mods":"","text":"","unshifted_codepoint":0,"composing":false,"action":"press"}}
 EOF
 rex do "$TMP/worker.lua" <"$TMP/requests" >"$TMP/answers" 2>"$TMP/worker.err"

@@ -57,8 +57,6 @@ pub struct Caps {
     pub activate_open: bool,
     /// A Rex server: a window is called a tab, and setup advice is Rex's.
     pub rex: bool,
-    /// Keys and pastes can be sent to a pane (typing mode).
-    pub send: bool,
 }
 
 impl Caps {
@@ -70,7 +68,7 @@ impl Caps {
 
 impl Default for Caps {
     fn default() -> Caps {
-        Caps { cross_session_moves: true, tmux_session_names: true, activate_open: false, rex: false, send: true }
+        Caps { cross_session_moves: true, tmux_session_names: true, activate_open: false, rex: false }
     }
 }
 
@@ -113,7 +111,7 @@ pub trait Backend {
     /// PANE's screen as lines with SGR escapes, as `capture-pane -e` prints
     /// it, and how long capturing took. tmux captures now. Rex captures in
     /// the background: this asks for a capture, unless one is under way, and
-    /// returns the one that came in since (posting `Msg::Changed` when it
+    /// returns the one that came in since (posting `Msg::Captured` when it
     /// does); None until then.
     fn capture(&mut self, pane: &str) -> Option<(Result<Vec<String>, String>, Duration)>;
 

@@ -1472,7 +1472,7 @@ fn panes_drop_into_windows_beside_panes_or_on_their_own() {
 #[test]
 fn a_server_that_keeps_moves_in_their_session_is_offered_no_others() {
     let mut app = sessions_app("@1");
-    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true };
+    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true };
     app.expanded.insert(window("$1", "@1"));
     app.refresh();
     let shift = |app: &mut App, code| app.on_key(key(code, KeyModifiers::SHIFT));
@@ -1933,7 +1933,7 @@ fn rex_app(tab: Tab) -> App {
         session("session:2", "devbox", vec![window("window:3", "1", "web", vec![pane("block:4", "1", "codex", Some("deploy"))])]),
     ]);
     let mut app = App::new(snap, tab, "session:1".into(), "window:1".into(), String::new(), true, false);
-    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true, send: true };
+    app.caps = Caps { cross_session_moves: false, tmux_session_names: false, activate_open: true, rex: true };
     app
 }
 
@@ -2147,9 +2147,6 @@ fn typing_needs_the_preview_and_the_pane() {
     app.set_snapshot(fixture(&lines.iter().map(String::as_str).collect::<Vec<_>>()));
     assert!(matches!(app.mode, Mode::List));
     assert!(matches!(&app.status, Some(Status::Failed(f)) if f.contains("closed")));
-    app.caps.send = false;
-    let view = View::new();
-    assert!(!app.hints(&view).0.iter().any(|h| h.command == Command::Type), "not offered where it can't be done");
 }
 
 #[test]

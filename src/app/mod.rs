@@ -340,9 +340,6 @@ impl App {
     /// Start typing into the selected row's pane, with the preview on.
     fn start_typing(&mut self) {
         let Some(pane) = self.rows.get(self.selected).and_then(|r| r.preview.clone()) else { return };
-        if !self.caps.send {
-            return self.note("can't type into panes here");
-        }
         if !self.preview_fits {
             return self.note("no room for the preview here");
         }

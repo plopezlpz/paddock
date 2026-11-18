@@ -91,12 +91,6 @@ function ops.hosts()
   return rex.servers()
 end
 
--- CLIENT's label: the app is a client of each host too, under that label.
-function ops.client_label(req)
-  local c = check(rex.call("client.inspect", { client_id = req.client })).client or {}
-  return (c.info or {}).label or ""
-end
-
 -- The window holding BLOCK.
 function ops.where(req)
   local d = check(rex.session.describe_block { session_id = on(PADDOCK_HERE), block_id = req.block })
@@ -287,14 +281,13 @@ function ops.send(req)
         event = { type = "key", payload = req.key },
       }))
     end
-  elseif req.paste then
+  else
+    -- Text goes as a paste: the program gets it bracketed if it asked.
     check(rex.call("block.event", {
       session_id = on(session),
       block_id = req.block,
       event = { type = "paste", payload = { text = req.text } },
     }))
-  else
-    check(block_call(session, req.block, "write", { data = req.text }))
   end
 end
 

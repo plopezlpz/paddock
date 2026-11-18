@@ -117,8 +117,8 @@ last took you to each pane, and the last tab have no place in Rex: they are
 kept in `$XDG_STATE_HOME/paddock/rex-state` (default `~/.local/state`). A
 closed pane's lines go once its server has answered without it.
 
-`rex do rex/snapshot.lua --json` prints the snapshot on its own, for
-debugging. `bash tests/rex-scripts.sh` runs the worker and the listener
+`rex do rex/snapshot.lua --json [skip=BLOCK_ID]` prints the snapshot on its
+own, for debugging (skip leaves out a block). `bash tests/rex-scripts.sh` runs the worker and the listener
 against a running Rex server, in a session of its own that it kills when
 done (`cargo test` covers what paddock makes of them, with a scripted `rex`).
 

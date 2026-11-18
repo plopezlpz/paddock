@@ -503,6 +503,7 @@ Any tool can feed paddock by setting these options on the agent's pane
 | `@agent-auto-description` | an automatic title, e.g. the first prompt, or a title written from it |
 | `@agent-state-at` | when the state last changed, in Unix seconds |
 | `@agent-transcript` | the agent's transcript file (JSON lines: Claude Code's, pi's or Codex's), for what a waiting or finished agent last said |
+| `@agent-asks` | what a waiting agent waits on: space-separated `<agent>/<tool>[#call]@<opened>` entries, oldest first; the card shows the question the first one names |
 | `@agent-command` | what ran in the pane when the agent registered (agent-status.tmux records it); something else in front, such as an editor started after the agent died without its exit hook, shows the agent with a `?` |
 
 Only `@agent-state` is required. The tool that sets them:

@@ -110,7 +110,7 @@ impl App {
             Command::Undo => !self.undo.is_empty(),
             Command::Group => self.tab == Tab::Agents,
             Command::Preview => preview_fits,
-            Command::Type => self.caps.send && preview_fits && self.rows.get(self.selected).is_some_and(|r| r.preview.is_some()),
+            Command::Type => preview_fits && self.rows.get(self.selected).is_some_and(|r| r.preview.is_some()),
             Command::Next => self.next_need().is_some(),
             _ => true,
         }
