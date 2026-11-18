@@ -1,7 +1,8 @@
 use super::*;
 use std::time::Duration;
 use crate::backend::tmux::fixture;
-use crate::model::Pane;
+use crate::model::{Pane, State};
+use crate::rows::Card;
 use crate::theme::Theme;
 use crate::diffstat::Diff;
 use crate::ui::{self, Preview};
@@ -89,7 +90,7 @@ fn find(term: &Terminal<TestBackend>, text: &str) -> (u16, u16) {
 
 fn selected_title(app: &App) -> String {
     match &app.rows[app.selected].kind {
-        RowKind::Agent { title, .. } => title.clone(),
+        RowKind::Agent(Card { title, .. }) => title.clone(),
         RowKind::Window { name, .. } => name.clone(),
         RowKind::Pane { command, .. } => command.clone(),
         RowKind::Session { name, .. } => name.clone(),
@@ -678,7 +679,7 @@ fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
     for width in [40, 80, 120] {
         let mut app = agents_app();
         for row in &mut app.rows {
-            if let RowKind::Agent { age, stale, .. } = &mut row.kind {
+            if let RowKind::Agent(Card { age, stale, .. }) = &mut row.kind {
                 *age = "5m".into();
                 *stale = true;
             }
@@ -961,7 +962,7 @@ fn searching_hidden_cards_never_changes_the_saved_expansion() {
         assert_eq!(app.rows.len(), 3);
         app.run(Command::Group);
         assert_eq!(app.hidden_expanded, expanded);
-        assert!(app.rows[1..].iter().all(|r| matches!(r.kind, RowKind::Agent { .. })));
+        assert!(app.rows[1..].iter().all(|r| matches!(r.kind, RowKind::Agent(_))));
         ctrl(&mut app, 'u');
         let heading = app.hidden_heading().unwrap();
         assert!(matches!(app.rows[heading].kind, RowKind::Hidden { expanded: open, count: 2, .. } if open == expanded));
@@ -2138,7 +2139,7 @@ fn settled_cards_show_what_was_said_and_the_changes_waiting() {
     let mut app = new(snap, Tab::Agents, "@1");
     let card = |app: &App, pane: &str| {
         app.rows.iter().find_map(|r| match (&r.kind, r.preview.as_deref()) {
-            (RowKind::Agent { note, diff, .. }, Some(p)) if p == pane => Some((note.clone(), diff.clone())),
+            (RowKind::Agent(Card { note, diff, .. }), Some(p)) if p == pane => Some((note.clone(), diff.clone())),
             _ => None,
         })
     };
