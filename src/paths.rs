@@ -101,9 +101,12 @@ pub struct PathCache {
     /// Main checkouts by linked worktree root, shared by every path inside it.
     mains: HashMap<PathBuf, Option<PathBuf>>,
     /// HEAD by file, reread only when it is modified or replaced (Git renames
-    /// a new one into place), so a row costs one stat and a branch switch
-    /// still shows on the next rebuild. None: the stamp is not to be trusted.
+    /// a new one into place), so looking costs one stat and a branch switch
+    /// still shows on the next look. None: the stamp is not to be trusted.
     heads: HashMap<PathBuf, (Option<Stamp>, Option<GitHead>)>,
+    /// HEAD by file as looked at since the last `recheck`: a rebuild per
+    /// keystroke stats none of them.
+    checked: HashMap<PathBuf, Option<GitHead>>,
 }
 
 impl PathCache {
@@ -113,14 +116,22 @@ impl PathCache {
 
     pub fn home(&self) -> &str { &self.home }
 
+    /// Look at each HEAD again when next asked for (a new snapshot, the
+    /// minute's refresh).
+    pub fn recheck(&mut self) {
+        self.checked.clear();
+    }
+
     pub fn get(&mut self, path: &str) -> AgentPath {
-        let home = &self.home;
-        let mains = &mut self.mains;
-        let repo = self.labels.entry(path.to_string()).or_insert_with(|| repository_info(Path::new(path), mains));
+        let (home, mains, heads, checked) = (&self.home, &mut self.mains, &mut self.heads, &mut self.checked);
+        let repo = self.labels.entry(path.to_string()).or_insert_with(|| repository_info(Path::new(path), home, mains));
         match repo {
             Some(repo) => AgentPath {
                 full: home_path(path, home), label: repo.label.clone(), anchor: Some(repo.anchor.clone()),
-                head: repo.head.as_deref().and_then(|file| cached_head(&mut self.heads, file)),
+                head: repo.head.as_deref().and_then(|file| match checked.get(file) {
+                    Some(head) => head.clone(),
+                    None => checked.entry(file.into()).or_insert_with(|| cached_head(heads, file)).clone(),
+                }),
             },
             None => AgentPath::plain(path, home),
         }
@@ -174,13 +185,15 @@ fn read_head(file: &Path) -> Option<GitHead> {
 
 #[cfg(test)]
 fn repository_label(path: &Path) -> Option<String> {
-    repository_info(path, &mut HashMap::new()).map(|repo| repo.label)
+    repository_info(path, "", &mut HashMap::new()).map(|repo| repo.label)
 }
 
-fn repository_info(path: &Path, mains: &mut HashMap<PathBuf, Option<PathBuf>>) -> Option<Repository> {
+fn repository_info(path: &Path, home: &str, mains: &mut HashMap<PathBuf, Option<PathBuf>>) -> Option<Repository> {
     let path = path.canonicalize().ok()?;
     let repos: Vec<&Path> = path.ancestors().filter(|p| p.join(".git").exists()).collect();
-    let outermost = *repos.last()?;
+    // HOME tracked in Git (dotfiles) anchors only what no nearer repo does.
+    let home = Path::new(home).canonicalize().ok();
+    let outermost = repos.iter().rev().find(|p| Some(**p) != home.as_deref()).or(repos.last()).copied()?;
     // The branch belongs to the nearest repository, even when the path label
     // is anchored at an enclosing repository or worktree's main checkout.
     let head = git_dir(repos[0]).map(|dir| dir.join("HEAD"));
@@ -189,11 +202,7 @@ fn repository_info(path: &Path, mains: &mut HashMap<PathBuf, Option<PathBuf>>) -
     // with --separate-git-dir. See main_worktree for locating its checkout.
     // Search nearest-first, past ordinary nested repos and submodules: they
     // must not hide an enclosing linked worktree's main-repository identity.
-    let linked = repos.iter().copied().find(|repo| {
-        let gitfile = std::fs::read_to_string(repo.join(".git")).ok();
-        gitfile.as_deref().and_then(|s| s.trim().strip_prefix("gitdir: "))
-            .is_some_and(|dir| repo.join(dir).join("commondir").is_file())
-    });
+    let linked = repos.iter().copied().find(|repo| git_dir(repo).is_some_and(|dir| dir.join("commondir").is_file()));
     let main = linked.and_then(|root| mains.entry(root.into()).or_insert_with(|| main_worktree(root)).clone());
     let anchor = main.as_deref().unwrap_or(outermost);
     let name = anchor.file_name()?.to_str()?;
@@ -215,15 +224,20 @@ fn repository_info(path: &Path, mains: &mut HashMap<PathBuf, Option<PathBuf>>) -
 
 /// The main checkout of the linked worktree at ROOT, or a bare main repo.
 fn main_worktree(root: &Path) -> Option<PathBuf> {
-    main_checkout(root).or_else(|| bare_main(root)).or_else(|| git_main_worktree(root))
+    common_dir(root).and_then(|common| main_checkout(&common).or_else(|| bare_main(common))).or_else(|| git_main_worktree(root))
 }
 
-/// A bare main repo, from files alone: the common dir, when its config says
-/// it is bare. Git reports that directory too, but costs a process each.
-fn bare_main(root: &Path) -> Option<PathBuf> {
+/// The repository directory shared by the linked worktree at ROOT: its
+/// admin directory's commondir.
+fn common_dir(root: &Path) -> Option<PathBuf> {
     let admin = git_dir(root)?;
     let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
-    let common = admin.join(common.trim_end_matches(['\r', '\n'])).canonicalize().ok()?;
+    admin.join(common.trim_end_matches(['\r', '\n'])).canonicalize().ok()
+}
+
+/// A bare main repo, from files alone: the COMMON dir, when its config says
+/// it is bare. Git reports that directory too, but costs a process each.
+fn bare_main(common: PathBuf) -> Option<PathBuf> {
     let config = std::fs::read_to_string(common.join("config")).ok()?;
     let mut core = false;
     for line in config.lines().map(str::trim) {
@@ -238,14 +252,11 @@ fn bare_main(root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The usual layout, from files alone: the admin directory's commondir is the
-/// main checkout's own .git directory (or a bare main repo named .git, whose
+/// The usual layout, from files alone: the COMMON dir is the main
+/// checkout's own .git directory (or a bare main repo named .git, whose
 /// folder is taken for its checkout). Anything else (another bare main repo,
 /// --separate-git-dir) is left to Git rather than assuming a checkout.
-fn main_checkout(root: &Path) -> Option<PathBuf> {
-    let admin = git_dir(root)?;
-    let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
-    let common = admin.join(common.trim_end_matches(['\r', '\n'])).canonicalize().ok()?;
+fn main_checkout(common: &Path) -> Option<PathBuf> {
     let main = common.parent()?;
     (main.join(".git").canonicalize().ok()? == common).then(|| main.into())
 }
@@ -310,6 +321,11 @@ mod tests {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
     }
 
+    /// The main checkout of the linked worktree at ROOT, from files alone.
+    fn checkout(root: &Path) -> Option<PathBuf> {
+        main_checkout(&common_dir(root)?)
+    }
+
     #[test]
     fn sessions_and_agents_share_paths_branches_and_fresh_heads() {
         use crate::rows::{self, Cards, Filter, Group, Notes, RowKind, Tree};
@@ -341,6 +357,7 @@ mod tests {
         }
         let snap = crate::backend::tmux::fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|task||||{}", worktree.display())]);
         f.git(&["-C", worktree.to_str().unwrap(), "checkout", "-b", "feature/searchable-branch"]);
+        cache.recheck();
         assert_eq!(path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache)).display(200),
             "project/…/topic (feature/searchable-branch)", "cached discovery still rereads HEAD");
         for query in [worktree.to_str().unwrap(), "'~/containers/topic", "'project/…/topic", "'feature/searchable-branch"] {
@@ -348,6 +365,7 @@ mod tests {
             assert!(rows::sessions(&snap, &mut filter, &tree, &mut cache).iter().any(|r| matches!(r.kind, RowKind::Window { .. })), "{query}");
         }
         f.git(&["-C", worktree.to_str().unwrap(), "checkout", "--detach"]);
+        cache.recheck();
         let session = path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache));
         let agent = path_of(rows::agents(&snap, &mut Filter::new(), &cards, &mut cache));
         assert_eq!(session.display(200), agent.display(200));
@@ -394,6 +412,23 @@ mod tests {
         let plain = PathCache::new("/home/me".into()).get("/home/me/project");
         assert_eq!(plain.full, "~/project");
         assert_eq!(plain.display(40), "~/project");
+    }
+
+    #[test]
+    fn a_home_in_git_anchors_only_what_no_nearer_repo_does() {
+        let f = Fixture::new();
+        f.git(&["init", f.0.to_str().unwrap()]);
+        let src = f.0.join("source/project/src");
+        f.git(&["init", f.0.join("source/project").to_str().unwrap()]);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(f.0.join("notes")).unwrap();
+        let name = f.0.file_name().unwrap().to_str().unwrap();
+        assert_eq!(repository_label(&src).unwrap(), format!("{name}/source/project/src"), "any other outermost repo anchors");
+        let mut cache = PathCache::new(f.0.to_str().unwrap().into());
+        let path = cache.get(src.to_str().unwrap());
+        assert_eq!(path.display(200), "project/src (main)");
+        assert_eq!(path.repo().unwrap().0, "project", "its own folder group");
+        assert_eq!(cache.get(f.0.join("notes").to_str().unwrap()).display(200), format!("{name}/notes (main)"));
     }
 
     #[test]
@@ -464,7 +499,7 @@ mod tests {
         f.git(&["-C", main.to_str().unwrap(), "commit", "--allow-empty", "-m", "initial"]);
         let root = f.0.join("worktrees/topic");
         f.git(&["-C", main.to_str().unwrap(), "worktree", "add", "-b", "topic", root.to_str().unwrap()]);
-        assert!(main_checkout(&root).is_none(), "the common dir's parent is not a checkout");
+        assert!(checkout(&root).is_none(), "the common dir's parent is not a checkout");
         assert!(main_worktree(&root).is_none(), "Git only reports the separate admin directory");
         assert_eq!(repository_label(&root).unwrap(), "topic");
     }
@@ -477,8 +512,8 @@ mod tests {
         f.git(&["-C", main.to_str().unwrap(), "commit", "--allow-empty", "-m", "initial"]);
         let root = f.0.join("worktrees/topic");
         f.git(&["-C", main.to_str().unwrap(), "worktree", "add", "-b", "topic", root.to_str().unwrap()]);
-        assert_eq!(main_checkout(&root), Some(main.clone()), "no Git process for the usual layout");
-        assert!(main_checkout(&main).is_none(), "a main checkout is not a linked worktree");
+        assert_eq!(checkout(&root), Some(main.clone()), "no Git process for the usual layout");
+        assert!(checkout(&main).is_none(), "a main checkout is not a linked worktree");
         let mut cache = PathCache::new(f.0.to_str().unwrap().into());
         for dir in [root.clone(), root.join("src"), root.join("src/deep")] {
             std::fs::create_dir_all(&dir).unwrap();
@@ -494,8 +529,8 @@ mod tests {
         f.git(&["clone", "--bare", main.to_str().unwrap(), bare.to_str().unwrap()]);
         let linked = f.0.join("bare-topic");
         f.git(&["-C", bare.to_str().unwrap(), "worktree", "add", "-b", "bare-topic", linked.to_str().unwrap()]);
-        assert!(main_checkout(&linked).is_none());
-        assert_eq!(bare_main(&linked), Some(bare.clone()), "no Git process for a bare main repo either");
+        assert!(checkout(&linked).is_none());
+        assert_eq!(common_dir(&linked).and_then(bare_main), Some(bare.clone()), "no Git process for a bare main repo either");
         assert_eq!(main_worktree(&linked), Some(bare));
         assert_eq!(repository_label(&linked).unwrap(), "bare.git/…/bare-topic");
         // One named .git is taken for its folder's checkout.
@@ -503,7 +538,7 @@ mod tests {
         f.git(&["clone", "--bare", main.to_str().unwrap(), dotgit.join(".git").to_str().unwrap()]);
         let linked = f.0.join("dotgit-topic");
         f.git(&["-C", dotgit.join(".git").to_str().unwrap(), "worktree", "add", "-b", "dotgit-topic", linked.to_str().unwrap()]);
-        assert_eq!(main_checkout(&linked), Some(dotgit));
+        assert_eq!(checkout(&linked), Some(dotgit));
     }
 
     #[test]
@@ -557,6 +592,8 @@ mod tests {
         let mut cache = PathCache::new(f.0.to_str().unwrap().into());
         assert_eq!(cache.get(root).display(80), "project (main)");
         f.git(&["-C", root, "checkout", "-b", "feature/searchable-branch"]);
+        assert_eq!(cache.get(root).display(80), "project (main)", "HEAD is looked at once per recheck, not per row");
+        cache.recheck();
         assert_eq!(cache.get(root).display(80), "project (feature/searchable-branch)", "HEAD is refreshed even when discovery is cached");
         assert_eq!(crate::notification::format("finished", "claude", root, "", crate::theme::AgentIcons::Unicode), "✳ finished\nproject (feature/searchable-branch)");
         let line = format!("$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||||{root}");
@@ -571,6 +608,7 @@ mod tests {
             assert!(crate::rows::agents(&snap, &mut filter, &cards, &mut cache).is_empty());
         }
         f.git(&["-C", root, "checkout", "--detach"]);
+        cache.recheck();
         let path = cache.get(root);
         let head = path.head.as_ref().unwrap();
         assert!(head.detached);
@@ -591,12 +629,14 @@ mod tests {
         let mut cache = PathCache::default();
         assert_eq!(cache.get(nested.to_str().unwrap()).display(80), "project/nested (child-branch)");
         f.git(&["-C", nested.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/nested"]);
+        cache.recheck();
         let path = cache.get(nested.to_str().unwrap());
         assert_eq!(path.display(80), "project/nested (nested)");
         assert_eq!(crate::notification::format("asking", "pi", nested.to_str().unwrap(), "", crate::theme::AgentIcons::Unicode), "π waiting\nproject/nested (nested)");
         assert_eq!(path.head.as_ref().unwrap().name, "nested");
         assert!(path.search_text().ends_with(" nested"));
         std::fs::write(nested.join(".git/HEAD"), "not a valid HEAD\n").unwrap();
+        cache.recheck();
         assert_eq!(cache.get(nested.to_str().unwrap()).display(80), "project/nested");
     }
 

@@ -402,20 +402,15 @@ fn run(tab: Option<Tab>, server: Server) -> Result<(), String> {
     let mut saved = popup.app.tab;
     let result = (|| -> Result<Option<Target>, String> {
         loop {
-            popup.tick(backend.as_mut(), &view)?;
+            // Laid out for the terminal's size (a resize is an event: a redraw).
+            popup.app.set_layout(ui::layout(tui.0.size().map_err(|e| e.to_string())?));
+            popup.tick(backend.as_mut())?;
             if popup.dirty {
                 let live = &popup.live;
                 let title = live.pane.as_deref().map(|p| rows::pane_title(&popup.app.snap, p)).unwrap_or_default();
                 let preview = Preview { title: &title, body: &live.body };
                 tui.0.draw(|f| ui::draw(f, &popup.app, &mut view, &preview, &popup.theme)).map_err(|e| e.to_string())?;
                 popup.dirty = false;
-                popup.app.set_preview_fits(view.preview_fits);
-                popup.app.compact = view.compact;
-                if popup.app.preview_pane(&view) != popup.live.pane.as_deref() {
-                    // The preview just appeared or went away: follow it now.
-                    popup.dirty = true;
-                    continue;
-                }
             }
             let ev = match rx.recv_timeout(popup.deadline().saturating_duration_since(Instant::now())) {
                 Ok(ev) => Some(ev),
@@ -543,11 +538,11 @@ impl Popup {
         }
     }
 
-    /// The preview follows the selection while it is on screen (the last
-    /// draw says whether there was room for it): a capture that is due or
-    /// in goes in the next draw. News of the connection shows too.
-    fn tick(&mut self, backend: &mut dyn Backend, view: &View) -> Result<(), String> {
-        self.live.follow(self.app.preview_pane(view));
+    /// The preview follows the selection while it is on screen: a capture
+    /// that is due or in goes in the next draw. News of the connection
+    /// shows too.
+    fn tick(&mut self, backend: &mut dyn Backend) -> Result<(), String> {
+        self.live.follow(self.app.preview_pane());
         self.dirty |= self.live.tick(backend);
         if backend.is_dead() {
             return Err("the server stopped answering".into());
@@ -596,26 +591,22 @@ impl Popup {
                     };
                     match action {
                         Action::Quit => return Ok(Flow::Close(None)),
-                        Action::Activate(t) if !app.caps.activate_open => return Ok(Flow::Close(Some(t))),
-                        Action::Activate(t) => match backend.activate(&t) {
-                            Ok(()) => return Ok(Flow::Close(None)),
-                            Err(e) => app.status = Some(app::Status::Failed(e)),
-                        },
+                        Action::Activate(t) => {
+                            if let Some(flow) = go(app, backend, t) {
+                                return Ok(flow);
+                            }
+                        }
                         Action::Run(job) => {
                             let Ran { moved, result, unsure } = backend.run(&job.op);
                             let job = if unsure { job.unsure() } else { job };
                             for session in &moved {
                                 app.moved(session);
                             }
-                            if let Some(created) = app.ran(job, result) {
-                                if !app.caps.activate_open {
-                                    return Ok(Flow::Close(Some(created)));
-                                }
-                                // As any jump there: a failure stays in the popup.
-                                match backend.activate(&created) {
-                                    Ok(()) => return Ok(Flow::Close(None)),
-                                    Err(e) => app.status = Some(app::Status::Failed(e)),
-                                }
+                            // What it created is shown as any jump there.
+                            if let Some(created) = app.ran(job, result)
+                                && let Some(flow) = go(app, backend, created)
+                            {
+                                return Ok(flow);
                             }
                             // Show the result now, not at the next subscription
                             // check.
@@ -666,6 +657,16 @@ impl Popup {
             }
             ev = rx.try_recv().ok();
         }
+        self.catch_up(backend, stale, ran, fresh)?;
+        Ok(Flow::Stay)
+    }
+
+    /// After a burst of events: give up on a suggestion past its deadline,
+    /// show the snapshot they call for (STALE: fetch one; RAN: an op ran;
+    /// FRESH: the subscription's latest), ask the workers what changed, and
+    /// tick ages over each minute.
+    fn catch_up(&mut self, backend: &mut dyn Backend, stale: bool, ran: bool, fresh: Option<model::Snapshot>) -> Result<(), String> {
+        let app = &mut self.app;
         if let Some(s) = &self.suggestion
             && Instant::now() >= s.deadline
         {
@@ -708,7 +709,22 @@ impl Popup {
             // Folders change by hand too, and transcripts late.
             self.ask(true, true, true);
         }
-        Ok(Flow::Stay)
+        Ok(())
+    }
+}
+
+/// Show TARGET as the server does: close first, then show it (tmux), or
+/// show it, then close (Rex), a failure staying in the popup. None: stay.
+fn go(app: &mut App, backend: &mut dyn Backend, target: Target) -> Option<Flow> {
+    if !app.caps.activate_open {
+        return Some(Flow::Close(Some(target)));
+    }
+    match backend.activate(&target) {
+        Ok(()) => Some(Flow::Close(None)),
+        Err(e) => {
+            app.status = Some(app::Status::Failed(e));
+            None
+        }
     }
 }
 
@@ -1008,16 +1024,16 @@ mod tests {
         let mut fake = Fake { text: windows(&["@1:a", "@2:b"]), ..Fake::default() };
         let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
         let view = View::new();
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert_eq!(fake.captured, ["%1"]);
         assert_eq!(p.live.pane.as_deref(), Some("%1"));
         p.handle(key(KeyCode::Down, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert_eq!(fake.captured, ["%1", "%2"], "captured at once, not at the next due time");
         assert!(p.dirty);
         // Off: nothing is captured.
         p.app.preview = Some(false);
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert_eq!((fake.captured.len(), p.live.pane.as_deref()), (2, None));
     }
 
@@ -1084,14 +1100,14 @@ mod tests {
         let (mut p, _tx, rx) = popup(&mut fake, window("@1"));
         let view = View::new();
         fake.news = Some(Err("devbox stopped answering (trying again)".into()));
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert!(p.dirty && p.app.trouble.is_some());
         // A key clears what else was said, not that: the list may be stale.
         p.handle(key(KeyCode::Down, KeyModifiers::NONE), &rx, &mut fake, &view).unwrap();
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert_eq!((p.app.trouble.as_deref(), &p.app.status), (Some("devbox stopped answering (trying again)"), &None));
         fake.news = Some(Ok("every server is answering again".into()));
-        p.tick(&mut fake, &view).unwrap();
+        p.tick(&mut fake).unwrap();
         assert_eq!((&p.app.trouble, &p.app.status), (&None, &Some(Status::Note("every server is answering again".into()))));
     }
 

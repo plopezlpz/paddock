@@ -243,6 +243,16 @@ impl Snapshot {
         Some(Target::Pane { session: s.id.clone(), window: w.id.clone(), pane: id.to_string() })
     }
 
+    /// TARGET as reached from SESSION: a pane in SESSION when it shows it
+    /// too (grouped sessions, linked windows), not in whichever lists it
+    /// first.
+    pub fn local(&self, target: Target, session: &str) -> Target {
+        match &target {
+            Target::Pane { pane, .. } => self.place_in(pane, session).unwrap_or(target),
+            _ => target,
+        }
+    }
+
     /// The next agent that needs you: the queue lists waiting agents before
     /// finished ones, each the longest in its state first (hidden and
     /// unconfirmed ones left out). From one of them, the next in the queue

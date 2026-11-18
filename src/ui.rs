@@ -3,7 +3,7 @@
 //! for the mouse.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
@@ -116,9 +116,17 @@ pub struct Preview<'a> {
     pub body: &'a Text<'static>,
 }
 
+/// The layout a terminal of SIZE gets: whether it is compact (a phone), and
+/// whether the preview has room, beside the list (within the frame) or
+/// below it.
+pub fn layout(size: Size) -> (bool, bool) {
+    let beside = size.width.saturating_sub(2) >= PREVIEW_FROM;
+    (size.width < COMPACT_BELOW, beside || size.height >= PREVIEW_BELOW_FROM)
+}
+
+/// The popup, in the layout the app was given for this frame's size.
 pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t: &Theme) {
     let area = f.area();
-    view.compact = area.width < COMPACT_BELOW;
     view.clear();
 
     // Frame title: the tabs (buttons) on the left, the agent counts on the right.
@@ -175,15 +183,14 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     let pad = |r: Rect| Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r };
 
-    draw_input(f, app, view.compact, pad(input), t);
+    draw_input(f, app, app.compact, pad(input), t);
 
     let beside = body.width >= PREVIEW_FROM;
-    view.preview_fits = beside || area.height >= PREVIEW_BELOW_FROM;
     // Nothing listed: no preview either, and the list's hint has the room;
     // but typing keeps it, as the keys go on to that pane (its agent may have
     // exited and left the list, its pane staying).
     let typing = matches!(app.mode, Mode::Type(_));
-    let (list, side) = if !(app.preview_on(view.compact) && view.preview_fits) || (app.rows.is_empty() && !typing) {
+    let (list, side) = if !(app.preview_on() && app.preview_fits) || (app.rows.is_empty() && !typing) {
         (body, None)
     } else if beside {
         let [l, r] = Layout::horizontal([Constraint::Length((body.width / 2).min(LIST_MAX)), Constraint::Fill(1)]).areas(body);
@@ -293,7 +300,7 @@ fn draw_input(f: &mut Frame, app: &App, compact: bool, area: Rect, t: &Theme) {
 /// the rest doesn't fit, the least needed go (the list's menu, always
 /// shown, has them all).
 fn draw_footer(f: &mut Frame, app: &App, view: &mut View, words: bool, area: Rect, t: &Theme) {
-    let (hints, last) = app.hints(view);
+    let (hints, last) = app.hints();
     let text = |h: &Hint| if words { h.label.clone() } else { format!("{} {}", h.key, h.label) };
     let room = (area.width as usize).saturating_sub(text(&last).width() + GAP.len());
     // Columns the SHOWN hints take.
@@ -643,7 +650,7 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
 }
 
 fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
-    view.scroll(&app.rows, app.selected, area.height);
+    view.scroll(&app.rows, app.selected, app.compact, area.height);
     let renaming = match &app.mode {
         Mode::Rename(r) => Some(r),
         _ => None,
@@ -656,7 +663,7 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         if y >= area.bottom() {
             break;
         }
-        let h = row.height(view.compact);
+        let h = row.height(app.compact);
         if y + h >= area.bottom() {
             bottom = Some(i);
         }
@@ -666,15 +673,15 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         }
         if let RowKind::Hidden { gap, .. } = row.kind {
             // The blank spacer above the heading is not a click target.
-            let head_y = y + u16::from(gap && !view.compact);
+            let head_y = y + u16::from(gap && !app.compact);
             if head_y < area.bottom() {
                 view.hidden = Some(Rect::new(area.x, head_y, area.width, 1));
             }
         }
         let (mut drawn, toggle) = match (&app.mode, renaming.filter(|r| row.target.as_ref() == Some(&r.target))) {
-            (_, Some(r)) => (rename_lines(row, r, view.compact, area.width, t), None),
-            (Mode::Create(c), None) if matches!(row.kind, RowKind::New) => (create_lines(c, view.compact, area.width, app.home(), app.caps.window(), t), None),
-            _ => row_lines(row, i == app.selected, view.compact, area.width, Some(&app.filter), app.caps.window(), t),
+            (_, Some(r)) => (rename_lines(row, r, app.compact, area.width, t), None),
+            (Mode::Create(c), None) if matches!(row.kind, RowKind::New) => (create_lines(c, app.compact, area.width, app.home(), app.caps.window(), t), None),
+            _ => row_lines(row, i == app.selected, app.compact, area.width, Some(&app.filter), app.caps.window(), t),
         };
         if let Mode::Move(carry) = &app.mode {
             if row.target.as_ref() == Some(&carry.target)
@@ -726,7 +733,7 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
     }
     // What the list holds past either edge, at the right end of the line
     // above it (the blank under the input) and of its last line.
-    let (above, below) = beyond(&app.rows, view.offset, view.compact, area.height);
+    let (above, below) = beyond(&app.rows, view.offset, app.compact, area.height);
     let width = area.width as usize;
     let more = |arrow: &str, n: usize| Span::styled(format!("{arrow} {n} more"), t.muted());
     if above > 0 && area.y > 0 && area.height > 0 {
@@ -993,7 +1000,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    fn render(app: &App, view: &mut View, width: u16, height: u16, title: &str) -> Terminal<TestBackend> {
+    fn render(app: &mut App, view: &mut View, width: u16, height: u16, title: &str) -> Terminal<TestBackend> {
+        app.set_layout(layout(Size::new(width, height)));
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
         let body = Text::default();
         term.draw(|f| draw(f, app, view, &Preview { title, body: &body }, &Theme::default())).unwrap();
@@ -1146,7 +1154,7 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         for width in 16..70 {
-            let screen = screen(&render(&app, &mut View::new(), width, 10, ""));
+            let screen = screen(&render(&mut app, &mut View::new(), width, 10, ""));
             for l in screen.iter().filter(|l| l.contains('↓')) {
                 // The title whole or fitted (…), the place whole or gone.
                 let (_, end) = l.split_at(l.find('↓').unwrap());
@@ -1167,7 +1175,7 @@ mod tests {
         }
         for width in 30..70 {
             // Input, blank, then a header, a card and the first line of the next.
-            let lines = screen(&render(&app, &mut View::new(), width, 9, ""));
+            let lines = screen(&render(&mut app, &mut View::new(), width, 9, ""));
             let last = lines.iter().find(|l| l.contains('↓')).unwrap_or_else(|| panic!("{width}: {lines:#?}"));
             assert!(!last.contains('+') || last.contains("+1204 −3670 · 2 untracked"), "{width}: {lines:#?}");
         }
@@ -1178,7 +1186,7 @@ mod tests {
         let mut app = many_agents();
         let mut view = View::new();
         // No room for the preview. Input, blank, then 5 list lines: a header and two cards.
-        let term = render(&app, &mut view, 60, 10, "");
+        let term = render(&mut app, &mut view, 60, 10, "");
         let lines = screen(&term);
         assert!(!lines[2].contains('↑'), "{lines:#?}");
         assert!(lines[7].ends_with("↓ 4 more │"), "on the last list line: {lines:#?}");
@@ -1188,7 +1196,7 @@ mod tests {
         for _ in 0..5 {
             app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
-        let term = render(&app, &mut view, 60, 10, "");
+        let term = render(&mut app, &mut view, 60, 10, "");
         let lines = screen(&term);
         assert!(lines[2].ends_with("↑ 4 more │"), "on the blank under the input: {lines:#?}");
         assert!(!lines.iter().any(|l| l.contains('↓')), "{lines:#?}");
@@ -1198,12 +1206,12 @@ mod tests {
         // on the last line, the mark shows only where it covers none of it.
         let mut app = many_agents();
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        let wide = screen(&render(&app, &mut View::new(), 60, 10, ""));
+        let wide = screen(&render(&mut app, &mut View::new(), 60, 10, ""));
         assert!(wide[7].contains("/a2") && wide[7].ends_with("↓ 4 more │"), "beside it: {wide:#?}");
-        let narrow = screen(&render(&app, &mut View::new(), 17, 10, ""));
+        let narrow = screen(&render(&mut app, &mut View::new(), 17, 10, ""));
         assert!(narrow[7].contains("/a2") && !narrow[7].contains('↓'), "not over it: {narrow:#?}");
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        let narrow = screen(&render(&app, &mut View::new(), 17, 10, ""));
+        let narrow = screen(&render(&mut app, &mut View::new(), 17, 10, ""));
         assert!(narrow[7].ends_with("↓ 4 more │"), "over another row's: {narrow:#?}");
     }
 
@@ -1213,10 +1221,10 @@ mod tests {
         let name = "n".repeat(60);
         let lines: Vec<String> = (1..=8).flat_map(|i| (0..2).map(move |p| (i, p))).map(|(i, p)| format!("$1|s|@{i}|{i}|{name}|{}|0|%{}|{p}|{}|zsh|||||||||/a", u8::from(i == 1), i * 2 + p, u8::from(p == 0))).collect();
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let app = App::new(crate::backend::tmux::fixture(&lines), Tab::Sessions, "$1".into(), "@1".into(), String::new(), false, false);
+        let mut app = App::new(crate::backend::tmux::fixture(&lines), Tab::Sessions, "$1".into(), "@1".into(), String::new(), false, false);
         for (width, height) in [(40, 9), (60, 9), (90, 9), (40, 12)] {
             let mut view = View::new();
-            let term = render(&app, &mut view, width, height, "");
+            let term = render(&mut app, &mut view, width, height, "");
             let lines = screen(&term);
             let y = lines.iter().position(|l| l.contains('↓')).unwrap_or_else(|| panic!("{lines:#?}")) as u16;
             let at = lines[y as usize].chars().position(|c| c == '↓').unwrap() as u16;
@@ -1225,7 +1233,7 @@ mod tests {
         }
         for width in 0..90 {
             for height in 0..14 {
-                render(&app, &mut View::new(), width, height, "");
+                render(&mut app, &mut View::new(), width, height, "");
             }
         }
     }
@@ -1235,13 +1243,13 @@ mod tests {
         let mut app = many_agents();
         let mut view = View::new();
         let size = (60, 10);
-        render(&app, &mut view, size.0, size.1, "");
+        render(&mut app, &mut view, size.0, size.1, "");
         app.run(Command::Menu);
         let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
         let n = menu.items.len();
         assert!(n > 8, "more items than the popup has lines: {n}");
         for step in 0..=n {
-            let term = render(&app, &mut view, size.0, size.1, "");
+            let term = render(&mut app, &mut view, size.0, size.1, "");
             let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
             assert_eq!(menu.selected, step % n, "wraps");
             let lines = screen(&term);
@@ -1259,7 +1267,7 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        render(&app, &mut view, size.0, size.1, "");
+        render(&mut app, &mut view, size.0, size.1, "");
         let Mode::Menu(menu) = &app.mode else { panic!("no menu") };
         assert!(view.items.iter().any(|(_, i)| *i == menu.selected), "wrapping up to the end shows it");
     }
@@ -1271,7 +1279,7 @@ mod tests {
         let title = format!("session:1.1 · {}", "x".repeat(200));
         for (width, height) in [(120, 20), (70, 30)] {
             let mut view = View::new();
-            let lines = screen(&render(&app, &mut view, width, height, &title));
+            let lines = screen(&render(&mut app, &mut view, width, height, &title));
             assert!(lines.iter().any(|l| l.contains("session:1.1 · xxx") && l.contains("x…")), "{width}: {lines:#?}");
         }
     }
@@ -1284,7 +1292,7 @@ mod tests {
         app.run(Command::Move);
         assert!(matches!(app.mode, Mode::Move(_)));
         for width in [80, 90, 120] {
-            let lines = screen(&render(&app, &mut View::new(), width, 12, ""));
+            let lines = screen(&render(&mut app, &mut View::new(), width, 12, ""));
             assert!(lines[1].contains("› filter") && lines[1].contains("⇅ moving") && lines[1].contains('…'), "{width}: {lines:#?}");
         }
         app.run(Command::Cancel);

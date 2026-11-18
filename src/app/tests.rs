@@ -9,6 +9,7 @@ use crate::ui::{self, Preview};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyEventKind, KeyEventState, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Size;
 use ratatui::style::Modifier;
 use ratatui::text::Text;
 
@@ -68,7 +69,9 @@ fn click(app: &mut App, view: &View, button: MouseButton, at: (u16, u16)) -> Act
     click_at(app, view, button, at, Instant::now())
 }
 
-fn draw(app: &App, view: &mut View, width: u16, height: u16) -> Terminal<TestBackend> {
+/// APP drawn in a WIDTH by HEIGHT terminal, laid out for it as the loop does.
+fn draw(app: &mut App, view: &mut View, width: u16, height: u16) -> Terminal<TestBackend> {
+    app.set_layout(ui::layout(Size::new(width, height)));
     let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
     let body = Text::default();
     term.draw(|f| ui::draw(f, app, view, &Preview { title: "", body: &body }, &Theme::default())).unwrap();
@@ -193,11 +196,11 @@ fn a_window_without_panes_opens_and_draws() {
     let snap = fixture(&["$1|s|@1|1|w|1|0|broken", "$1|s|@2|2|v|0|0|%2|0|1|claude||working|0|claude|two||||/a"]);
     let mut app = new(snap, Tab::Sessions, "@1");
     assert_eq!(app.selected_target(), Some(&Target::Window { session: "$1".into(), window: "@1".into() }));
-    assert_eq!(app.preview_pane(&View::new()), None);
+    assert_eq!(app.preview_pane(), None);
     app.expand(Some(true));
-    draw(&app, &mut View::new(), 80, 12);
+    draw(&mut app, &mut View::new(), 80, 12);
     app.run(Command::Tab(Tab::Agents));
-    draw(&app, &mut View::new(), 80, 12);
+    draw(&mut app, &mut View::new(), 80, 12);
 }
 
 #[test]
@@ -255,14 +258,14 @@ fn scrolling_keeps_the_group_header_and_fills_the_viewport() {
     let app = agents_app();
     let mut view = View::new();
     // Room for two cards (3 lines each) and a header.
-    view.scroll(&app.rows, 5, 7);
+    view.scroll(&app.rows, 5, false, 7);
     assert_eq!(view.offset, 3, "header of the second group, then its cards");
     view.offset = 4;
-    view.scroll(&app.rows, 4, 7);
+    view.scroll(&app.rows, 4, false, 7);
     assert_eq!(view.offset, 3, "scrolling up to a group's first card shows its header");
     // Rows shrink below the offset: pull back instead of showing blanks.
     view.offset = 5;
-    view.scroll(&app.rows, 5, 100);
+    view.scroll(&app.rows, 5, false, 100);
     assert_eq!(view.offset, 0);
 }
 
@@ -274,11 +277,11 @@ fn scrolling_keeps_a_windows_session_in_view() {
     let mut view = View::new();
     // Scrolled up onto logs, the second window of work: work shows above it.
     view.offset = logs;
-    view.scroll(&app.rows, logs, 4);
+    view.scroll(&app.rows, logs, false, 4);
     assert_eq!(view.offset, work);
     // No room for both: the selection wins.
     view.offset = logs;
-    view.scroll(&app.rows, logs, 1);
+    view.scroll(&app.rows, logs, false, 1);
     assert_eq!(view.offset, logs);
 }
 
@@ -286,7 +289,7 @@ fn scrolling_keeps_a_windows_session_in_view() {
 fn a_double_click_opens_and_a_single_one_selects() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     let t0 = Instant::now();
     let at = find(&term, "two");
     assert!(matches!(click_at(&mut app, &view, MouseButton::Left, at, t0), Action::None));
@@ -301,7 +304,7 @@ fn a_double_click_opens_and_a_single_one_selects() {
 fn opening_waits_for_the_release_on_the_same_row() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     let (two, three) = (find(&term, "two"), find(&term, "three"));
     let t0 = Instant::now();
     click_at(&mut app, &view, MouseButton::Left, two, t0);
@@ -314,8 +317,8 @@ fn opening_waits_for_the_release_on_the_same_row() {
 fn on_a_phone_a_tap_on_the_selected_row_opens() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 46, 20);
-    assert!(view.compact);
+    let term = draw(&mut app, &mut view, 46, 20);
+    assert!(app.compact);
     let at = find(&term, "two");
     let t0 = Instant::now();
     assert!(matches!(click_at(&mut app, &view, MouseButton::Left, at, t0), Action::None));
@@ -328,8 +331,8 @@ fn clicks_hit_list_rows_only() {
     let mut app = agents_app();
     let mut view = View::new();
     // 8 list lines: header, card, card, blank and header, then a card cut off after one line.
-    let term = draw(&app, &mut view, 120, 13);
-    assert!(view.preview_fits);
+    let term = draw(&mut app, &mut view, 120, 13);
+    assert!(app.preview_fits);
     let (rect, _, _) = view.rows.iter().find(|(_, _, target)| *target == pane("$1", "@2", "%3")).unwrap();
     let (x, y) = (rect.x + 4, rect.y);
     assert!(screen(&term)[y as usize].contains("three"), "only the title line fits");
@@ -352,7 +355,7 @@ fn clicks_hit_list_rows_only() {
 fn a_click_resolves_to_what_was_drawn() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     let at = find(&term, "four");
     // A key that empties the list, then a click on where a row was.
     type_(&mut app, "z");
@@ -364,7 +367,7 @@ fn a_click_resolves_to_what_was_drawn() {
 fn a_click_on_a_window_linked_twice_picks_the_copy_clicked() {
     let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a", "$1|s|@1|2|w|0|0|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     let (_, y) = find(&term, "2   w");
     click(&mut app, &view, MouseButton::Left, (6, y));
     assert_eq!(app.selected, 2, "{:#?}", screen(&term));
@@ -374,12 +377,12 @@ fn a_click_on_a_window_linked_twice_picks_the_copy_clicked() {
 fn the_triangle_toggles_a_windows_panes() {
     let mut app = sessions_app("@1");
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     assert_eq!(app.rows.len(), 5);
     let open = click(&mut app, &view, MouseButton::Left, find(&term, "▸"));
     assert!(matches!(open, Action::None), "the triangle doesn't open the window");
     assert_eq!(app.rows.len(), 7, "it lists the panes");
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     click(&mut app, &view, MouseButton::Left, find(&term, "▾"));
     assert_eq!(app.rows.len(), 5);
 }
@@ -388,16 +391,16 @@ fn the_triangle_toggles_a_windows_panes() {
 fn title_and_footer_are_buttons() {
     let mut app = sessions_app("@1");
     let mut view = View::new();
-    let term = draw(&app, &mut view, 46, 20);
+    let term = draw(&mut app, &mut view, 46, 20);
     click(&mut app, &view, MouseButton::Left, find(&term, "agents"));
     assert_eq!(app.tab, Tab::Agents);
-    let term = draw(&app, &mut view, 46, 20);
+    let term = draw(&mut app, &mut view, 46, 20);
     let lines = screen(&term);
     assert!(lines.iter().any(|l| l.contains("open   sessions   rename   menu") && l.ends_with("close │")), "{lines:#?}");
     click(&mut app, &view, MouseButton::Left, find(&term, "rename"));
     assert!(renaming(&app).is_some());
     app.run(Command::Cancel);
-    let term = draw(&app, &mut view, 46, 20);
+    let term = draw(&mut app, &mut view, 46, 20);
     assert!(matches!(click(&mut app, &view, MouseButton::Left, find(&term, "close")), Action::Quit));
 }
 
@@ -405,14 +408,13 @@ fn title_and_footer_are_buttons() {
 fn the_menu_has_every_hint_with_its_key() {
     let mut app = sessions_app("@1");
     app.expanded.insert(window("$1", "@1"));
-    let view = View::new();
     for tab in [Tab::Sessions, Tab::Agents] {
         app.run(Command::Tab(tab));
         let rows: Vec<usize> = (0..app.rows.len()).filter(|&i| app.selectable(i)).collect();
         for i in rows {
             app.selected = i;
-            let menu = app.menu_items(view.preview_fits);
-            for h in app.hints(&view).0.into_iter().filter(|h| h.command != Command::Menu) {
+            let menu = app.menu_items();
+            for h in app.hints().0.into_iter().filter(|h| h.command != Command::Menu) {
                 assert!(menu.iter().any(|m| m.command == h.command && m.key == h.key), "{h:?} on row {i} of {tab:?}: {menu:?}");
             }
         }
@@ -423,28 +425,27 @@ fn the_menu_has_every_hint_with_its_key() {
 fn the_footer_keeps_close_and_the_menu_and_folds_the_rest_into_it() {
     let mut app = agents_app();
     let mut view = View::new();
-    let lines = screen(&draw(&app, &mut view, 38, 20));
+    let lines = screen(&draw(&mut app, &mut view, 38, 20));
     let footer = &lines[lines.len() - 2];
     assert!(footer.contains("open") && footer.contains("rename") && footer.contains("menu") && footer.ends_with("close │"), "{lines:#?}");
     assert!(!footer.contains("sessions"), "the tab switch folds first: {lines:#?}");
-    let term = draw(&app, &mut view, 38, 20);
+    let term = draw(&mut app, &mut view, 38, 20);
     click(&mut app, &view, MouseButton::Left, find(&term, "menu"));
     let Mode::Menu(menu) = &app.mode else { panic!("no menu: {:?}", app.mode) };
     assert!(menu.items.iter().any(|i| i.command == Command::Group), "{:?}", menu.items);
     // Wide enough, keys go with the words, and ^a opens the same menu.
     app.run(Command::Cancel);
-    let lines = screen(&draw(&app, &mut view, 70, 20));
-    assert!(view.compact && lines[lines.len() - 2].contains("^a menu") && lines[lines.len() - 2].ends_with("esc close │"), "{lines:#?}");
+    let lines = screen(&draw(&mut app, &mut view, 70, 20));
+    assert!(app.compact && lines[lines.len() - 2].contains("^a menu") && lines[lines.len() - 2].ends_with("esc close │"), "{lines:#?}");
     ctrl(&mut app, 'a');
     assert!(matches!(&app.mode, Mode::Menu(m) if m.items.iter().any(|i| i.command == Command::Group)));
     ctrl(&mut app, 'a');
     assert!(matches!(app.mode, Mode::List), "^a again closes it");
     // At 80-101 columns the preview can't show: no hint for it.
     app.run(Command::Cancel);
-    let lines = screen(&draw(&app, &mut view, 90, 20));
-    assert!(!view.preview_fits);
+    let lines = screen(&draw(&mut app, &mut view, 90, 20));
+    assert!(!app.preview_fits);
     assert!(!lines.iter().any(|l| l.contains("preview")), "{lines:#?}");
-    app.preview_fits = view.preview_fits; // as the loop keeps it
     ctrl(&mut app, 'a');
     assert!(matches!(&app.mode, Mode::Menu(m) if !m.items.iter().any(|i| i.command == Command::Preview)), "nor in the menu");
 }
@@ -459,16 +460,16 @@ fn selected_agent_does_not_expose_its_full_path_below_the_filter() {
     let mut view = View::new();
     let full = "~/source/company/main-repo/worktrees/topic/src";
     for width in [30, 46, 90, 120] {
-        let term = draw(&app, &mut view, width, 24);
+        let term = draw(&mut app, &mut view, width, 24);
         let lines = screen(&term);
         assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "{width}: no path heading: {lines:#?}");
         assert!(!lines.iter().any(|line| line.contains(full)), "{width}: {lines:#?}");
     }
     ctrl(&mut app, 'n');
-    let lines = screen(&draw(&app, &mut view, 46, 24));
+    let lines = screen(&draw(&mut app, &mut view, 46, 24));
     assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "selection keeps the blank separator: {lines:#?}");
     app.run(Command::Tab(Tab::Sessions));
-    let lines = screen(&draw(&app, &mut view, 46, 24));
+    let lines = screen(&draw(&mut app, &mut view, 46, 24));
     assert!(lines[2].trim_matches(['│', ' ']).is_empty(), "Sessions keeps its blank separator: {lines:#?}");
 }
 
@@ -482,17 +483,17 @@ fn selecting_a_long_path_does_not_move_mouse_targets_between_press_and_release()
         ]);
         let mut app = new(snap, Tab::Agents, "@1");
         let mut view = View::new();
-        let term = draw(&app, &mut view, width, 24);
+        let term = draw(&mut app, &mut view, width, 24);
         let at = find(&term, "second-task");
         let now = Instant::now();
         mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, now);
-        let term = draw(&app, &mut view, width, 24);
+        let term = draw(&mut app, &mut view, width, 24);
         assert_eq!(find(&term, "second-task"), at, "{width}: selection must not shift the list");
         assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), at, now), Action::None));
         assert!(app.last_click.is_some(), "the release still hits the pressed row");
         let later = now + Duration::from_millis(50);
         mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, later);
-        draw(&app, &mut view, width, 24);
+        draw(&mut app, &mut view, width, 24);
         let action = mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Left), at, later);
         assert!(matches!(action, Action::Activate(Target::Pane { pane, .. }) if pane == "%2"));
     }
@@ -502,13 +503,13 @@ fn selecting_a_long_path_does_not_move_mouse_targets_between_press_and_release()
 fn compact_rows_take_two_lines_with_less_detail() {
     let mut app = sessions_app("@1");
     let mut view = View::new();
-    let lines = screen(&draw(&app, &mut view, 46, 20));
-    assert!(view.compact);
+    let lines = screen(&draw(&mut app, &mut view, 46, 20));
+    assert!(app.compact);
     let at = lines.iter().position(|l| l.contains("edit")).unwrap();
     assert!(lines[at + 1].contains("/h/a"), "the folder under the window: {lines:#?}");
     assert!(!lines.iter().any(|l| l.contains("windows")), "no window counts");
     app.run(Command::Tab(Tab::Agents));
-    let lines = screen(&draw(&app, &mut view, 46, 20));
+    let lines = screen(&draw(&mut app, &mut view, 46, 20));
     let at = lines.iter().position(|l| l.contains("deploy")).unwrap();
     assert!(lines[at + 1].contains("/h/c"), "the folder under the title: {lines:#?}");
     assert!(!lines[at].contains("play"), "no tmux location beside the title: {lines:#?}");
@@ -612,7 +613,7 @@ fn ctrl_r_again_fills_the_field_with_a_suggestion() {
     assert!(matches!(ctrl(&mut app, 'r'), Action::Suggest { pane, id: 1 } if pane == "%1"));
     assert!(matches!(ctrl(&mut app, 'r'), Action::None), "one suggestion at a time");
     assert_eq!(app.suggesting(), Some(1));
-    let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("✎ one") && l.contains("✦ suggesting…")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⏎ save   ^r suggest   ^u clear") && l.ends_with("esc cancel │")), "{lines:#?}");
     app.suggested(1, Ok("Fix the cart page".into()));
@@ -649,7 +650,7 @@ fn a_suggestion_does_not_overwrite_what_came_after_it() {
     app.suggested(3, Err("pi timed out after 30s".into()));
     assert_eq!(field(&app), Some("one"));
     assert_eq!(renaming(&app).and_then(|r| r.error.as_deref()), Some("pi timed out after 30s"));
-    let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("✗ pi timed out after 30s")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("^r retry")), "{lines:#?}");
 }
@@ -659,7 +660,7 @@ fn no_suggestions_without_a_suggest_command() {
     let mut app = agents_app();
     app.can_suggest = false;
     ctrl(&mut app, 'r');
-    let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(!lines.iter().any(|l| l.contains("suggest")), "not offered: {lines:#?}");
     assert!(matches!(ctrl(&mut app, 'r'), Action::None));
     assert!(matches!(&app.status, Some(Status::Note(n)) if n.contains("@agent-suggest-command")), "but says why when asked");
@@ -685,7 +686,7 @@ fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
             }
         }
         let mut view = View::new();
-        let before = draw(&app, &mut view, width, 24);
+        let before = draw(&mut app, &mut view, width, 24);
         let (_, y) = find(&before, "one");
         let detail = screen(&before)[y as usize + 1].clone();
         let targets = view.rows.clone();
@@ -693,7 +694,7 @@ fn agent_topic_editor_keeps_identity_and_mouse_targets_in_place() {
         ctrl(&mut app, 'r');
         for failed in [false, true] {
             if failed { app.suggested(1, Err("pi timed out after 30s".into())); }
-            let term = draw(&app, &mut view, width, 24);
+            let term = draw(&mut app, &mut view, width, 24);
             let lines = screen(&term);
             assert_eq!(lines[y as usize + 1], detail, "{width}: age, stale state and folder stay on line two");
             assert!(lines[y as usize + 1].contains("5m working?"), "{lines:#?}");
@@ -712,11 +713,11 @@ fn the_title_is_edited_on_its_card() {
     let mut app = agents_app();
     type_(&mut app, "on");
     ctrl(&mut app, 'r');
-    let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("› on") && l.contains("renaming")), "the filter stays in view: {lines:#?}");
     assert!(lines.iter().any(|l| l.contains("▌ ● ✳  ✎ one")), "{lines:#?}");
     ctrl(&mut app, 'u');
-    let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("✎ ▏one") && l.contains("automatic")), "the automatic title as a placeholder: {lines:#?}");
 }
 
@@ -724,19 +725,19 @@ fn the_title_is_edited_on_its_card() {
 fn the_mouse_renames_too() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     click(&mut app, &view, MouseButton::Right, find(&term, "three"));
     let Mode::Menu(_) = &app.mode else { panic!("right-click opens the card's menu") };
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     let action = click(&mut app, &view, MouseButton::Left, find(&term, "suggest a title"));
     assert!(matches!(&action, Action::Suggest { pane, .. } if pane == "%3"), "{action:?}");
     assert!(matches!(renaming(&app).map(|r| &r.target), Some(Target::Pane { pane, .. }) if pane == "%3"));
     // Clicking another card while renaming says how to finish.
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     click(&mut app, &view, MouseButton::Left, find(&term, "one"));
     assert!(renaming(&app).is_some());
     assert_eq!(app.status, Some(Status::Note("⏎ save or esc cancel first".into())));
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     click(&mut app, &view, MouseButton::Left, find(&term, "cancel"));
     assert!(renaming(&app).is_none());
 }
@@ -745,36 +746,36 @@ fn the_mouse_renames_too() {
 fn a_menu_is_picked_by_key_by_click_or_by_dragging_onto_an_item() {
     let mut app = agents_app();
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     let at = find(&term, "two");
     // Right press, then its release where it was pressed: nothing.
     mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Right), at, Instant::now());
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     assert!(matches!(mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Right), at, Instant::now()), Action::None), "its own release picks nothing");
     assert!(matches!(app.mode, Mode::Menu(_)));
     // Right press, drag, release on "rename".
     let item = find(&term, "rename");
     app.mode = Mode::List;
-    draw(&app, &mut view, 120, 30);
+    draw(&mut app, &mut view, 120, 30);
     mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Right), at, Instant::now());
-    draw(&app, &mut view, 120, 30);
+    draw(&mut app, &mut view, 120, 30);
     mouse(&mut app, &view, MouseEventKind::Up(MouseButton::Right), item, Instant::now());
     assert!(matches!(renaming(&app).map(|r| &r.target), Some(Target::Pane { pane, .. }) if pane == "%2"));
     app.run(Command::Cancel);
     // Keys: ↓ ↓ then ⏎; any other key closes it and acts.
-    app.open_menu(Position::default(), true);
+    app.open_menu(Position::default());
     app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
     app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
     app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(renaming(&app).is_some(), "the third item (after open and type), rename");
     app.run(Command::Cancel);
-    app.open_menu(Position::default(), true);
+    app.open_menu(Position::default());
     type_(&mut app, "t");
     assert!(matches!(app.mode, Mode::List));
     assert_eq!(app.query.text(), "t");
     // A click outside closes it.
-    app.open_menu(Position::default(), true);
-    draw(&app, &mut view, 120, 30);
+    app.open_menu(Position::default());
+    draw(&mut app, &mut view, 120, 30);
     mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), (110, 25), Instant::now());
     assert!(matches!(app.mode, Mode::List));
 }
@@ -783,13 +784,13 @@ fn a_menu_is_picked_by_key_by_click_or_by_dragging_onto_an_item() {
 fn a_menu_closes_when_its_row_goes() {
     let mut app = sessions_app("@1");
     select(&mut app, window("$1", "@2"));
-    app.open_menu(Position::default(), true);
+    app.open_menu(Position::default());
     let without_logs = || fixture(&["$1|work|@1|1|edit|1|0|%1|0|1|nvim|||||||||/h/a", "$2|play|@3|1|game|1|0|%4|0|1|codex||asking|0|codex|deploy||||/h/c"]);
     app.set_snapshot(without_logs());
     assert!(matches!(app.mode, Mode::List), "its move down would swap another window");
     assert!(matches!(&app.status, Some(Status::Failed(_))));
     // A refresh that keeps the row keeps the menu.
-    app.open_menu(Position::default(), true);
+    app.open_menu(Position::default());
     app.set_snapshot(without_logs());
     assert!(matches!(app.mode, Mode::Menu(_)));
 }
@@ -814,7 +815,7 @@ fn nerd_marks_follow_redraws_rename_filter_menu_and_resize() {
     assert!(!term.backend().buffer()[(x, y)].modifier.contains(Modifier::DIM));
     assert!(screen(&term).iter().all(|l| !l.contains("claude")), "no duplicate provider name");
 
-    app.open_menu(Position::new(x, y), true);
+    app.open_menu(Position::new(x, y));
     render(&mut term, &app, &mut view);
     let menu = view.menu.unwrap();
     for row in menu.y..menu.bottom() {
@@ -834,6 +835,7 @@ fn nerd_marks_follow_redraws_rename_filter_menu_and_resize() {
     for width in [24, 40, 120] {
         term.backend_mut().resize(width, 12);
         term.resize(ratatui::layout::Rect::new(0, 0, width, 12)).unwrap();
+        app.set_layout(ui::layout(Size::new(width, 12)));
         render(&mut term, &app, &mut view);
         assert!(count(&term) > 0);
         for y in 0..12 {
@@ -880,8 +882,8 @@ fn complete_hidden(app: &mut App, action: Action) {
 #[test]
 fn hide_show_is_non_destructive_and_only_changes_after_success() {
     let mut app = hidden_app(false);
-    assert!(app.menu_items(true).iter().any(|h| h.command == Command::Hide));
-    assert!(!app.menu_items(true).iter().any(|h| h.command == Command::Show));
+    assert!(app.menu_items().iter().any(|h| h.command == Command::Hide));
+    assert!(!app.menu_items().iter().any(|h| h.command == Command::Show));
     let pending = job(ctrl(&mut app, 'e'));
     assert_eq!(pending.op, Op::SetHidden { pane: "%1".into(), hidden: true });
     assert!(!app.snap.agent("%1").unwrap().hidden, "no optimistic visibility change");
@@ -898,7 +900,7 @@ fn hide_show_is_non_destructive_and_only_changes_after_success() {
     assert!(matches!(app.mode, Mode::List), "heading is never a kill target");
     type_(&mut app, "visible");
     assert_eq!(selected_title(&app), "visible");
-    assert!(app.menu_items(true).iter().any(|h| h.command == Command::Show));
+    assert!(app.menu_items().iter().any(|h| h.command == Command::Show));
     assert!(matches!(enter(&mut app), Action::Activate(Target::Pane { pane, .. }) if pane == "%1"));
     assert!(app.snap.agent("%1").unwrap().hidden, "opening does not show");
     let action = ctrl(&mut app, 'e');
@@ -909,7 +911,7 @@ fn hide_show_is_non_destructive_and_only_changes_after_success() {
     assert!(app.snap.agent("%2").unwrap().hidden);
     ctrl(&mut app, 'u');
     app.set_tab(Tab::Sessions);
-    assert!(!app.can(Command::Hide, true));
+    assert!(!app.can(Command::Hide));
     assert!(app.rows.iter().any(|r| matches!(&r.target, Some(Target::Window { window, .. }) if window == "@2")));
 }
 
@@ -918,7 +920,7 @@ fn hidden_expansion_is_selectable_and_committed_only_after_success() {
     let mut app = hidden_app(false);
     app.move_by(1, false);
     assert!(app.hidden_selected(), "navigation reaches the collapsed heading");
-    assert_eq!(app.preview_pane(&View::new()), None);
+    assert_eq!(app.preview_pane(), None);
     let pending = job(enter(&mut app));
     assert_eq!(pending.op, Op::SetHiddenExpanded(true));
     assert!(!app.hidden_expanded);
@@ -930,7 +932,7 @@ fn hidden_expansion_is_selectable_and_committed_only_after_success() {
     assert!(app.hidden_selected(), "heading remains selected when expanded");
     app.move_by(1, false);
     assert_eq!(selected_title(&app), "parked question");
-    assert_eq!(app.preview_pane(&View::new()), Some("%2"));
+    assert_eq!(app.preview_pane(), Some("%2"));
     ctrl(&mut app, 'r');
     assert!(renaming(&app).is_some(), "hidden cards still support renaming");
     app.run(Command::Cancel);
@@ -944,7 +946,7 @@ fn hidden_expansion_is_selectable_and_committed_only_after_success() {
     assert!(app.hidden_selected());
     assert!(app.snap.agent("%2").unwrap().hidden, "state changes never unhide");
     assert!(!app.hidden_expanded);
-    app.open_menu(Position::default(), true);
+    app.open_menu(Position::default());
     app.set_snapshot(fixture(&[]));
     assert!(matches!(app.mode, Mode::List), "a vanished heading closes its menu");
 }
@@ -978,22 +980,22 @@ fn hidden_heading_clicks_toggle_only_the_heading_not_its_spacer() {
     for width in [24, 40, 120] {
         let mut app = hidden_app(false);
         let mut view = View::new();
-        let term = draw(&app, &mut view, width, 14);
+        let term = draw(&mut app, &mut view, width, 14);
         let rect = view.hidden.unwrap();
         assert!(screen(&term)[rect.y as usize].contains("hidden · 2"));
-        if !view.compact {
+        if !app.compact {
             assert!(view.hit(Position::new(rect.x, rect.y - 1)).is_none(), "blank line above the heading is not clickable");
         }
         let action = click(&mut app, &view, MouseButton::Left, (rect.x + 3, rect.y));
         complete_hidden(&mut app, action);
-        let term = draw(&app, &mut view, width, 14);
+        let term = draw(&mut app, &mut view, width, 14);
         assert!(app.hidden_expanded);
         assert!(screen(&term).iter().any(|l| l.contains("parked quest")), "{width}: {:#?}", screen(&term));
         let rect = view.hidden.unwrap();
         let action = click(&mut app, &view, MouseButton::Left, (rect.x + 3, rect.y));
         complete_hidden(&mut app, action);
         assert!(!app.hidden_expanded);
-        let term = draw(&app, &mut view, width, 14);
+        let term = draw(&mut app, &mut view, width, 14);
         assert!(screen(&term).iter().all(|l| !l.contains("parked")));
     }
 }
@@ -1007,7 +1009,7 @@ fn agent_marks_survive_renaming_and_fall_back_to_the_command() {
                 ctrl(&mut app, 'r');
             }
             for width in [40, 80, 120] {
-                let lines = screen(&draw(&app, &mut View::new(), width, 12));
+                let lines = screen(&draw(&mut app, &mut View::new(), width, 12));
                 let title = lines.iter().position(|l| l.contains("task")).unwrap();
                 assert!(lines[title].contains(icon), "{lines:#?}");
             }
@@ -1017,8 +1019,8 @@ fn agent_marks_survive_renaming_and_fall_back_to_the_command() {
 
 #[test]
 fn a_stale_state_is_marked_unconfirmed() {
-    let app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
-    let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task|||1|/a"]), Tab::Agents, "@1");
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("working?")), "{lines:#?}");
 }
 
@@ -1032,8 +1034,8 @@ fn pasted_newlines_do_not_open() {
 
 #[test]
 fn the_title_is_plain_text_over_a_dim_border() {
-    let app = agents_app();
-    let term = draw(&app, &mut View::new(), 120, 20);
+    let mut app = agents_app();
+    let term = draw(&mut app, &mut View::new(), 120, 20);
     let buf = term.backend().buffer();
     let (x, y) = find(&term, "agents");
     assert!(!buf[(x, y)].modifier.contains(Modifier::DIM), "\"agents\" tab");
@@ -1048,8 +1050,8 @@ fn a_narrow_title_drops_the_calmest_counts_whole() {
             format!("$1|s|@{i}|{i}|w|1|0|%{i}|0|1|claude||{state}|{unseen}|claude|t{i}||||/a")
         })
         .collect();
-    let app = new(fixture(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>()), Tab::Agents, "@1");
-    let top = |w| screen(&draw(&app, &mut View::new(), w, 12))[0].clone();
+    let mut app = new(fixture(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>()), Tab::Agents, "@1");
+    let mut top = |w| screen(&draw(&mut app, &mut View::new(), w, 12))[0].clone();
     let marks = ['●', '○'];
     assert_eq!(top(80).matches(marks).count(), 4, "{}", top(80));
     assert!(top(80).contains("● 3 waiting  ● 3 working  ● 3 finished  ○ 3 idle ╮"), "named when they fit: {}", top(80));
@@ -1069,8 +1071,8 @@ fn a_narrow_title_drops_the_calmest_counts_whole() {
 
 #[test]
 fn the_selection_is_bold_in_the_accent_and_the_current_session_only_marked() {
-    let app = sessions_app("@1");
-    let term = draw(&app, &mut View::new(), 120, 12);
+    let mut app = sessions_app("@1");
+    let term = draw(&mut app, &mut View::new(), 120, 12);
     let buf = term.backend().buffer();
     let t = Theme::default();
     let (x, y) = find(&term, "edit");
@@ -1086,7 +1088,7 @@ fn the_selection_is_bold_in_the_accent_and_the_current_session_only_marked() {
 fn the_filter_marks_what_it_matched() {
     let mut app = sessions_app("@1");
     type_(&mut app, "logs");
-    let term = draw(&app, &mut View::new(), 120, 12);
+    let term = draw(&mut app, &mut View::new(), 120, 12);
     let buf = term.backend().buffer();
     let (x, y) = find(&term, "logs  /h");
     assert!((x..x + 4).all(|x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED)), "{:?}", screen(&term));
@@ -1099,11 +1101,11 @@ fn the_filter_marks_what_it_matched() {
 fn esc_clears_the_filter_then_closes() {
     let mut app = sessions_app("@1");
     type_(&mut app, "logs");
-    assert_eq!(app.hints(&View::new()).1.label, "clear");
+    assert_eq!(app.hints().1.label, "clear");
     assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::None));
     assert_eq!(app.query.text(), "");
     assert_eq!(selected_title(&app), "logs", "the selection stays");
-    assert_eq!(app.hints(&View::new()).1.label, "close");
+    assert_eq!(app.hints().1.label, "close");
     assert!(matches!(app.on_key(key(KeyCode::Esc, KeyModifiers::NONE)), Action::Quit));
     type_(&mut app, "x");
     assert!(matches!(ctrl(&mut app, 'c'), Action::Quit), "^c closes whatever");
@@ -1113,28 +1115,28 @@ fn esc_clears_the_filter_then_closes() {
 fn narrow_and_tall_the_preview_goes_below_the_list() {
     let mut app = agents_app();
     let mut view = View::new();
-    let draw_preview = |app: &App, view: &mut View, width, height| {
+    let draw_preview = |app: &mut App, view: &mut View, width, height| {
+        app.set_layout(ui::layout(Size::new(width, height)));
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
         let body = Text::raw("pane text");
         term.draw(|f| ui::draw(f, app, view, &Preview { title: "s:1.0 · claude", body: &body }, &Theme::default())).unwrap();
         screen(&term)
     };
     // A phone's compact layout leaves it out until asked for (ctrl-o).
-    let lines = draw_preview(&app, &mut view, 70, 30);
-    assert!(view.preview_fits && !lines.iter().any(|l| l.contains("pane text")), "{lines:#?}");
-    app.compact = true;
-    assert_eq!(app.menu_items(true).iter().find(|h| h.key == "^o").map(|h| h.label.as_str()), Some("show preview"));
+    let lines = draw_preview(&mut app, &mut view, 70, 30);
+    assert!(app.preview_fits && !lines.iter().any(|l| l.contains("pane text")), "{lines:#?}");
+    assert_eq!(app.menu_items().iter().find(|h| h.key == "^o").map(|h| h.label.as_str()), Some("show preview"));
     app.run(Command::Preview);
-    let lines = draw_preview(&app, &mut view, 70, 30);
-    assert!(view.preview_fits);
+    let lines = draw_preview(&mut app, &mut view, 70, 30);
+    assert!(app.preview_fits);
     let rule = lines.iter().position(|l| l.contains("s:1.0 · claude ─")).unwrap_or_else(|| panic!("{lines:#?}"));
     assert!(lines[rule + 1..].iter().any(|l| l.contains("pane text")), "{lines:#?}");
     assert!(lines[..rule].iter().any(|l| l.contains("one")), "the list above: {lines:#?}");
-    let lines = draw_preview(&app, &mut view, 70, 20);
-    assert!(!view.preview_fits);
+    let lines = draw_preview(&mut app, &mut view, 70, 20);
+    assert!(!app.preview_fits);
     assert!(!lines.iter().any(|l| l.contains("pane text")), "{lines:#?}");
-    let lines = draw_preview(&app, &mut view, 120, 20);
-    assert!(view.preview_fits && lines.iter().any(|l| l.contains("│ s:1.0 · claude")), "beside: {lines:#?}");
+    let lines = draw_preview(&mut app, &mut view, 120, 20);
+    assert!(app.preview_fits && lines.iter().any(|l| l.contains("│ s:1.0 · claude")), "beside: {lines:#?}");
 }
 
 #[test]
@@ -1145,7 +1147,7 @@ fn an_empty_agents_tab_says_how_agents_get_there() {
     for (rex, says, not) in [(false, ["agent-status.tmux", "state)"], "Rex"), (true, ["Rex", "themselves)"], "tmux")] {
         app.caps.rex = rex;
         for (w, h) in [(40, 10), (80, 16), (50, 20), (120, 40)] {
-            let lines = screen(&draw(&app, &mut View::new(), w, h));
+            let lines = screen(&draw(&mut app, &mut View::new(), w, h));
             assert!(lines.iter().any(|l| l.contains("no agents running")));
             assert!(says.iter().all(|s| lines.iter().any(|l| l.contains(s))), "{lines:#?}");
             assert!(!lines.iter().any(|l| l.contains(not)), "{lines:#?}");
@@ -1167,7 +1169,7 @@ fn status_shows_on_the_bottom_edge_and_keeps_the_footer() {
     let mut app = agents_app();
     app.status = Some(Status::Failed("tmux said no".into()));
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     let lines = screen(&term);
     assert!(lines.last().unwrap().contains("✗ tmux said no"), "{lines:#?}");
     assert!(matches!(click(&mut app, &view, MouseButton::Left, find(&term, "close")), Action::Quit), "a tap still works");
@@ -1177,12 +1179,12 @@ fn status_shows_on_the_bottom_edge_and_keeps_the_footer() {
 fn a_servers_trouble_stays_on_the_bottom_edge_under_any_status() {
     let mut app = agents_app();
     app.trouble = Some("rex is not answering".into());
-    let last = |app: &App| screen(&draw(app, &mut View::new(), 120, 20)).pop().unwrap();
-    assert!(last(&app).contains("✗ rex is not answering"), "{}", last(&app));
+    let last = |app: &mut App| screen(&draw(app, &mut View::new(), 120, 20)).pop().unwrap();
+    assert!(last(&mut app).contains("✗ rex is not answering"), "{}", last(&mut app));
     app.status = Some(Status::Done("renamed".into()));
-    assert!(last(&app).contains("✓ renamed") && !last(&app).contains("not answering"), "the status takes its place: {}", last(&app));
+    assert!(last(&mut app).contains("✓ renamed") && !last(&mut app).contains("not answering"), "the status takes its place: {}", last(&mut app));
     app.status = None;
-    assert!(last(&app).contains("✗ rex is not answering"), "and gives it back: {}", last(&app));
+    assert!(last(&mut app).contains("✗ rex is not answering"), "and gives it back: {}", last(&mut app));
 }
 
 #[test]
@@ -1336,7 +1338,7 @@ fn kills_ask_first_and_say_what_runs_there() {
     ctrl(&mut app, 'x');
     let Mode::Confirm(c) = &app.mode else { panic!("{:?}", app.mode) };
     assert_eq!(c.question, "kill window play:1 game? 1 pane · codex waiting · play closes");
-    let lines = screen(&draw(&app, &mut View::new(), 120, 12));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("✗ kill window play:1 game?") && l.contains("can't be undone")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⏎ kill") && l.ends_with("esc cancel │")), "{lines:#?}");
     // Anything but yes is no.
@@ -1429,7 +1431,7 @@ fn ctrl_t_carries_to_where_enter_drops() {
     type_(&mut app, "game");
     assert!(app.position(&window("$1", "@2")).is_some(), "what is carried stays listed");
     select(&mut app, window("$2", "@3"));
-    let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("game") && l.contains("⏎ after this window")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⇅ moving window work:2 logs")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⇅") && l.contains("logs")), "the carried row is marked: {lines:#?}");
@@ -1525,7 +1527,7 @@ fn session_names_follow_tmuxs_rules_only_on_tmux() {
 fn dragging_a_row_moves_it() {
     let mut app = sessions_app("@1");
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 20);
+    let term = draw(&mut app, &mut view, 120, 20);
     let (logs, game) = (find(&term, "logs"), find(&term, "game"));
     let now = Instant::now();
     mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), logs, now);
@@ -1597,12 +1599,12 @@ fn ctrl_s_names_a_new_window_where_it_will_appear() {
     }).collect();
     assert_eq!(names, ["·", "edit", "+", "logs", "·", "game"]);
     assert!(matches!(app.rows[app.selected].kind, RowKind::New));
-    let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("├─ + ▏window name (empty: named after what runs)  /h/a")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("+ new window")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⏎ create   ^s session   ^u clear") && l.ends_with("esc cancel │")), "{lines:#?}");
     let mut view = View::new();
-    let term = draw(&app, &mut view, 120, 14);
+    let term = draw(&mut app, &mut view, 120, 14);
     click(&mut app, &view, MouseButton::Left, find(&term, "▏window name"));
     assert_eq!(app.status, None, "a click on the row being named");
     click(&mut app, &view, MouseButton::Left, find(&term, "logs"));
@@ -1654,7 +1656,7 @@ fn ctrl_s_again_names_a_new_session_and_refuses_what_tmux_would() {
     assert_eq!(error(&app), None, "typing clears the reason");
     enter(&mut app);
     assert_eq!(error(&app).as_deref(), Some("a session called play exists"));
-    let lines = screen(&draw(&app, &mut View::new(), 120, 14));
+    let lines = screen(&draw(&mut app, &mut View::new(), 120, 14));
     assert!(lines.iter().any(|l| l.contains("+ play▏  /h/c") && l.contains("✗ a session called play exists")), "{lines:#?}");
     ctrl(&mut app, 'u');
     type_(&mut app, "blog");
@@ -1775,7 +1777,7 @@ fn a_refused_new_window_opens_again_and_cancels_back_to_its_tab() {
 
 #[test]
 fn suggestions_are_offered_for_agent_titles_only() {
-    let suggest = |app: &App| app.hints(&View::new()).0.iter().any(|h| h.command == Command::Suggest);
+    let suggest = |app: &App| app.hints().0.iter().any(|h| h.command == Command::Suggest);
     let mut app = sessions_app("@1");
     for t in [Target::Session { session: "$1".into() }, window("$1", "@1")] {
         select(&mut app, t);
@@ -1788,7 +1790,7 @@ fn suggestions_are_offered_for_agent_titles_only() {
     assert!(suggest(&app));
     // "retry" is for a suggestion that failed, not a save: ^r would put a
     // suggestion over what was typed.
-    let label = |app: &App| app.hints(&View::new()).0.iter().find(|h| h.command == Command::Suggest).map(|h| h.label.clone());
+    let label = |app: &App| app.hints().0.iter().find(|h| h.command == Command::Suggest).map(|h| h.label.clone());
     assert!(matches!(ctrl(&mut app, 'r'), Action::Suggest { id: 1, .. }));
     app.suggested(1, Err("no model".into()));
     assert_eq!(label(&app).as_deref(), Some("retry"));
@@ -1809,11 +1811,11 @@ fn a_failed_undo_can_be_tried_again() {
     let op = undo.op.clone();
     app.ran(undo, Err("no server".into()));
     assert_eq!(app.status, Some(Status::Failed("no server".into())));
-    assert!(app.can(Command::Undo, true));
+    assert!(app.can(Command::Undo));
     let again = job(ctrl(&mut app, 'z'));
     assert_eq!(again.op, op);
     app.ran(again, Ok(None));
-    assert!(!app.can(Command::Undo, true), "done, it is gone");
+    assert!(!app.can(Command::Undo), "done, it is gone");
 }
 
 #[test]
@@ -1851,7 +1853,7 @@ fn an_op_whose_answer_was_lost_is_not_offered_a_second_time() {
     app.ran(swap, Ok(None));
     let undo = job(ctrl(&mut app, 'z')).unsure();
     app.ran(undo, Err("devbox stopped answering".into()));
-    assert!(!app.can(Command::Undo, true));
+    assert!(!app.can(Command::Undo));
     // A rename is the same made twice: its field opens again.
     select(&mut app, window("$1", "@1"));
     ctrl(&mut app, 'r');
@@ -1941,27 +1943,27 @@ fn rex_app(tab: Tab) -> App {
 #[test]
 fn rex_says_tab_where_tmux_says_window() {
     let mut app = rex_app(Tab::Sessions);
-    let lines = |app: &App| screen(&draw(app, &mut View::new(), 120, 20));
+    let lines = |app: &mut App| screen(&draw(app, &mut View::new(), 120, 20));
     let no_window = |lines: &[String]| assert!(!lines.iter().any(|l| l.to_lowercase().contains("window")), "{lines:#?}");
-    let rows = lines(&app);
+    let rows = lines(&mut app);
     assert!(rows.iter().any(|l| l.contains("api*") && l.contains("2 tabs")), "{rows:#?}");
     no_window(&rows);
     let logs = Target::Window { session: "session:1".into(), window: "window:2".into() };
     select(&mut app, logs);
     ctrl(&mut app, 'a');
-    let menu = lines(&app);
+    let menu = lines(&mut app);
     assert!(menu.iter().any(|l| l.contains("new tab here")), "{menu:#?}");
     no_window(&menu);
     app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
     ctrl(&mut app, 'x');
     let Mode::Confirm(c) = &app.mode else { panic!("{:?}", app.mode) };
     assert_eq!(c.question, "kill tab api:2 logs? 1 pane");
-    let confirm = lines(&app);
+    let confirm = lines(&mut app);
     assert!(confirm.iter().any(|l| l.contains("✗ kill tab api:2 logs?")), "{confirm:#?}");
     no_window(&confirm);
     app.on_key(key(KeyCode::Esc, KeyModifiers::NONE));
     ctrl(&mut app, 's');
-    let create = lines(&app);
+    let create = lines(&mut app);
     assert!(create.iter().any(|l| l.contains("+ new tab")) && create.iter().any(|l| l.contains("▏tab name")), "{create:#?}");
     no_window(&create);
 }
@@ -2019,7 +2021,6 @@ fn rex_moves_are_offered_within_their_session_only() {
 #[test]
 fn typing_sends_every_key_but_the_one_that_leaves() {
     let mut app = agents_app();
-    let view = View::new();
     let pane = app.rows[app.selected].preview.clone().unwrap();
     assert!(matches!(ctrl(&mut app, 'l'), Action::None));
     assert!(matches!(&app.mode, Mode::Type(t) if t.pane == pane), "{:?}", app.mode);
@@ -2030,8 +2031,8 @@ fn typing_sends_every_key_but_the_one_that_leaves() {
     assert!(matches!(app.mode, Mode::Type(_)), "esc and ^c went to the pane");
     // The preview stays on the pane typed into, whatever is selected.
     app.selected = app.rows.iter().position(|r| r.preview.as_deref() != Some(pane.as_str()) && r.preview.is_some()).unwrap();
-    assert_eq!(app.preview_pane(&view), Some(pane.as_str()));
-    assert_eq!(app.hints(&view).1.key, "^h");
+    assert_eq!(app.preview_pane(), Some(pane.as_str()));
+    assert_eq!(app.hints().1.key, "^h");
     // ^] arrives as ^5.
     assert!(matches!(ctrl(&mut app, '5'), Action::None));
     assert!(matches!(app.mode, Mode::List));
@@ -2066,8 +2067,7 @@ fn selected_pane(app: &App) -> String {
 #[test]
 fn ctrl_f_walks_the_agents_that_need_you() {
     let mut app = needy_app(Tab::Sessions);
-    let view = View::new();
-    assert!(app.hints(&view).0.iter().any(|h| h.command == Command::Next && h.key == "^f"));
+    assert!(app.hints().0.iter().any(|h| h.command == Command::Next && h.key == "^f"));
     ctrl(&mut app, 'f');
     assert_eq!((app.tab, selected_pane(&app)), (Tab::Agents, "%3".to_string()), "to the agents tab, waiting longest first");
     ctrl(&mut app, 'f');
@@ -2085,7 +2085,7 @@ fn ctrl_f_walks_the_agents_that_need_you() {
     let mut calm = agents_app();
     ctrl(&mut calm, 'f');
     assert_eq!(calm.status, Some(Status::Note("no other agent needs you".into())));
-    assert!(!calm.hints(&view).0.iter().any(|h| h.command == Command::Next), "offered only when someone needs you");
+    assert!(!calm.hints().0.iter().any(|h| h.command == Command::Next), "offered only when someone needs you");
 }
 
 #[test]
@@ -2111,10 +2111,10 @@ fn ctrl_a_then_a_closes_as_prefix_a_opened() {
 fn a_click_only_ends_typing() {
     let mut app = agents_app();
     let mut view = View::new();
-    draw(&app, &mut view, 120, 30);
+    draw(&mut app, &mut view, 120, 30);
     ctrl(&mut app, 'l');
     let before = app.selected;
-    let term = draw(&app, &mut view, 120, 30);
+    let term = draw(&mut app, &mut view, 120, 30);
     let at = find(&term, "four");
     assert!(matches!(mouse(&mut app, &view, MouseEventKind::Down(MouseButton::Left), at, Instant::now()), Action::None));
     assert!(matches!(app.mode, Mode::List));
@@ -2125,18 +2125,18 @@ fn a_click_only_ends_typing() {
 #[test]
 fn typing_needs_the_preview_and_the_pane() {
     let mut app = agents_app();
-    app.set_preview_fits(false);
+    app.set_layout((false, false));
     ctrl(&mut app, 'l');
     assert!(matches!(app.mode, Mode::List));
     assert!(matches!(&app.status, Some(Status::Note(n)) if n.contains("no room")));
-    app.set_preview_fits(true);
+    app.set_layout((false, true));
     app.preview = Some(false);
     ctrl(&mut app, 'l');
-    assert!(matches!(app.mode, Mode::Type(_)) && app.preview_on(false), "the preview comes on");
-    app.set_preview_fits(false);
+    assert!(matches!(app.mode, Mode::Type(_)) && app.preview_on(), "the preview comes on");
+    app.set_layout((false, false));
     assert!(matches!(app.mode, Mode::List), "no typing blind");
     ctrl(&mut app, 'l');
-    app.set_preview_fits(true);
+    app.set_layout((false, true));
     ctrl(&mut app, 'l');
     let Mode::Type(t) = &app.mode else { panic!("typing") };
     let gone = t.pane.clone();
@@ -2159,7 +2159,7 @@ fn typing_keeps_the_preview_when_its_agent_leaves_the_list() {
     // The agent exits; its pane, now a shell, stays and is typed into.
     app.set_snapshot(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a"]));
     assert!(app.rows.is_empty() && matches!(app.mode, Mode::Type(_)));
-    let lines = screen(&draw(&app, &mut view, 120, 30));
+    let lines = screen(&draw(&mut app, &mut view, 120, 30));
     let ruled = |l: &String| l.chars().skip(1).take(117).any(|c| c == '│');
     assert!(lines[4..20].iter().all(ruled), "the preview is still beside the list: {lines:#?}");
 }

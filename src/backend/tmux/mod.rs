@@ -62,11 +62,7 @@ fn context() -> Result<Context, String> {
 /// TARGET as a quoted `-t` argument. The session is always named, so a
 /// window linked into several sessions resolves to this one.
 fn arg(target: &Target) -> String {
-    quote(&match target {
-        Target::Session { session } => session.clone(),
-        Target::Window { session, window } => format!("{session}:{window}"),
-        Target::Pane { session, window, pane } => format!("{session}:{window}.{pane}"),
-    })
+    quote(&plain(target))
 }
 
 /// A name or folder as a tmux argument. tmux expands formats in these
@@ -442,15 +438,11 @@ pub fn next(client: Option<&str>) -> Result<(), String> {
     let mut here = here.trim().split(SEP);
     let (pane, session, scripts) = (here.next().unwrap_or_default(), here.next().unwrap_or_default(), here.next().unwrap_or_default());
     let snap = snapshot::parse(text);
-    let Some(target) = pick(&snap, pane) else {
+    let Some(target) = snap.needs_you(pane) else {
         return tmux(&["display-message", "-c", &client, "paddock: no other agent needs you"]).map(|_| ());
     };
-    // In the client's own session, if it shows the pane too (grouped or
-    // linked): not off to another one.
-    let target = match &target {
-        Target::Pane { pane, .. } => snap.place_in(pane, session).unwrap_or(target),
-        _ => target,
-    };
+    // Not off to another session when the client's own shows the pane too.
+    let target = snap.local(target, session);
     tmux(&["switch-client", "-Z", "-c", &client, "-t", &plain(&target)])?;
     if !scripts.is_empty() {
         let _ = tmux(&["run-shell", "-b", "-t", &plain(&target), &seen(scripts)]);
@@ -498,11 +490,6 @@ fn plain(target: &Target) -> String {
         Target::Window { session, window } => format!("{session}:{window}"),
         Target::Pane { session, window, pane } => format!("{session}:{window}.{pane}"),
     }
-}
-
-/// The next agent that needs you after pane HERE (`Snapshot::needs_you`).
-fn pick(snap: &Snapshot, here: &str) -> Option<Target> {
-    snap.needs_you(here)
 }
 
 /// The popup's key protocol from tmux's extended-keys and
@@ -615,18 +602,18 @@ mod tests {
             "$1|s|@1|1|w|1|0|%8|7|0|claude||idle|0|claude|||1||/a",
         ], &["%6"]);
         let pane = |id: &str| Some(Target::Pane { session: "$1".into(), window: "@1".into(), pane: id.into() });
-        assert_eq!(pick(&snap, ""), pane("%3"), "waiting longest; not stale %5 nor hidden %6");
-        assert_eq!(pick(&snap, "%7"), pane("%3"), "from a pane not queued: the first");
+        assert_eq!(snap.needs_you(""), pane("%3"), "waiting longest; not stale %5 nor hidden %6");
+        assert_eq!(snap.needs_you("%7"), pane("%3"), "from a pane not queued: the first");
         // The queue: %3 %2 (waiting), %4 %1 (finished), round again.
-        assert_eq!(pick(&snap, "%3"), pane("%2"));
-        assert_eq!(pick(&snap, "%2"), pane("%4"), "past the waiting, to the finished");
-        assert_eq!(pick(&snap, "%4"), pane("%1"));
-        assert_eq!(pick(&snap, "%1"), pane("%3"), "round to the first");
+        assert_eq!(snap.needs_you("%3"), pane("%2"));
+        assert_eq!(snap.needs_you("%2"), pane("%4"), "past the waiting, to the finished");
+        assert_eq!(snap.needs_you("%4"), pane("%1"));
+        assert_eq!(snap.needs_you("%1"), pane("%3"), "round to the first");
         let alone = fixture(&["$1|s|@1|1|w|1|0|%2|1|0|claude||asking|0|claude|||200||/a"]);
-        assert_eq!(pick(&alone, "%2"), None, "on the only one: nowhere else to go");
+        assert_eq!(alone.needs_you("%2"), None, "on the only one: nowhere else to go");
         let answered = fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||idle|1|claude|||300||/a", "$1|s|@1|1|w|1|0|%4|3|0|claude||idle|1|claude|||50||/a"]);
-        assert_eq!(pick(&answered, ""), pane("%4"), "then finished longest ago");
-        assert_eq!(pick(&fixture(&["$1|s|@1|1|w|1|0|%8|7|0|claude||idle|0|claude|||1||/a"]), ""), None, "seen idle and working need no one");
+        assert_eq!(answered.needs_you(""), pane("%4"), "then finished longest ago");
+        assert_eq!(fixture(&["$1|s|@1|1|w|1|0|%8|7|0|claude||idle|0|claude|||1||/a"]).needs_you(""), None, "seen idle and working need no one");
     }
 
     #[test]

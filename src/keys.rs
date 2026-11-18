@@ -24,6 +24,11 @@ pub fn is_leave(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('5' | ']' | 'h'))
 }
 
+/// Whether KEY comes without a chord modifier (shift aside): text.
+pub fn is_plain(key: &KeyEvent) -> bool {
+    !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+}
+
 /// How the popup asks its terminal for keys a legacy terminal can't tell
 /// apart (Shift+Enter from Enter).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
