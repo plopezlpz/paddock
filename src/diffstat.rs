@@ -2,7 +2,6 @@
 //! since HEAD (staged or not) and untracked files, from git (10 to 150 ms on
 //! real repos: asked for on the popup's worker, see worker.rs).
 
-use std::process::{Command, Stdio};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Diff {
@@ -31,7 +30,7 @@ impl Diff {
 }
 
 fn git(dir: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = crate::paths::git(dir).args(args).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -61,6 +60,7 @@ fn shortstat(text: &str) -> Diff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn reads_shortstat() {
@@ -85,7 +85,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.to_str().unwrap();
         assert_eq!(diff(d), None, "not a repository");
-        let run = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(d).args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+        let run = |args: &[&str]| assert!(crate::paths::git(d).args(args).stdout(Stdio::null()).status().unwrap().success());
         run(&["init", "-q"]);
         std::fs::write(dir.join("a"), "1\n2\n3\n").unwrap();
         run(&["add", "a"]);

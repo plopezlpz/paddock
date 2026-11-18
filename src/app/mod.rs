@@ -1024,15 +1024,30 @@ impl App {
     /// Ask before killing the selected session, window or pane.
     fn kill(&mut self) {
         let Some(target) = self.selected_target().cloned() else { return };
-        if matches!(target, Target::Session { .. }) && self.snap.sessions.len() == 1 {
+        // Whether the kill leaves its session empty, which closes it: a
+        // session's only window, or that window's only pane.
+        let session = self.snap.session(match &target {
+            Target::Session { session } | Target::Window { session, .. } | Target::Pane { session, .. } => session,
+        });
+        let empties = session.is_some_and(|s| match &target {
+            Target::Session { .. } => true,
+            Target::Window { .. } => s.windows.len() == 1,
+            Target::Pane { .. } => s.windows.len() == 1 && s.windows[0].panes.len() == 1,
+        });
+        if empties && self.snap.sessions.len() == 1 {
             return self.note(if self.caps.rex { "that is the only session" } else { "that is the only session: kill the server instead" });
         }
+        let closes = match (&target, session) {
+            (Target::Session { .. }, _) | (_, None) => String::new(),
+            (_, Some(s)) if empties => format!(" · {} closes", s.name),
+            _ => String::new(),
+        };
         let (label, detail) = self.describe(&target);
         let detail = match (&target, detail.is_empty()) {
             (Target::Pane { pane, .. }, true) => self.snap.pane(pane).map(|(_, _, p)| p.command.clone()).unwrap_or_default(),
             (_, _) => detail,
         };
-        let question = if detail.is_empty() { format!("kill {label}?") } else { format!("kill {label}? {detail}") };
+        let question = if detail.is_empty() { format!("kill {label}?{closes}") } else { format!("kill {label}? {detail}{closes}") };
         self.mode = Mode::Confirm(Confirm { job: Job::new(Op::Kill(target), format!("killed {label}")), question, dropped: false });
     }
 

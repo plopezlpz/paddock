@@ -21,7 +21,7 @@ mod transcript;
 mod ui;
 mod worker;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -50,8 +50,9 @@ enum Ev {
     Backend(u64, Msg),
     /// The suggest command's answer to suggestion ID.
     Suggested(u64, Result<String, String>),
-    /// The changes waiting in a folder (diffstat).
-    Diff(String, Option<diffstat::Diff>),
+    /// The changes waiting in a folder (diffstat), and whether git was slow
+    /// to say.
+    Diff(String, Option<diffstat::Diff>, bool),
     /// What a transcript says, for an agent with that mark (`Agent::mark`).
     Note(String, model::Mark, String),
 }
@@ -257,6 +258,11 @@ fn fail(e: &str, popup: bool) -> ! {
     }
     std::process::exit(1);
 }
+
+/// A folder's changes that take git longer than this to tell are not asked
+/// for again every minute, only when its agent changes state: one slow
+/// folder would hold up every other folder's.
+const SLOW_DIFF: Duration = Duration::from_millis(250);
 
 /// How long after an agent changes state its transcript is read again.
 const SETTLE: Duration = Duration::from_millis(1500);
@@ -470,6 +476,8 @@ struct Popup {
     /// Folders' changes were asked for: they show on the agents tab only,
     /// so not before it is.
     diffed: bool,
+    /// Folders whose changes git was slow to tell (SLOW_DIFF).
+    slow: HashSet<String>,
 }
 
 impl Popup {
@@ -481,24 +489,31 @@ impl Popup {
         app.caps = backend.caps();
         let (theme, fetched, live) = (start.theme, backend.replied(), Live::new());
         let to = answers.clone();
-        let diffs = worker::Worker::new(|dir: &String| diffstat::diff(dir), move |dir, diff| {
-            let _ = to.send(Ev::Diff(dir, diff));
-        });
+        let diffs = worker::Worker::new(
+            |dir: &String| {
+                let start = Instant::now();
+                (diffstat::diff(dir), start.elapsed() > SLOW_DIFF)
+            },
+            move |dir, (diff, slow)| {
+                let _ = to.send(Ev::Diff(dir, diff, slow));
+            },
+        );
         let to = answers.clone();
         let notes = worker::Worker::new(|(file, (state, _, asks)): &(String, model::Mark)| transcript::note(file, *state, asks), move |(file, mark), said| {
             let _ = to.send(Ev::Note(file, mark, said));
         });
-        let mut popup = Popup { app, theme, fetched, live, suggest_command: start.suggest_command, suggestion: None, answers, minute: next_minute(), dirty: true, diffs, notes, asked: HashMap::new(), settle: None, diffed: false };
-        popup.ask(true, true);
+        let mut popup = Popup { app, theme, fetched, live, suggest_command: start.suggest_command, suggestion: None, answers, minute: next_minute(), dirty: true, diffs, notes, asked: HashMap::new(), settle: None, diffed: false, slow: HashSet::new() };
+        popup.ask(true, true, false);
         Ok(popup)
     }
 
     /// Ask the workers about each settled local agent (not working: its
     /// folder and transcript are on the move): ALL of them, else those new
     /// or changed in state since they were last asked about (and then again
-    /// once they settle); for their folders' changes too with DIFFS.
-    fn ask(&mut self, all: bool, diffs: bool) {
-        let diffs = diffs && self.app.tab == Tab::Agents;
+    /// once they settle); for their folders' changes too with DIFFS, but
+    /// on the MINUTE's round not for folders git is slow on.
+    fn ask(&mut self, all: bool, want_diffs: bool, minute: bool) {
+        let diffs = want_diffs && self.app.tab == Tab::Agents;
         // The tab's first showing: every folder.
         let all = all || (diffs && !self.diffed);
         self.diffed |= diffs;
@@ -509,7 +524,7 @@ impl Popup {
             let mark = a.mark();
             if a.state != model::State::Working && (all || self.asked.get(&p.id) != Some(&mark)) {
                 changed |= !all;
-                if diffs && !p.path.is_empty() {
+                if diffs && !p.path.is_empty() && !(minute && self.slow.contains(&p.path)) {
                     self.diffs.ask(p.path.clone());
                 }
                 if !a.transcript.is_empty() {
@@ -521,6 +536,10 @@ impl Popup {
         self.asked = asked;
         if changed {
             self.settle = Some(Instant::now() + SETTLE);
+            // Changed off the agents tab: its next showing asks every folder.
+            if want_diffs && !diffs {
+                self.diffed = false;
+            }
         }
     }
 
@@ -620,7 +639,14 @@ impl Popup {
                     }
                     self.dirty = true;
                 }
-                Ev::Diff(dir, diff) => self.dirty |= app.set_diff(dir, diff),
+                Ev::Diff(dir, diff, slow) => {
+                    if slow {
+                        self.slow.insert(dir.clone());
+                    } else {
+                        self.slow.remove(&dir);
+                    }
+                    self.dirty |= app.set_diff(dir, diff);
+                }
                 Ev::Note(file, mark, said) => self.dirty |= app.set_note(file, mark, said),
                 Ev::Suggested(id, result) => {
                     if self.suggestion.as_ref().is_some_and(|s| s.id == id) {
@@ -666,21 +692,21 @@ impl Popup {
         if let Some(snap) = snap.filter(|s| ran || *s != app.snap) {
             app.set_snapshot(snap);
             self.dirty = true;
-            self.ask(false, true);
+            self.ask(false, true, false);
         }
         if self.settle.is_some_and(|at| Instant::now() >= at) {
             self.settle = None;
-            self.ask(true, false);
+            self.ask(true, false, false);
         }
         if self.app.tab == Tab::Agents && !self.diffed {
-            self.ask(true, true);
+            self.ask(true, true, false);
         }
         if Instant::now() >= self.minute {
             self.app.refresh();
             self.minute = next_minute();
             self.dirty = true;
             // Folders change by hand too, and transcripts late.
-            self.ask(true, true);
+            self.ask(true, true, true);
         }
         Ok(Flow::Stay)
     }

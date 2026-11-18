@@ -179,8 +179,11 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
 
     let beside = body.width >= PREVIEW_FROM;
     view.preview_fits = beside || area.height >= PREVIEW_BELOW_FROM;
-    // Nothing listed: no preview either, and the list's hint has the room.
-    let (list, side) = if !(app.preview_on(view.compact) && view.preview_fits) || app.rows.is_empty() {
+    // Nothing listed: no preview either, and the list's hint has the room;
+    // but typing keeps it, as the keys go on to that pane (its agent may have
+    // exited and left the list, its pane staying).
+    let typing = matches!(app.mode, Mode::Type(_));
+    let (list, side) = if !(app.preview_on(view.compact) && view.preview_fits) || (app.rows.is_empty() && !typing) {
         (body, None)
     } else if beside {
         let [l, r] = Layout::horizontal([Constraint::Length((body.width / 2).min(LIST_MAX)), Constraint::Fill(1)]).areas(body);
@@ -201,7 +204,6 @@ pub fn draw(f: &mut Frame, app: &App, view: &mut View, preview: &Preview<'_>, t:
             (Block::new().borders(Borders::TOP).title(Line::styled(title, t.muted())), pad(side), 0)
         };
         // Typed into: its rule in the accent, as the focus.
-        let typing = matches!(app.mode, Mode::Type(_));
         let block = block.border_style(if typing { Style::new().fg(t.accent) } else { t.border() });
         let inner = pad(block.inner(side));
         f.render_widget(block, side);

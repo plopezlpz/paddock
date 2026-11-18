@@ -1334,7 +1334,7 @@ fn kills_ask_first_and_say_what_runs_there() {
     select(&mut app, window("$2", "@3"));
     ctrl(&mut app, 'x');
     let Mode::Confirm(c) = &app.mode else { panic!("{:?}", app.mode) };
-    assert_eq!(c.question, "kill window play:1 game? 1 pane · codex waiting");
+    assert_eq!(c.question, "kill window play:1 game? 1 pane · codex waiting · play closes");
     let lines = screen(&draw(&app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("✗ kill window play:1 game?") && l.contains("can't be undone")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⏎ kill") && l.ends_with("esc cancel │")), "{lines:#?}");
@@ -1353,6 +1353,21 @@ fn kills_ask_first_and_say_what_runs_there() {
     ctrl(&mut app, 'x');
     assert!(matches!(app.mode, Mode::List));
     assert_eq!(app.status, Some(Status::Note("that is the only session: kill the server instead".into())));
+    // Its only window, or (an agent's card) that window's only pane, would
+    // close it too.
+    let only = || Status::Note("that is the only session: kill the server instead".into());
+    app.status = None;
+    select(&mut app, window("$1", "@1"));
+    ctrl(&mut app, 'x');
+    assert!(matches!(app.mode, Mode::List) && app.status == Some(only()));
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a"]), Tab::Agents, "@1");
+    ctrl(&mut app, 'x');
+    assert!(matches!(app.mode, Mode::List) && app.status == Some(only()));
+    // With another session, the question says the session closes.
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a", "$2|t|@2|1|w|1|0|%2|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
+    select(&mut app, window("$1", "@1"));
+    ctrl(&mut app, 'x');
+    assert!(matches!(&app.mode, Mode::Confirm(c) if c.question.ends_with("1 pane · s closes")), "{:?}", app.mode);
 }
 
 #[test]
@@ -2124,6 +2139,20 @@ fn typing_needs_the_preview_and_the_pane() {
     app.caps.send = false;
     let view = View::new();
     assert!(!app.hints(&view).0.iter().any(|h| h.command == Command::Type), "not offered where it can't be done");
+}
+
+#[test]
+fn typing_keeps_the_preview_when_its_agent_leaves_the_list() {
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|one||||/a"]), Tab::Agents, "@1");
+    let mut view = View::new();
+    ctrl(&mut app, 'l');
+    assert!(matches!(app.mode, Mode::Type(_)));
+    // The agent exits; its pane, now a shell, stays and is typed into.
+    app.set_snapshot(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a"]));
+    assert!(app.rows.is_empty() && matches!(app.mode, Mode::Type(_)));
+    let lines = screen(&draw(&app, &mut view, 120, 30));
+    let ruled = |l: &String| l.chars().skip(1).take(117).any(|c| c == '│');
+    assert!(lines[4..20].iter().all(ruled), "the preview is still beside the list: {lines:#?}");
 }
 
 #[test]

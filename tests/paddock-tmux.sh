@@ -11,7 +11,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 skip() { echo "skip: $1"; [ -z "${CI:-}" ]; exit; }
 command -v tmux >/dev/null || skip "no tmux"
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/paddock-tmux-test.XXXXXX")
+# A failed mktemp must stop the test: an empty TMP would be the current
+# directory, which cleanup removes.
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/paddock-tmux-test.XXXXXX") && [ -n "$TMP" ] || { echo "FAIL mktemp"; exit 1; }
 TMP=$(cd "$TMP" && pwd) # TMPDIR's trailing / would differ from the paths the plugin computes
 IN=paddock-test-in-$$
 OUT=paddock-test-out-$$
@@ -19,7 +21,7 @@ EMPTY=paddock-test-empty-$$
 # The test servers' sockets go in a private dir: tmux 3.8 leaves socket files
 # behind on exit. Under /tmp, as socket paths are limited to 104 bytes on macOS.
 # Its path has no "paddock" in it, for a binary called something else.
-TMUX_TMPDIR=$(mktemp -d /tmp/pdk-tmux-sock.XXXXXX)
+TMUX_TMPDIR=$(mktemp -d /tmp/pdk-tmux-sock.XXXXXX) && [ -n "$TMUX_TMPDIR" ] || { rm -rf "$TMP"; echo "FAIL mktemp"; exit 1; }
 export TMUX_TMPDIR
 cleanup() {
   chmod -R u+w "$TMP" 2>/dev/null # an interrupt inside the unwritable-dir check

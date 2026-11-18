@@ -380,7 +380,11 @@ impl Backend for Tmux {
             // takes one answer.
             Input::Paste(text) => {
                 self.control.cmd(&format!("set-buffer -b paddock -- {}", double_quoted(text)))?;
-                format!("paste-buffer -p -d -b paddock -t {pane}")
+                // -d deletes the buffer only once pasted: a failed paste
+                // must not leave the text in tmux.
+                return self.control.cmd(&format!("paste-buffer -p -d -b paddock -t {pane}")).map(|_| ()).inspect_err(|_| {
+                    let _ = self.control.cmd("delete-buffer -b paddock");
+                });
             }
         };
         self.control.cmd(&line).map(|_| ())
@@ -471,7 +475,8 @@ fn double_quoted(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
-            '\\' | '"' | '$' => {
+            // `~` too: tmux expands a leading one, even in double quotes.
+            '\\' | '"' | '$' | '~' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -626,7 +631,7 @@ mod tests {
 
     #[test]
     fn pastes_are_one_line_and_literal() {
-        assert_eq!(double_quoted("a\nb\t\"$HOME\" \\ #{x}\x1b"), r#""a\nb\t\"\$HOME\" \\ #{x}\033""#);
+        assert_eq!(double_quoted("a\nb\t\"$HOME\" \\ #{x}\x1b ~/x"), r#""a\nb\t\"\$HOME\" \\ #{x}\033 \~/x""#);
     }
 
     #[test]

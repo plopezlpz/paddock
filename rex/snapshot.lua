@@ -36,7 +36,8 @@ function block_call(session, block, method, args)
   return rex.block.call(TERMINAL, method, args)
 end
 
-local SHELLS = { sh = true, bash = true, zsh = true, fish = true, dash = true, ksh = true, tcsh = true, csh = true, nu = true }
+-- The shells, as model::is_shell lists them in paddock.
+local SHELLS = { sh = true, bash = true, zsh = true, fish = true, dash = true, ksh = true, mksh = true, tcsh = true, csh = true, nu = true }
 
 -- The record that says what the program is doing: the most recent blocked
 -- one (a sub-task, such as a subagent, may wait on the user while the root

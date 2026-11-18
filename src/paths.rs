@@ -250,14 +250,21 @@ fn main_checkout(root: &Path) -> Option<PathBuf> {
     (main.join(".git").canonicalize().ok()? == common).then(|| main.into())
 }
 
-fn git_main_worktree(root: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C"]).arg(root)
-        .args(["worktree", "list", "--porcelain", "-z"])
-        // Paddock's own launch environment must not redirect discovery.
+/// git run in DIR, as paddock runs it: paddock's own launch environment
+/// must not redirect it to another repository, and its output is in English
+/// (C locale), to be parsed.
+pub fn git(dir: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir)
         .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT")
-        .stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null()).stderr(Stdio::null());
+    c
+}
+
+fn git_main_worktree(root: &Path) -> Option<PathBuf> {
+    let output = git(root).args(["worktree", "list", "--porcelain", "-z"]).output().ok()?;
     if !output.status.success() {
         return None;
     }

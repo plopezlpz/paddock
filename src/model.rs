@@ -179,7 +179,8 @@ pub fn title_of(pane_title: &str, host: &str) -> String {
 }
 
 /// Whether COMMAND (pane_current_command) is a shell, which a pane shows at
-/// its prompt: login shells start with a dash.
+/// its prompt: login shells start with a dash. rex/snapshot.lua keeps the
+/// same list.
 pub fn is_shell(command: &str) -> bool {
     let name = command.rsplit('/').next().unwrap_or(command).trim_start_matches('-');
     matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "mksh" | "tcsh" | "csh" | "nu")
