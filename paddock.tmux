@@ -60,7 +60,14 @@ if ! out=$(tmux set-option -gqo @paddock-popup-width '#{?#{e|<:#{client_width},1
     # root table is listed now; it is empty if it was the one missing.
     *$'\n'client-closed*) out+=$'\n'$(tmux list-keys -aN -P root -T root 2>/dev/null || true) ;;
     *)
-      tmux display-message "paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
+      msg="paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
+      tmux display-message "$msg"
+      # Said once, to no one when tmux starts: the key says it again, on
+      # @paddock-key, else on prefix a unless that is the config's own.
+      k=$(tmux show-options -gqv @paddock-key)
+      if [ -n "$k" ] || ! tmux list-keys -T prefix a >/dev/null 2>&1; then
+        tmux bind -T prefix -- "${k:-a}" display-message "$msg"
+      fi
       exit 0
       ;;
   esac
