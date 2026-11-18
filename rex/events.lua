@@ -21,6 +21,7 @@ local EVENTS = {
   "session_created",
   "session_destroyed",
   "session_label_changed",
+  "session_moved",
   "window_created",
   "window_closed",
   "window_label_changed",

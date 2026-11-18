@@ -67,6 +67,9 @@ const RETRY_HERE: Duration = Duration::from_secs(1);
 /// can take many seconds, and its news is not to wait three times that.
 const SNAPSHOT_SPACING: u32 = 3;
 const REST: Duration = Duration::from_secs(1);
+/// How long after a snapshot whose reads failed in part (a connection's
+/// hiccup) those parts are read again.
+const UNSURE: Duration = Duration::from_secs(1);
 
 /// The `--rex` command line.
 #[derive(Default, Debug, PartialEq)]
@@ -770,6 +773,7 @@ impl<'a> Serving<'a> {
         let (sessions, _) = self.call(request, timeout);
         self.lock().reading = None;
         self.rest = Instant::now() + (start.elapsed() * SNAPSHOT_SPACING).min(REST);
+        let again = sessions.as_ref().ok().and_then(unsure);
         if let Some(w) = &mut self.worker {
             w.stale = sessions.is_err();
             w.read |= sessions.is_ok();
@@ -787,6 +791,10 @@ impl<'a> Serving<'a> {
         }
         latest.taken += 1;
         drop(latest);
+        if let Some((depth, blocks)) = again {
+            self.rest = Instant::now() + UNSURE;
+            queue_refresh(self.queue, self.latest, depth, blocks);
+        }
         (self.wake)(Msg::Changed);
         if let Some(done) = done {
             let _ = done.send(());
@@ -872,6 +880,10 @@ struct RexPane {
     pid: Option<u64>,
     #[serde(default)]
     cwd: String,
+    /// No program is in front (the process call said so): none confirms
+    /// the status.
+    #[serde(default)]
+    alone: bool,
     status: Option<RexStatus>,
 }
 
@@ -926,6 +938,27 @@ impl RexSession {
     fn ids(&self) -> impl Iterator<Item = &str> {
         let windows = self.windows.iter().flat_map(|w| std::iter::once(w.id.as_str()).chain(w.panes.iter().map(|p| p.id.as_str())));
         std::iter::once(self.id.as_str()).chain(windows)
+    }
+}
+
+/// What a snapshot (SESSIONS) says to read again, as rex/snapshot.lua
+/// marks it `unsure`: a session's tabs (Layout) or panes (Blocks) that a
+/// failed call left as last read.
+fn unsure(sessions: &Value) -> Option<(Depth, Vec<String>)> {
+    let flagged = |v: &Value| v.get("unsure").and_then(Value::as_bool).unwrap_or(false);
+    let sessions = sessions.as_array().map(Vec::as_slice).unwrap_or_default();
+    let layout = sessions.iter().any(flagged);
+    let blocks: Vec<String> = sessions
+        .iter()
+        .flat_map(|s| s.get("windows").and_then(Value::as_array).into_iter().flatten())
+        .flat_map(|w| w.get("panes").and_then(Value::as_array).into_iter().flatten())
+        .filter(|p| flagged(p))
+        .filter_map(|p| p.get("id").and_then(Value::as_str).map(String::from))
+        .collect();
+    match (layout, blocks.is_empty()) {
+        (false, true) => None,
+        (true, _) => Some((Depth::Layout, blocks)),
+        (false, false) => Some((Depth::Blocks, blocks)),
     }
 }
 
@@ -1049,10 +1082,10 @@ impl RexPane {
                 since,
                 hidden: saved.hidden.contains_key(&self.id),
                 // Its program has gone back to the shell (exited, crashed),
-                // or another one runs where it reported from: an editor,
-                // after it died without saying. A shell's report (a prompt
-                // hook) is for what it runs next.
-                stale: model::is_shell(&command) || status.owner.as_ref().is_some_and(|owner| owner.pid.filter(|p| *p != 0).zip(self.pid).is_some_and(|(owner, pid)| owner != pid) && !model::is_shell(&owner.name)),
+                // none runs there at all, or another one runs where it
+                // reported from: an editor, after it died without saying. A
+                // shell's report (a prompt hook) is for what it runs next.
+                stale: self.alone || model::is_shell(&command) || status.owner.as_ref().is_some_and(|owner| owner.pid.filter(|p| *p != 0).zip(self.pid).is_some_and(|(owner, pid)| owner != pid) && !model::is_shell(&owner.name)),
                 note,
                 transcript: String::new(),
                 asks: String::new(),
@@ -1639,6 +1672,7 @@ mod tests {
             argv0: "-zsh".into(),
             pid: None,
             cwd: String::new(),
+            alone: false,
             status: Some(RexStatus { state: "done".into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: String::new(), updated_at: String::new(), owner: None }),
         };
         let agent = pane.pane(1, None, &Saved::default()).agent.unwrap();
@@ -1647,11 +1681,29 @@ mod tests {
     }
 
     #[test]
+    fn no_program_in_front_makes_an_agent_stale() {
+        let blocked = || Some(RexStatus { state: "blocked".into(), app: "claude-code".into(), effective_app: String::new(), kind: "permission".into(), msg: String::new(), updated_at: String::new(), owner: None });
+        let pane = |alone| RexPane { id: "block:9".into(), active: false, label: String::new(), title: String::new(), argv0: String::new(), pid: None, cwd: String::new(), alone, status: blocked() };
+        assert!(pane(true).pane(1, None, &Saved::default()).agent.unwrap().stale, "its record outlived it");
+        assert!(!pane(false).pane(1, None, &Saved::default()).agent.unwrap().stale, "a worker that did not say: as before");
+    }
+
+    #[test]
+    fn what_a_snapshot_could_not_read_is_read_again() {
+        let pane = |id: &str, unsure: bool| json!({ "id": id, "unsure": unsure });
+        let snap = |session_unsure: bool, panes: Vec<Value>| json!([{ "id": "s", "unsure": session_unsure, "windows": [{ "id": "w", "panes": panes }] }, { "id": "t" }]);
+        assert_eq!(unsure(&snap(false, vec![pane("block:1", false)])), None);
+        assert_eq!(unsure(&snap(false, vec![pane("block:1", true), pane("block:2", false)])), Some((Depth::Blocks, vec!["block:1".to_string()])));
+        assert_eq!(unsure(&snap(true, vec![pane("block:1", false)])), Some((Depth::Layout, vec![])), "a session's tabs");
+        assert_eq!(unsure(&json!({})), None, "not a snapshot");
+    }
+
+    #[test]
     fn another_program_in_front_makes_an_agent_stale() {
         let stale = |argv0: &str, pid: Option<u64>, owner: Option<u64>| {
             let name = if owner == Some(1) { "zsh" } else { "claude" };
             let status = RexStatus { state: "done".into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: String::new(), updated_at: String::new(), owner: owner.map(|pid| RexOwner { pid: Some(pid), name: name.into() }) };
-            let pane = RexPane { id: "block:9".into(), active: true, label: String::new(), title: String::new(), argv0: argv0.into(), pid, cwd: String::new(), status: Some(status) };
+            let pane = RexPane { id: "block:9".into(), active: true, label: String::new(), title: String::new(), argv0: argv0.into(), pid, cwd: String::new(), alone: false, status: Some(status) };
             pane.pane(1, None, &Saved::default()).agent.unwrap().stale
         };
         assert!(!stale("claude", Some(7), Some(7)), "the program that reported");
@@ -1756,6 +1808,7 @@ mod tests {
             argv0: "claude".into(),
             pid: None,
             cwd: String::new(),
+            alone: false,
             status: Some(RexStatus { state: state.into(), app: "claude-code".into(), effective_app: String::new(), kind: String::new(), msg: "all done".into(), updated_at: "2026-11-04T10:00:00Z".into(), owner: None }),
         };
         let done_at = epoch("2026-11-04T10:00:00Z").unwrap();
@@ -1772,8 +1825,8 @@ mod tests {
 
     /// A scripted `rex` in a folder of its own, logging what it does to
     /// `log` there, and its snapshot requests to `requests`. Its worker
-    /// answers snapshots (failing while `fail` is there; `[{"id":"edited"}]`
-    /// after an edit), captures (a block's screen is its name; `slow` takes
+    /// answers snapshots (failing while `fail` is there; with block:7
+    /// unsure once, if `unsure` is; `[{"id":"edited"}]` after an edit), captures (a block's screen is its name; `slow` takes
     /// 0.3 s) and edits. Its listener says it listens (unless `deaf` is
     /// there), then stays quiet; if `listener-ends` is there, it takes the
     /// file and ends once `end` is.
@@ -1798,6 +1851,7 @@ while read -r line; do
     echo snapshot >> "$D/log"
     echo "$line" >> "$D/requests"
     if [ -e "$D/fail" ]; then echo '{"err":"boom"}'
+    elif [ -e "$D/unsure" ]; then rm "$D/unsure"; echo '{"ok":[{"id":"s","windows":[{"id":"w","panes":[{"id":"block:7","unsure":true}]}]}]}'
     elif [ -e "$D/edited" ]; then echo '{"ok":[{"id":"edited"}]}'
     else echo '{"ok":[{"id":"s"}]}'; fi ;;
   *'"op":"capture"'*)
@@ -1981,6 +2035,19 @@ done
         assert!(since(n).iter().all(|r| r.get("blocks").is_some()), "none reads everything: {:?}", since(n));
         host.edit(json!({ "op": "rename_session", "session": "s", "name": "x" })).0.unwrap();
         assert_eq!(fake.requests().pop().unwrap()["layout"], json!(true));
+    }
+
+    #[test]
+    fn a_pane_a_snapshot_could_not_read_is_read_again_a_moment_later() {
+        let fake = FakeRex::new(&["unsure"]);
+        let host = fake.host(Duration::from_secs(1));
+        until("the first snapshot", || host.lock().taken == 1);
+        let first = Instant::now();
+        until("its pane read again", || fake.requests().len() == 2);
+        // Not at once; the margin is the time the poll may take to see the
+        // first, on a busy machine.
+        assert!(first.elapsed() >= UNSURE / 2, "not at once: {:?}", first.elapsed());
+        assert_eq!(fake.requests()[1], json!({ "op": "snapshot", "skip": "", "blocks": ["block:7"], "layout": false }));
     }
 
     #[test]

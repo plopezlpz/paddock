@@ -6,6 +6,15 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-11-18
+
+### Fixed
+
+- Rex: a call that failed while reading the server (a connection's hiccup) could drop an agent waiting on you until its pane next changed, or show a session with no tabs. What was last read now stays, and is read again a second later.
+- Rex: an agent's status that outlived its program, with nothing running in the pane, showed as live; it is now unconfirmed, as with a shell in front.
+- Rex: the key did nothing when the popup could not open or close; Rex now shows why.
+- Rex: sessions reordered elsewhere showed in their old order until something else changed.
+
 ## [0.10.4] - 2026-11-18
 
 ### Fixed
@@ -264,7 +273,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.4...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.5...HEAD
+[0.10.5]: https://github.com/plopezlpz/paddock/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/plopezlpz/paddock/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/plopezlpz/paddock/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/plopezlpz/paddock/compare/v0.10.1...v0.10.2

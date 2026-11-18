@@ -68,27 +68,44 @@ local function status(session, block, pid)
   return (pid and pick(true)) or pick(false), answer ~= nil
 end
 
--- Blocks last read with a call unanswered (a connection's hiccup): what was
--- read of them may lack an agent's status, so it is not kept.
-local shaky = {}
+-- Blocks and sessions last read with a call unanswered (a connection's
+-- hiccup), and how many times in a row: what was read of them is not kept,
+-- and paddock asks for them again (`unsure`), up to TRIES times.
+local shaky, TRIES = {}, 3
 
-local function pane(session, block, active)
+-- Whether ID's read failed, counting the failures in a row; and whether
+-- paddock should ask for it again.
+local function failed(id, failing)
+  shaky[id] = failing and (shaky[id] or 0) + 1 or nil
+  return failing and shaky[id] <= TRIES or nil
+end
+
+-- BLOCK read, as a pane; what a call left unanswered is as HAD has it (the
+-- pane as last read), not missing: a failed read is not an agent gone.
+local function pane(session, block, active, had)
+  had = had or {}
   local id = block.block_id
   local process = block_call(session, id, "process")
-  local fg = (process or {}).foreground or {}
-  local cwd = fg.cwd or (block_call(session, id, "pwd") or {}).pwd
+  -- The process call answered without a program in front (`alone`): none
+  -- runs there to confirm a status.
+  local fg = process and (process.foreground or { alone = true })
+    or { pid = had.pid, argv0 = had.argv0, alone = had.alone }
+  local cwd = fg.cwd or (block_call(session, id, "pwd") or {}).pwd or had.cwd
   local st, answered = status(session, id, fg.pid)
-  shaky[id] = (not process or not answered) or nil
+  if not answered then st = had.status end
+  -- Only an agent's title is shown; one unanswered is as last read.
+  local title = st and block_call(session, id, "title")
   return {
     id = id,
     active = active,
     label = block.label,
-    -- Only an agent's title is shown.
-    title = st and (block_call(session, id, "title") or {}).title or nil,
+    title = title and title.title or (st and title == nil and had.title) or nil,
     argv0 = fg.argv0 or fg.name,
     pid = fg.pid,
     cwd = cwd,
+    alone = fg.alone,
     status = st,
+    unsure = failed(id, not process or not answered),
   }
 end
 
@@ -98,6 +115,42 @@ end
 local last, listed
 fresh = {}
 
+-- Session ID's tabs, from its view V, and their panes: with KEEP, those
+-- the last snapshot listed (WAS) are kept as it read them, but for shaky
+-- ones; the others are read, and what a call leaves unanswered is as WAS
+-- has it.
+local function windows(id, v, skip, keep, was)
+  local list = {}
+  for _, w in ipairs(v.windows or {}) do
+    places.windows[w.window_id] = id
+    -- While paddock's own block has the focus, the block it opened from
+    -- stands for it.
+    local focused = w.focused_block_id
+    if skip and focused == skip and (PADDOCK_FROM or "") ~= "" then focused = PADDOCK_FROM end
+    local panes = {}
+    for _, layer in ipairs(w.layers or {}) do
+      for _, b in ipairs(layer.blocks or {}) do
+        places.blocks[b.block_id] = { session = id, window = w.window_id }
+        if b.creator_name == TERMINAL and b.block_id ~= skip then
+          local had = was[b.block_id]
+          had = had and had.panes[had.at]
+          local p = keep and not shaky[b.block_id] and had
+          if p then
+            p.active, p.label = b.block_id == focused, b.label
+          else
+            p = pane(id, b, b.block_id == focused, had)
+            fresh[b.block_id] = true
+          end
+          panes[#panes + 1] = p
+          listed[b.block_id] = { session = id, block = b, panes = panes, at = #panes }
+        end
+      end
+    end
+    list[#list + 1] = { id = w.window_id, name = w.label, active = w.window_id == v.active_window_id, panes = panes }
+  end
+  return list
+end
+
 -- Every session, tab and terminal block. A pane costs two to four calls
 -- (its process, folder, status and title), a session one: with KEEP, the
 -- panes the last snapshot has are kept as it read them (the listener names
@@ -105,50 +158,41 @@ fresh = {}
 -- new ones are read. Over a network that is the difference between a
 -- snapshot in a tenth of a second and one that takes that for each pane.
 function snapshot(skip, keep)
-  local before = keep and listed or {}
+  local was, was_places, was_sessions = listed or {}, places, {}
+  for _, s in ipairs(last or {}) do was_sessions[s.id] = s end
+  -- Failing, it says so: no sessions is not the same.
+  local list, err = rex.call("session.list")
+  if not list then error(tostring(err or "rex.call failed"), 0) end
   -- Only the views of attaches this snapshot makes are fresh.
   views = {}
   places = { blocks = {}, windows = {} }
   listed = {}
-  local sessions = {}
-  -- Failing, it says so: no sessions is not the same.
-  local list, err = rex.call("session.list")
-  if not list then error(tostring(err or "rex.call failed"), 0) end
+  local sessions, seen = {}, {}
   for _, s in ipairs(list.sessions or {}) do
     local id = on(s.session_id)
-    local v = views[id] or rex.session.view { session_id = id } or {}
+    seen[id] = true
+    local v = views[id] or rex.session.view { session_id = id }
     views[id] = nil
-    local windows = {}
-    for _, w in ipairs(v.windows or {}) do
-      places.windows[w.window_id] = id
-      -- While paddock's own block has the focus, the block it opened from
-      -- stands for it.
-      local focused = w.focused_block_id
-      if skip and focused == skip and (PADDOCK_FROM or "") ~= "" then focused = PADDOCK_FROM end
-      local panes = {}
-      for _, layer in ipairs(w.layers or {}) do
-        for _, b in ipairs(layer.blocks or {}) do
-          places.blocks[b.block_id] = { session = id, window = w.window_id }
-          if b.creator_name == TERMINAL and b.block_id ~= skip then
-            local had = before[b.block_id]
-            local p = had and not shaky[b.block_id] and had.panes[had.at]
-            if p then
-              p.active, p.label = b.block_id == focused, b.label
-            else
-              p = pane(id, b, b.block_id == focused)
-              fresh[b.block_id] = true
-            end
-            panes[#panes + 1] = p
-            listed[b.block_id] = { session = id, block = b, panes = panes, at = #panes }
-          end
+    if v then
+      failed(id, false)
+      sessions[#sessions + 1] = { id = id, name = s.label, windows = windows(id, v, skip, keep, was) }
+    else
+      -- Unread, a session keeps its tabs as last read (none, if it is
+      -- new): a failed read is not a session emptied.
+      local had = was_sessions[id] or { windows = {} }
+      for _, w in ipairs(had.windows) do
+        places.windows[w.id] = id
+        for _, p in ipairs(w.panes) do
+          places.blocks[p.id], listed[p.id] = was_places.blocks[p.id], was[p.id]
+          -- A whole snapshot reads every pane: the retry does these.
+          if not keep then shaky[p.id] = shaky[p.id] or 0 end
         end
       end
-      windows[#windows + 1] = { id = w.window_id, name = w.label, active = w.window_id == v.active_window_id, panes = panes }
+      sessions[#sessions + 1] = { id = id, name = s.label, windows = had.windows, unsure = failed(id, true) }
     end
-    sessions[#sessions + 1] = { id = id, name = s.label, windows = windows }
   end
   for id in pairs(shaky) do
-    if not listed[id] then shaky[id] = nil end
+    if not listed[id] and not seen[id] then shaky[id] = nil end
   end
   last = sessions
   return sessions
@@ -167,7 +211,7 @@ function refresh(skip, blocks)
     end
     local p = listed[id]
     if p and not fresh[id] then
-      p.panes[p.at] = pane(p.session, p.block, p.panes[p.at].active)
+      p.panes[p.at] = pane(p.session, p.block, p.panes[p.at].active, p.panes[p.at])
       fresh[id] = true
     end
   end

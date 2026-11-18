@@ -37,6 +37,13 @@ local VERSION = nil
 local LABEL = "paddock"
 local FLAVOR = "com.superlogical.terminal.shell"
 
+-- RESULT, else ERR raised: Rex's calls answer nil and an error, which an
+-- action that returned them would drop, leaving the key to do nothing.
+local function check(result, err)
+  if result == nil and err ~= nil then error(tostring(err), 0) end
+  return result
+end
+
 -- The floating layer of WINDOW in SESSION that holds paddock, if any.
 local function find_layer(session, window)
   local view = rex.session.view { session_id = session }
@@ -79,7 +86,7 @@ local function open(opts, ctx, args)
   -- Open already: the key closes it.
   local open_layer = window and find_layer(session, window)
   if open_layer then
-    return rex.session.close_layer { session_id = session, layer_id = open_layer }
+    return check(rex.session.close_layer { session_id = session, layer_id = open_layer })
   end
   local argv = { "--rex", "--popup" }
   local function add(...)
@@ -103,13 +110,13 @@ local function open(opts, ctx, args)
   if opts.suggest then add("--suggest", opts.suggest) end
   local options = { command = command(opts.bin or BIN or "paddock", argv) }
   if opts.theme then options.theme = opts.theme end
-  return rex.session.new_layer {
+  return check(rex.session.new_layer {
     session_id = session,
     window_id = window,
     bounds = opts.bounds or { 0.1, 0.08, 0.8, 0.84 },
     focus = args.focus ~= false,
     layout = { block = { flavor = FLAVOR, label = LABEL, options = options } },
-  }
+  })
 end
 
 function M.setup(opts)

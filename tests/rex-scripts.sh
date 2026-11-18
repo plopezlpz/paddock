@@ -120,6 +120,58 @@ rex send-key -s "$SESSION" -b "$BLOCK" Enter >/dev/null 2>&1
 snap() { printf '{"op":"snapshot","skip":""}\n' | rex do "$TMP/worker.lua" 2>/dev/null | sed "s/.*\"id\":\"$BLOCK\"//; s/\"id\":\"block:.*//"; }
 blocked() { snap | grep -q '"state":"blocked"' && snap | grep -q 'Allow edit?'; }
 check "worker: a blocked sub-task's record is the one shown" until_ blocked
+
+# Calls that fail (a connection's hiccup), with Rex's calls swapped for ones
+# that answer nil and an error, as theirs do: what was read stays, and is
+# asked for again. And the action says why a popup did not open.
+{
+  printf 'PADDOCK_WORKER = true\nPADDOCK_ME = ""\nPADDOCK_HERE = ""\nPADDOCK_FROM = ""\n'
+  printf 'SESSION, BLOCK, ROOT = "%s", "%s", "%s"\n' "$SESSION" "$BLOCK" "$ROOT"
+  cat "$ROOT/rex/snapshot.lua"
+  cat <<'LUA'
+local call, view, new_layer = rex.block.call, rex.session.view, rex.session.new_layer
+local function say(name, ok) print((ok and "ok   " or "FAIL ") .. name) end
+local function ours(sessions)
+  for _, s in ipairs(sessions) do if s.id == SESSION then return s end end
+end
+local function pane_of(s)
+  for _, w in ipairs(s and s.windows or {}) do
+    for _, p in ipairs(w.panes) do if p.id == BLOCK then return p end end
+  end
+end
+local function blocked(p) return p and p.status and p.status.state == "blocked" end
+local p = pane_of(ours(snapshot("")))
+say("faults: the pane is read, blocked", blocked(p) and p.argv0 and p.unsure == nil)
+rex.block.call = function(c, m, a)
+  if m == "process" or m == "program_status" then return nil, "hiccup" end
+  return call(c, m, a)
+end
+local q = pane_of(ours(snapshot("")))
+say("faults: a pane's calls unanswered keep its status and program", blocked(q) and q.argv0 == p.argv0 and q.pid == p.pid)
+say("faults: and ask for it again", q and q.unsure == true)
+snapshot("")
+snapshot("")
+q = pane_of(ours(snapshot("")))
+say("faults: but not after three failures in a row", blocked(q) and q.unsure == nil)
+rex.block.call = call
+rex.session.view = function() return nil, "hiccup" end
+local s = ours(snapshot("", true))
+say("faults: a session unread keeps its tabs, and asks again", pane_of(s) and s.unsure == true)
+rex.session.view = view
+s = ours(snapshot(""))
+say("faults: read again, nothing is unsure", s and s.unsure == nil and blocked(pane_of(s)) and pane_of(s).unsure == nil)
+local actions = {}
+rex.action, rex.bind = function(a) actions[a.name] = a end, nil
+dofile(ROOT .. "/rex/paddock.lua").setup {}
+rex.session.new_layer = function() return nil, "no room" end
+local ok, err = pcall(actions.paddock.run, { session_id = SESSION }, {})
+rex.session.new_layer = new_layer
+say("action: a popup that cannot open says why", not ok and tostring(err):find("no room", 1, true) ~= nil)
+LUA
+} >"$TMP/faults.lua"
+rex do "$TMP/faults.lua" >"$TMP/faults.out" 2>&1
+cat "$TMP/faults.out"
+check "faults: all seven ran" [ "$(grep -c '^ok ' "$TMP/faults.out")" = 7 ]
 rex send-key -s "$SESSION" -b "$BLOCK" ctrl+c >/dev/null 2>&1
 
 # A record's owner is the process in front when it came (an agent stays the
