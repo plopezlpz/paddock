@@ -10,6 +10,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::diffstat::Diff;
 use crate::model::{Mark, Snapshot, State, Target};
 use crate::paths::{AgentPath, PathCache};
 
@@ -66,19 +67,32 @@ pub enum RowKind {
     /// single pane (nothing to list), else whether its panes are listed.
     Window { index: String, name: String, path: AgentPath, panes: usize, state: Option<State>, active: bool, last: bool, expanded: Option<bool> },
     Pane { index: String, command: String, state: Option<State>, last: bool, parent_last: bool },
-    /// `note`: what the agent last said (shown while it is news: not idle).
-    /// `host`: its session's Rex host, if not paddock's own server. `place`:
-    /// where it runs, `session:window` (the window alone under its
-    /// session's header; an automatically named window by its index).
-    /// DIFF: the changes waiting in its folder (`+12 −3`), empty if none or
-    /// not known.
-    Agent { state: State, stale: bool, kind: String, title: String, note: String, path: AgentPath, age: String, host: String, place: String, diff: String },
+    Agent(Card),
     /// `gap`: not the first header (wide, a blank line goes above it).
     Header { label: String, count: usize, gap: bool },
     /// One selectable heading for all hidden cards, without internal headers.
     Hidden { count: usize, expanded: bool, gap: bool },
     /// The "+ new" row being named (App's create mode says what it is).
     New,
+}
+
+/// An agent's card. `note`: what the agent last said (shown while it is
+/// news: not idle). `host`: its session's Rex host, if not paddock's own
+/// server. `place`: where it runs, `session:window` (the window alone under
+/// its session's header; an automatically named window by its index).
+/// DIFF: the changes waiting in its folder (`+12 −3`), empty if none or not
+/// known.
+pub struct Card {
+    pub state: State,
+    pub stale: bool,
+    pub kind: String,
+    pub title: String,
+    pub note: String,
+    pub path: AgentPath,
+    pub age: String,
+    pub host: String,
+    pub place: String,
+    pub diff: String,
 }
 
 /// What the "+ new" row being named creates (^s, ^s^s).
@@ -95,11 +109,17 @@ impl Row {
     /// do too. Wide, a header after the first has a blank line above it.
     pub fn height(&self, compact: bool) -> u16 {
         match self.kind {
-            RowKind::Agent { .. } => 2,
+            RowKind::Agent(_) => 2,
             RowKind::Window { .. } if compact => 2,
             RowKind::Header { gap: true, .. } | RowKind::Hidden { gap: true, .. } if !compact => 2,
             _ => 1,
         }
+    }
+
+    /// Whether the selection can rest on it: a row with a target, or the
+    /// hidden heading.
+    pub fn selectable(&self) -> bool {
+        self.target.is_some() || matches!(self.kind, RowKind::Hidden { .. })
     }
 }
 
@@ -422,20 +442,24 @@ enum GroupKey {
 /// then when it entered it).
 type GroupItem = (GroupKey, String, (State, Option<u64>), Row);
 
-/// One card per agent pane, grouped under headers (none for Group::Flat);
-/// inside a group the most urgent state comes first, then the agent that
-/// entered it most recently.
-/// Hidden cards have the same ordering, under one collapsible heading without
-/// internal group headers. Search reveals them without changing the preference.
-/// KEEP is listed whatever the filter says (see `Tree::keep`).
-#[cfg(test)]
-pub fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, paths: &mut PathCache, now: u64, hidden_expanded: bool) -> Vec<Row> {
-    agents_noted(snap, filter, group, keep, paths, now, hidden_expanded, &Notes::new())
-}
-
 /// What transcripts say (transcript.rs), by file: what for (the agent's
 /// mark when it was read), and what.
 pub type Notes = HashMap<String, (Mark, String)>;
+
+/// What the cards show besides the snapshot and the filter.
+pub struct Cards<'a> {
+    pub group: Group,
+    /// Listed whatever the filter says (see `Tree::keep`).
+    pub keep: Option<&'a Target>,
+    /// Seconds since the epoch, for ages.
+    pub now: u64,
+    /// Whether the hidden cards are listed under their heading.
+    pub hidden_expanded: bool,
+    /// Given an agent that has no note of its own (shown and searched alike).
+    pub notes: &'a Notes,
+    /// The changes waiting in each folder, as the worker found them.
+    pub diffs: &'a HashMap<String, Diff>,
+}
 
 /// Where an agent runs, as its card shows it: `session:window`, or the
 /// window alone (IN_SESSION: under its session's header). A window named
@@ -450,15 +474,18 @@ fn place(s: &crate::model::Session, w: &crate::model::Window, in_session: bool) 
     }
 }
 
-/// `agents`, with an agent that has no note of its own given what its
-/// transcript says in NOTES (shown and searched alike).
-#[allow(clippy::too_many_arguments)]
-pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, paths: &mut PathCache, now: u64, hidden_expanded: bool, notes: &Notes) -> Vec<Row> {
+/// One card per agent pane, grouped under headers (none for Group::Flat);
+/// inside a group the most urgent state comes first, then the agent that
+/// entered it most recently.
+/// Hidden cards have the same ordering, under one collapsible heading without
+/// internal group headers. Search reveals them without changing the preference.
+pub fn agents(snap: &Snapshot, filter: &mut Filter, cards: &Cards, paths: &mut PathCache) -> Vec<Row> {
+    let group = cards.group;
     let mut items: Vec<GroupItem> = Vec::new();
     let mut hidden: Vec<GroupItem> = Vec::new();
     for (s, w, p) in snap.unique_panes() {
         let Some(a) = &p.agent else { continue };
-        let note = match notes.get(&a.transcript) {
+        let note = match cards.notes.get(&a.transcript) {
             Some((mark, said)) if a.note.is_empty() && *mark == a.mark() => said,
             _ => &a.note,
         };
@@ -470,7 +497,7 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
         // Its session, window and host too: a card shows them (its place,
         // `@host`).
         let score = filter.score(&format!("{} {} {} {} {} {}{asking}{} {}", a.title, place(s, w, false), s.host, path_text(&p.path, &path), kind, a.state.label(), if a.stale { " stale" } else { "" }, note));
-        if score.is_none() && keep != Some(&target) {
+        if score.is_none() && cards.keep != Some(&target) {
             continue;
         }
         let (key, label) = match group {
@@ -489,18 +516,19 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
         };
         let row = Row {
             target: Some(target),
-            kind: RowKind::Agent {
+            kind: RowKind::Agent(Card {
                 state: a.state,
                 stale: a.stale,
                 kind: kind.to_string(),
                 title: a.title.clone(),
                 note: note.clone(),
                 path,
-                age: age(a.since, now),
+                age: age(a.since, cards.now),
                 host: s.host.clone(),
                 place: place(s, w, group == Group::Session && !a.hidden),
-                diff: String::new(),
-            },
+                // A settled agent's (a working one's are on the move).
+                diff: cards.diffs.get(&p.path).filter(|_| s.host.is_empty() && a.state != State::Working).map(Diff::label).unwrap_or_default(),
+            }),
             preview: Some(p.id.clone()),
             score,
         };
@@ -541,7 +569,7 @@ pub fn agents_noted(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Op
     }
     if !hidden.is_empty() {
         // Searching reveals matches without changing the saved preference.
-        let expanded = hidden_expanded || filter.active();
+        let expanded = cards.hidden_expanded || filter.active();
         out.push(Row { target: None, kind: RowKind::Hidden { count: hidden.len(), expanded, gap: !out.is_empty() }, preview: None, score: None });
         if expanded {
             out.extend(hidden.into_iter().map(|it| it.3));
@@ -567,7 +595,8 @@ mod tests {
     }
 
     fn agents(snap: &Snapshot, filter: &mut Filter, group: Group, keep: Option<&Target>, home: &str, now: u64, hidden_expanded: bool) -> Vec<Row> {
-        super::agents(snap, filter, group, keep, &mut PathCache::new(home.into()), now, hidden_expanded)
+        let cards = Cards { group, keep, now, hidden_expanded, notes: &Notes::new(), diffs: &HashMap::new() };
+        super::agents(snap, filter, &cards, &mut PathCache::new(home.into()))
     }
 
     fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree) -> Vec<Row> {
@@ -586,7 +615,7 @@ mod tests {
                 RowKind::Session { name, .. } => name.clone(),
                 RowKind::Window { name, .. } => format!("  {name}"),
                 RowKind::Pane { command, .. } => format!("    {command}"),
-                RowKind::Agent { title, .. } => format!("  {title}"),
+                RowKind::Agent(Card { title, .. }) => format!("  {title}"),
                 RowKind::Header { label, count, .. } => format!("{label} ({count})"),
                 RowKind::Hidden { count, .. } => format!("hidden ({count})"),
                 RowKind::New => "new".into(),
@@ -608,7 +637,7 @@ mod tests {
         let snap = snap();
         let rows = agents(&snap, &mut filter("claude"), Group::Flat, None, "/h", 0, false);
         assert_eq!(rows.len(), 1);
-        let RowKind::Agent { kind, path, .. } = &rows[0].kind else { panic!("expected an agent card") };
+        let RowKind::Agent(Card { kind, path, .. }) = &rows[0].kind else { panic!("expected an agent card") };
         assert_eq!(kind, "claude");
         assert_eq!(path.display(80), "~/a/src");
         assert_eq!(pane_title(&snap, rows[0].preview.as_deref().unwrap()), "work:1.1 · claude", "no host: none shown");
@@ -621,8 +650,8 @@ mod tests {
             let snap = if hidden { crate::backend::tmux::fixture_hidden(&[line], &["%1"]) } else { fixture(&[line]) };
             for query in ["company", "'/h/source/company", "'~/source/company", "main-repo", "worktrees/topic", "session", "claude", "working", "task"] {
                 let rows = agents(&snap, &mut filter(query), Group::Flat, None, "/h", 0, false);
-                assert_eq!(rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).count(), 1, "{query}, hidden={hidden}");
-                let path = rows.iter().find_map(|r| match &r.kind { RowKind::Agent { path, .. } => Some(path), _ => None }).unwrap();
+                assert_eq!(rows.iter().filter(|r| matches!(r.kind, RowKind::Agent(_))).count(), 1, "{query}, hidden={hidden}");
+                let path = rows.iter().find_map(|r| match &r.kind { RowKind::Agent(Card { path, .. }) => Some(path), _ => None }).unwrap();
                 assert_eq!(path.full, "~/source/company/main-repo/worktrees/topic/src");
                 assert_eq!(path.display(30), "…/topic/src");
             }
@@ -728,7 +757,7 @@ mod tests {
             assert_eq!(ids(&rows[..heading]), baseline.iter().filter(|id| !hidden_ids.contains(&id.as_str())).cloned().collect::<Vec<_>>());
             assert_eq!(ids(&rows[heading + 1..]), baseline.iter().filter(|id| hidden_ids.contains(&id.as_str())).cloned().collect::<Vec<_>>());
             assert!(matches!(rows[heading].kind, RowKind::Hidden { count: 3, expanded: true, gap: true }));
-            assert!(rows[heading + 1..].iter().all(|r| matches!(r.kind, RowKind::Agent { .. })));
+            assert!(rows[heading + 1..].iter().all(|r| matches!(r.kind, RowKind::Agent(_))));
             let closed = agents(&mixed, &mut filter(""), group, None, "", 400, false);
             assert_eq!(ids(&closed), ["%2"]);
             assert!(matches!(closed.last().unwrap().kind, RowKind::Hidden { count: 3, expanded: false, .. }));
@@ -753,6 +782,21 @@ mod tests {
         }
         assert!(agents(&snap, &mut filter("nothing-matches"), Group::Status, None, "", 0, true).is_empty());
         assert!(matches!(agents(&snap, &mut filter("   "), Group::Status, None, "", 0, false)[0].kind, RowKind::Hidden { expanded: false, .. }), "blank query is not a search");
+    }
+
+    #[test]
+    fn only_a_settled_local_agent_shows_its_folders_changes() {
+        let mut snap = fixture(&[
+            "$1|s|@1|1|w|1|0|%1|0|1|claude||idle|0|claude|done||||/a",
+            "$1|s|@1|1|w|1|0|%2|1|0|claude||working|0|claude|busy||||/a",
+            "$2|r|@2|1|w|1|0|%3|0|1|claude||idle|0|claude|remote||||/a",
+        ]);
+        snap.sessions[1].host = "devbox".into();
+        let diffs = HashMap::from([("/a".to_string(), Diff { added: 3, removed: 1, new: 0 })]);
+        let cards = Cards { group: Group::Flat, keep: None, now: 0, hidden_expanded: false, notes: &Notes::new(), diffs: &diffs };
+        let rows = super::agents(&snap, &mut filter(""), &cards, &mut PathCache::new("/h".into()));
+        let diff = |title: &str| rows.iter().find_map(|r| match &r.kind { RowKind::Agent(c) if c.title == title => Some(c.diff.clone()), _ => None }).unwrap();
+        assert_eq!([diff("done"), diff("busy"), diff("remote")], ["+3 −1", "", ""]);
     }
 
     #[test]
@@ -908,12 +952,12 @@ mod tests {
         let rows = agents(&snap, &mut filter(""), Group::Folder, None, "/h", 0, false);
         let headers: Vec<String> = rows.iter().filter_map(|r| match &r.kind { RowKind::Header { label, .. } => Some(label.clone()), _ => None }).collect();
         assert_eq!(headers, ["~/a/src", "one:…/company/project", "two:…/company/project"]);
-        let places = |rows: &[Row]| -> Vec<String> { rows.iter().filter_map(|r| match &r.kind { RowKind::Agent { place, .. } => Some(place.clone()), _ => None }).collect() };
+        let places = |rows: &[Row]| -> Vec<String> { rows.iter().filter_map(|r| match &r.kind { RowKind::Agent(Card { place, .. }) => Some(place.clone()), _ => None }).collect() };
         assert_eq!(places(&rows), ["web:api", "web:api", "ml:train", "ml:train"]);
-        let hosts: Vec<String> = rows.iter().filter_map(|r| match &r.kind { RowKind::Agent { host, .. } => Some(host.clone()), _ => None }).collect();
+        let hosts: Vec<String> = rows.iter().filter_map(|r| match &r.kind { RowKind::Agent(Card { host, .. }) => Some(host.clone()), _ => None }).collect();
         assert_eq!(hosts, ["", "", "one", "two"]);
         // What a card shows finds it: its window, and a host no path names.
-        let found = |snap: &Snapshot, query: &str| agents(snap, &mut filter(query), Group::Folder, None, "/h", 0, false).iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).count();
+        let found = |snap: &Snapshot, query: &str| agents(snap, &mut filter(query), Group::Folder, None, "/h", 0, false).iter().filter(|r| matches!(r.kind, RowKind::Agent(_))).count();
         assert_eq!(found(&snap, "train"), 2);
         snap.sessions[0].windows[0].panes[0].path.clear();
         snap.sessions[0].host = "zq".into();

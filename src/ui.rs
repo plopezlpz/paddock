@@ -15,7 +15,7 @@ use crate::app::{App, Command, Create, Hint, Menu, Mode, Rename, Status, Tab, Vi
 use crate::edit::LineEdit;
 use crate::model::State;
 use crate::paths::AgentPath;
-use crate::rows::{fit, short_path, split_host, Filter, New, Row, RowKind};
+use crate::rows::{fit, short_path, split_host, Card, Filter, New, Row, RowKind};
 use crate::theme::{agent_icon, Theme};
 #[cfg(test)]
 use crate::theme::AgentIcons;
@@ -46,10 +46,10 @@ fn dot(t: &Theme, s: Option<State>) -> Span<'static> {
     }
 }
 
-/// TEXT in STYLE, as ROW shows it: the characters FILTER matched marked,
-/// if the row matches (not one listed for context).
-fn hl(text: String, style: Style, row: &Row, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
-    let hits = filter.filter(|_| row.score.is_some()).map(|f| f.hits(&text)).unwrap_or_default();
+/// TEXT in STYLE, the characters FILTER matched marked (none for a row
+/// listed for context, not matching).
+fn hl(text: String, style: Style, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
+    let hits = filter.map(|f| f.hits(&text)).unwrap_or_default();
     if hits.is_empty() {
         return vec![Span::styled(text, style)];
     }
@@ -355,13 +355,15 @@ fn window_detail(path: &AgentPath, panes: usize, width: usize) -> String {
 }
 
 /// A row's lines, and the column of its ▸/▾ (a window with panes). The
-/// selected row's main text is bold in the accent; FILTER marks matches.
-/// WIN: what a window is called.
+/// selected row's main text is bold in the accent; FILTER marks matches
+/// (if the row matches, not one listed for context). WIN: what a window is
+/// called.
 fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Option<&Filter>, win: &str, t: &Theme) -> (Vec<Line<'static>>, Option<u16>) {
     let width = width as usize;
     let mark = if selected { Span::styled("▌", Style::new().fg(t.accent)) } else { Span::raw(" ") };
     let main = |s: Style| if selected { t.selected() } else { s };
-    let marked = |text: String, style: Style| hl(text, style, row, filter, t);
+    let filter = filter.filter(|_| row.score.is_some());
+    let marked = |text: String, style: Style| hl(text, style, filter, t);
     let tree = |s: &str| Span::styled(s.to_string(), t.muted());
     match &row.kind {
         RowKind::Session { name, host, away, windows, current } => {
@@ -401,8 +403,7 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
             (vec![Line::from(line)], None)
         }
         RowKind::Window { index, name, path, panes, state, active, last, expanded } => {
-            let idx = if *active { Style::new().fg(t.accent) } else { t.muted() };
-            let mut first = vec![mark.clone(), tree(if *last { " └─ " } else { " ├─ " }), Span::styled(format!("{index} "), idx), dot(t, *state), Span::raw(" ")];
+            let mut first = window_head(mark.clone(), index, *state, *active, *last, t);
             let indent = cols(&first);
             // The name gets what the toggle and the folder leave; when both
             // are long, the folder keeps half (compact, it has its own line).
@@ -440,7 +441,7 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
             line.extend(marked(command.clone(), main(Style::new())));
             (vec![Line::from(line)], None)
         }
-        RowKind::Agent { .. } => (card_lines(row, mark, width, selected, filter, t), None),
+        RowKind::Agent(card) => (card_lines(card, mark, width, selected, filter, t), None),
         RowKind::Header { label, count, gap } => {
             let line = Line::from(vec![
                 Span::styled(format!(" {label} "), t.muted().add_modifier(Modifier::BOLD)),
@@ -456,6 +457,13 @@ fn row_lines(row: &Row, selected: bool, compact: bool, width: u16, filter: Optio
         // Only listed while it is being named: see create_lines.
         RowKind::New => (vec![Line::from(vec![mark, Span::raw(" "), Span::styled("+ new", Style::new().fg(t.accent))])], None),
     }
+}
+
+/// What starts a window's first line, up to its name: its tree line, index
+/// (in the accent when ACTIVE) and state.
+fn window_head(mark: Span<'static>, index: &str, state: Option<State>, active: bool, last: bool, t: &Theme) -> Vec<Span<'static>> {
+    let idx = if active { Style::new().fg(t.accent) } else { t.muted() };
+    vec![mark, Span::styled(if last { " └─ " } else { " ├─ " }, t.muted()), Span::styled(format!("{index} "), idx), dot(t, state), Span::raw(" ")]
 }
 
 /// The "+ new" row being named: the field where the window (WIN) or session
@@ -491,9 +499,9 @@ fn create_lines(c: &Create, compact: bool, width: u16, home: &str, win: &str, t:
 
 /// The second line starts with state-colored elapsed time. Unconfirmed states keep
 /// their explicit question mark, including when there is no timestamp.
-fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
+fn agent_detail_prefix(card: &Card, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
+    let Card { state, stale, age, .. } = card;
     let mut second = vec![mark, Span::raw("   ")];
-    let RowKind::Agent { state, stale, age, .. } = &row.kind else { return second };
     let when = match (*stale, age.is_empty()) {
         (true, true) => format!("{}?", state.label()),
         (true, false) => format!("{age} {}?", state.label()),
@@ -508,38 +516,37 @@ fn agent_detail_prefix(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'s
 
 /// An agent's card: two lines in both layouts. The first names it, the
 /// second says how it is (see card_first and card_second).
-fn card_lines(row: &Row, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
-    let titled = matches!(&row.kind, RowKind::Agent { title, .. } if !title.is_empty());
-    vec![card_first(row, mark.clone(), width, selected, filter, t), card_second(row, mark, width, titled, filter, t)]
+fn card_lines(card: &Card, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Vec<Line<'static>> {
+    let titled = !card.title.is_empty();
+    vec![card_first(card, mark.clone(), width, selected, filter, t), card_second(card, mark, width, titled, filter, t)]
 }
 
 /// What starts a card's first line: its state and agent.
-fn card_head(row: &Row, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
-    let RowKind::Agent { state, kind, .. } = &row.kind else { return vec![mark] };
-    let icon = Span::styled(agent_icon(kind, t.agent_icons), bold());
+fn card_head(card: &Card, mark: Span<'static>, t: &Theme) -> Vec<Span<'static>> {
+    let icon = Span::styled(agent_icon(&card.kind, t.agent_icons), bold());
     let padding = 3usize.saturating_sub(icon.width());
-    vec![mark, Span::raw(" "), dot(t, Some(*state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))]
+    vec![mark, Span::raw(" "), dot(t, Some(card.state)), Span::raw(" "), icon, Span::raw(" ".repeat(padding))]
 }
 
 /// A folder as a card shows it: its host's `host:` in the hint colour, as
 /// Sessions shows `@host`.
-fn folder_spans(text: String, host: &str, style: Style, row: &Row, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
+fn folder_spans(text: String, host: &str, style: Style, filter: Option<&Filter>, t: &Theme) -> Vec<Span<'static>> {
     match text.strip_prefix(host).filter(|rest| !host.is_empty() && rest.starts_with(':')) {
         Some(rest) => {
-            let mut spans = hl(format!("{host}:"), Style::new().fg(t.hint), row, filter, t);
-            spans.extend(hl(rest[1..].to_string(), style, row, filter, t));
+            let mut spans = hl(format!("{host}:"), Style::new().fg(t.hint), filter, t);
+            spans.extend(hl(rest[1..].to_string(), style, filter, t));
             spans
         }
-        None => hl(text, style, row, filter, t),
+        None => hl(text, style, filter, t),
     }
 }
 
 /// A card's first line: its title, bright (in the accent when SELECTED), or
 /// its folder while it has none; the host where no folder shown says it,
 /// and the changes waiting at the right, the first to go when short.
-fn card_first(row: &Row, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
-    let mut first = card_head(row, mark, t);
-    let RowKind::Agent { state, title, note, path, host, diff, .. } = &row.kind else { return Line::from(first) };
+fn card_first(card: &Card, mark: Span<'static>, width: usize, selected: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
+    let Card { state, title, note, path, host, diff, .. } = card;
+    let mut first = card_head(card, mark, t);
     let identity = if selected { t.selected() } else { bold() };
     let room = width.saturating_sub(cols(&first));
     // A titled card's folder is on its second line, unless news is.
@@ -552,12 +559,12 @@ fn card_first(row: &Row, mark: Span<'static>, width: usize, selected: bool, filt
     let changes = if changes.width() + lead_w > room { String::new() } else { changes };
     let room = room - changes.width();
     if title.is_empty() {
-        first.extend(folder_spans(path.display(room), host, identity, row, filter, t));
+        first.extend(folder_spans(path.display(room), host, identity, filter, t));
     } else {
-        first.extend(hl(fit(title, room), identity, row, filter, t));
+        first.extend(hl(fit(title, room), identity, filter, t));
     }
     if !at.is_empty() {
-        first.extend(hl(at, Style::new().fg(t.hint), row, filter, t));
+        first.extend(hl(at, Style::new().fg(t.hint), filter, t));
     }
     if !changes.is_empty() {
         push_right(&mut first, Span::styled(changes.trim_start().to_string(), t.muted()), width);
@@ -569,9 +576,9 @@ fn card_first(row: &Row, mark: Span<'static>, width: usize, selected: bool, filt
 /// or says while it isn't idle, in its state's colour, else (TITLED, its
 /// folder being on the first line otherwise) its folder, or what it last
 /// said; and where it runs, at the right, the first to go when short.
-fn card_second(row: &Row, mark: Span<'static>, width: usize, titled: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
-    let mut second = agent_detail_prefix(row, mark, t);
-    let RowKind::Agent { state, note, path, host, place, .. } = &row.kind else { return Line::from(second) };
+fn card_second(card: &Card, mark: Span<'static>, width: usize, titled: bool, filter: Option<&Filter>, t: &Theme) -> Line<'static> {
+    let Card { state, note, path, host, place, .. } = card;
+    let mut second = agent_detail_prefix(card, mark, t);
     let room = width.saturating_sub(cols(&second));
     let news = *state != State::Idle && !note.is_empty();
     let folder = titled && !news;
@@ -579,17 +586,17 @@ fn card_second(row: &Row, mark: Span<'static>, width: usize, titled: bool, filte
     let place_w = if place.is_empty() || body_w + place.width() + 2 > room { 0 } else { place.width() + 2 };
     let room = room - place_w;
     if folder {
-        second.extend(folder_spans(path.display(room), host, t.muted(), row, filter, t));
+        second.extend(folder_spans(path.display(room), host, t.muted(), filter, t));
     } else if news && room > 2 {
         second.push(Span::styled("› ", t.muted()));
-        second.extend(hl(fit(note, room - 2), t.state(*state), row, filter, t));
+        second.extend(hl(fit(note, room - 2), t.state(*state), filter, t));
     } else if !news && !note.is_empty() {
-        second.extend(hl(fit(note, room), t.muted(), row, filter, t));
+        second.extend(hl(fit(note, room), t.muted(), filter, t));
     }
     if place_w > 0 {
         let at = width.saturating_sub(place.width());
         second.push(Span::raw(" ".repeat(at.saturating_sub(cols(&second)))));
-        second.extend(hl(place.clone(), t.muted(), row, filter, t));
+        second.extend(hl(place.clone(), t.muted(), filter, t));
     }
     Line::from(second)
 }
@@ -607,35 +614,24 @@ fn rename_lines(row: &Row, r: &Rename, compact: bool, width: u16, t: &Theme) -> 
         (None, None) if r.field.is_empty() && !r.placeholder.is_empty() => Some(Span::styled("automatic", t.muted())),
         _ => None,
     };
-    if matches!(row.kind, RowKind::Agent { .. }) {
+    // What comes before the name, as the row draws it, and the lines under
+    // it.
+    let (mut first, rest) = match &row.kind {
         // The field stands for the title, on the first line; the folder
         // shows on the second, as for a titled card.
-        let mut first = card_head(row, mark.clone(), t);
-        first.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
-        // Reserve a usable editor before fitting feedback, rather than
-        // letting a long error overflow the row.
-        let feedback_room = w.saturating_sub(cols(&first) + 6 + 2);
-        let slot = slot.filter(|_| feedback_room > 0)
-            .map(|s| Span::styled(fit(&s.content, feedback_room), s.style));
-        let room = w.saturating_sub(cols(&first) + slot.as_ref().map_or(0, |s| s.width() + 2));
-        first.extend(field_spans(&r.field, &r.placeholder, room, t));
-        if let Some(slot) = slot {
-            push_right(&mut first, slot, w);
+        RowKind::Agent(card) => (card_head(card, mark.clone(), t), vec![card_second(card, mark, w, true, None, t)]),
+        // Compact, the folder under the name.
+        RowKind::Window { index, state, active, last, .. } => {
+            let rest = row_lines(row, true, compact, width, None, "window", t).0.split_off(1);
+            (window_head(mark, index, *state, *active, *last, t), rest)
         }
-        return vec![Line::from(first), card_second(row, mark, w, true, None, t)];
-    }
-    // What comes before the name, as the row draws it.
-    let (mut first, rest) = match &row.kind {
-        RowKind::Window { .. } => {
-            let (mut lines, _) = row_lines(row, true, compact, width, None, "window", t);
-            let line = lines.remove(0);
-            // The tree, index and dot: everything up to the name.
-            let prefix: Vec<Span<'static>> = line.spans.into_iter().take(5).collect();
-            (prefix, lines)
-        }
-        _ => (vec![mark.clone(), Span::raw(" ")], Vec::new()),
+        _ => (vec![mark, Span::raw(" ")], Vec::new()),
     };
     first.extend([Span::styled("✎", Style::new().fg(t.accent)), Span::raw(" ")]);
+    // Reserve a usable editor before fitting feedback, rather than
+    // letting a long error overflow the row.
+    let feedback_room = w.saturating_sub(cols(&first) + 6 + 2);
+    let slot = slot.filter(|_| feedback_room > 0).map(|s| Span::styled(fit(&s.content, feedback_room), s.style));
     let room = w.saturating_sub(cols(&first) + slot.as_ref().map_or(0, |s| s.width() + 2));
     first.extend(field_spans(&r.field, &r.placeholder, room, t));
     if let Some(slot) = slot {
@@ -746,7 +742,7 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
         // name another).
         // The changes, at the end of a card's first line, likewise.
         let before_place = bottom.and_then(|b| match &app.rows[b].kind {
-            RowKind::Agent { place, diff, .. } => {
+            RowKind::Agent(Card { place, diff, .. }) => {
                 let text = last.to_string();
                 [place, diff].into_iter().filter(|end| !end.is_empty())
                     .find_map(|end| text.strip_suffix(end.as_str()).filter(|rest| rest.ends_with("  ")))
@@ -771,14 +767,13 @@ fn draw_rows(f: &mut Frame, app: &App, view: &mut View, area: Rect, t: &Theme) {
 /// How many selectable rows (with a target, or the hidden heading) are out
 /// of view above OFFSET and, in HEIGHT lines from it, below or cut off.
 fn beyond(rows: &[Row], offset: usize, compact: bool, height: u16) -> (usize, usize) {
-    let selectable = |r: &&Row| r.target.is_some() || matches!(r.kind, RowKind::Hidden { .. });
     let mut used = 0;
     let shown = rows.iter().skip(offset).take_while(|r| {
         used += r.height(compact);
         used <= height
     });
     let end = offset + shown.count();
-    (rows[..offset.min(rows.len())].iter().filter(selectable).count(), rows[end.min(rows.len())..].iter().filter(selectable).count())
+    (rows[..offset.min(rows.len())].iter().filter(|r| r.selectable()).count(), rows[end.min(rows.len())..].iter().filter(|r| r.selectable()).count())
 }
 
 /// The open menu, a box hanging from its anchor (from the SELECTED row
@@ -841,7 +836,7 @@ mod tests {
             RowKind::Session { name: "s".into(), host: "devbox".into(), away: false, windows: 2, current: true },
             RowKind::Window { index: "1".into(), name: "w".into(), path: AgentPath::plain("~/a", ""), panes: 2, state: None, active: true, last: false, expanded: Some(false) },
             RowKind::Pane { index: "0".into(), command: "zsh".into(), state: Some(State::Idle), last: true, parent_last: false },
-            RowKind::Agent { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), note: "n".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into(), host: String::new(), place: String::new(), diff: String::new() },
+            RowKind::Agent(Card { state: State::Working, stale: false, kind: "claude".into(), title: "t".into(), note: "n".into(), path: crate::paths::AgentPath::plain("~/project", ""), age: "5m".into(), host: String::new(), place: String::new(), diff: String::new() }),
             RowKind::Header { label: "working".into(), count: 1, gap: false },
             RowKind::Header { label: "idle".into(), count: 1, gap: true },
             RowKind::Hidden { count: 2, expanded: false, gap: false },
@@ -858,7 +853,7 @@ mod tests {
 
     #[test]
     fn an_untitled_agents_note_has_the_line() {
-        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: String::new(), note: "Allow edit to token.rs?".into(), path: AgentPath::plain("~/p", ""), age: "<1m".into(), host: String::new(), place: String::new(), diff: String::new() };
+        let kind = RowKind::Agent(Card { state: State::Asking, stale: false, kind: "claude".into(), title: String::new(), note: "Allow edit to token.rs?".into(), path: AgentPath::plain("~/p", ""), age: "<1m".into(), host: String::new(), place: String::new(), diff: String::new() });
         let row = Row { target: None, kind, preview: None, score: None };
         let text: String = row_lines(&row, false, false, 40, None, "window", &Theme::default()).0.iter().map(|l| l.to_string() + "\n").collect();
         assert!(text.contains("Allow edit to token.rs?") && !text.contains("untitled"), "{text}");
@@ -880,10 +875,10 @@ mod tests {
                     for stale in [false, true] {
                         let row = Row {
                             target: None,
-                            kind: RowKind::Agent {
+                            kind: RowKind::Agent(Card {
                                 state: State::Working, stale, kind: kind.into(), title: "task".into(), note: String::new(),
                                 path: crate::paths::AgentPath::plain("~/a-long-project-path-日本語", ""), age: age.into(), host: String::new(), place: String::new(), diff: String::new(),
-                            },
+                            }),
                             preview: None, score: None,
                         };
                         for width in [24, 40, 72] {
@@ -917,8 +912,8 @@ mod tests {
         for state in State::ALL {
             let row = Row {
                 target: None, preview: None, score: None,
-                kind: RowKind::Agent { state, stale: false, kind: "pi".into(),
-                    title: "Branch labels".into(), note: String::new(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into(), host: String::new(), place: String::new(), diff: String::new() },
+                kind: RowKind::Agent(Card { state, stale: false, kind: "pi".into(),
+                    title: "Branch labels".into(), note: String::new(), path: crate::paths::AgentPath::plain("/project", ""), age: "5m".into(), host: String::new(), place: String::new(), diff: String::new() }),
             };
             for compact in [false, true] {
                 let lines = row_lines(&row, false, compact, 40, None, "window", &t).0;
@@ -934,7 +929,7 @@ mod tests {
     fn compact_agent_editor_fits_long_errors_after_stale_metadata() {
         let snap = crate::backend::tmux::fixture(&["$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|one||||/a"]);
         let mut app = App::new(snap, Tab::Agents, "$1".into(), "@1".into(), String::new(), true, false);
-        if let RowKind::Agent { age, stale, .. } = &mut app.rows[app.selected].kind {
+        if let RowKind::Agent(Card { age, stale, .. }) = &mut app.rows[app.selected].kind {
             *age = "5m".into(); *stale = true;
         }
         app.run(Command::Rename);
@@ -1011,7 +1006,7 @@ mod tests {
     }
 
     fn agent(title: &str, note: &str, path: &str) -> Row {
-        let kind = RowKind::Agent { state: State::Asking, stale: false, kind: "claude".into(), title: title.into(), note: note.into(), path: AgentPath::plain(path, ""), age: "<1m".into(), host: String::new(), place: String::new(), diff: String::new() };
+        let kind = RowKind::Agent(Card { state: State::Asking, stale: false, kind: "claude".into(), title: title.into(), note: note.into(), path: AgentPath::plain(path, ""), age: "<1m".into(), host: String::new(), place: String::new(), diff: String::new() });
         Row { target: None, kind, preview: None, score: None }
     }
 
@@ -1026,7 +1021,7 @@ mod tests {
         assert!(long[0].ends_with("Refactor the session pa…") && long[1].ends_with("› Allow edit to src/b…"), "{long:#?}");
         // The changes at the right of the title, the first to go when short.
         let mut changed = agent("Fix bug", "Allow edit?", "~/p");
-        if let RowKind::Agent { diff, .. } = &mut changed.kind {
+        if let RowKind::Agent(Card { diff, .. }) = &mut changed.kind {
             *diff = "+12 −3 · 2 untracked".into();
         }
         let first = |width: u16| row_lines(&changed, false, false, width, None, "window", &t).0[0].to_string();
@@ -1035,7 +1030,7 @@ mod tests {
         for width in 0..100 {
             for (title, note) in [("Fix bug", "Allow edit to main.rs?"), ("", "Allow 👨‍👩‍👧 edit?"), ("👍🏽 ok ❤️", ""), ("a ☺️ b", "x")] {
                 let mut row = agent(title, note, "~/p");
-                if let RowKind::Agent { diff, .. } = &mut row.kind {
+                if let RowKind::Agent(Card { diff, .. }) = &mut row.kind {
                     *diff = "+1204 −3670 · 2 untracked".into();
                 }
                 assert!(row_lines(&row, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
@@ -1050,7 +1045,7 @@ mod tests {
         let t = Theme::default();
         let card = |state: State, title: &str, note: &str| {
             let mut row = agent(title, note, "~/p");
-            if let RowKind::Agent { state: s, place, .. } = &mut row.kind {
+            if let RowKind::Agent(Card { state: s, place, .. }) = &mut row.kind {
                 *s = state;
                 *place = "ml:train".into();
             }
@@ -1166,7 +1161,7 @@ mod tests {
     fn the_more_mark_covers_changes_whole() {
         let mut app = many_agents();
         for row in &mut app.rows {
-            if let RowKind::Agent { diff, .. } = &mut row.kind {
+            if let RowKind::Agent(Card { diff, .. }) = &mut row.kind {
                 *diff = "+1204 −3670 · 2 untracked".into();
             }
         }
@@ -1313,8 +1308,10 @@ mod tests {
         ]);
         snap.sessions[0].host = "devbox".into();
         let t = Theme::default();
-        let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Status, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
-        let cards: Vec<&Row> = rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })).collect();
+        let (notes, diffs) = (crate::rows::Notes::new(), std::collections::HashMap::new());
+        let grouped = |group| crate::rows::Cards { group, keep: None, now: 0, hidden_expanded: false, notes: &notes, diffs: &diffs };
+        let rows = crate::rows::agents(&snap, &mut Filter::new(), &grouped(crate::rows::Group::Status), &mut crate::paths::PathCache::new("/home/me".into()));
+        let cards: Vec<&Row> = rows.iter().filter(|r| matches!(r.kind, RowKind::Agent(_))).collect();
         let first = |r: &Row, w: u16| row_lines(r, false, false, w, None, "window", &t).0.remove(0);
         // Waiting first.
         let second = |r: &Row, w: u16| row_lines(r, false, false, w, None, "window", &t).0.remove(1);
@@ -1327,13 +1324,13 @@ mod tests {
         assert!(!first(cards[2], 60).to_string().contains('@'));
         assert_eq!(crate::rows::pane_title(&snap, "%1"), "ml:1.0 @devbox · claude");
         // Each card ends its second line with where it runs.
-        let rows = crate::rows::agents(&snap, &mut Filter::new(), crate::rows::Group::Folder, None, &mut crate::paths::PathCache::new("/home/me".into()), 0, false);
+        let rows = crate::rows::agents(&snap, &mut Filter::new(), &grouped(crate::rows::Group::Folder), &mut crate::paths::PathCache::new("/home/me".into()));
         let text: Vec<String> = rows.iter().flat_map(|r| row_lines(r, false, false, 60, None, "window", &t).0).map(|l| l.to_string()).collect();
         assert!(text.contains(&" devbox:~/source/company/project 1".to_string()), "{text:#?}");
         assert!(text.windows(2).any(|l| l[0].ends_with("fit") && l[1].ends_with(" ml:train")), "{text:#?}");
         assert!(text.windows(2).any(|l| l[0].ends_with("serve") && l[1].ends_with(" web:api")), "{text:#?}");
         for width in 0..80 {
-            for r in rows.iter().filter(|r| matches!(r.kind, RowKind::Agent { .. })) {
+            for r in rows.iter().filter(|r| matches!(r.kind, RowKind::Agent(_))) {
                 assert!(row_lines(r, true, false, width, None, "window", &t).0.iter().all(|l| l.width() <= (width as usize).max(9)), "{width}");
             }
         }

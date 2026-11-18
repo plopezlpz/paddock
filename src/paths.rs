@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn sessions_and_agents_share_paths_branches_and_fresh_heads() {
-        use crate::rows::{self, Filter, Group, RowKind, Tree};
+        use crate::rows::{self, Cards, Filter, Group, Notes, RowKind, Tree};
         let f = Fixture::new();
         let main = f.0.join("project");
         let worktree = f.0.join("containers/topic");
@@ -325,8 +325,9 @@ mod tests {
         let mut cache = PathCache::new(f.0.to_str().unwrap().into());
         let none = std::collections::HashSet::new();
         let tree = Tree { expanded: &none, collapsed: &none, keep: None, current: "$1" };
+        let cards = Cards { group: Group::Flat, keep: None, now: 0, hidden_expanded: false, notes: &Notes::new(), diffs: &HashMap::new() };
         let path_of = |rows: Vec<rows::Row>| rows.into_iter().find_map(|r| match r.kind {
-            RowKind::Window { path, .. } | RowKind::Agent { path, .. } => Some(path), _ => None,
+            RowKind::Window { path, .. } | RowKind::Agent(rows::Card { path, .. }) => Some(path), _ => None,
         }).unwrap();
         for (dir, expected) in [
             (&main, "project (main)"), (&worktree, "project/…/topic (topic)"),
@@ -334,7 +335,7 @@ mod tests {
         ] {
             let snap = crate::backend::tmux::fixture(&[&format!("$1|s|@1|1|w|1|0|%1|0|1|pi||working|0|pi|task||||{}", dir.display())]);
             let session = path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache));
-            let agent = path_of(rows::agents(&snap, &mut Filter::new(), Group::Flat, None, &mut cache, 0, false));
+            let agent = path_of(rows::agents(&snap, &mut Filter::new(), &cards, &mut cache));
             assert_eq!(session.display(200), expected);
             for width in 0..100 { assert_eq!(session.display(width), agent.display(width)); }
         }
@@ -348,7 +349,7 @@ mod tests {
         }
         f.git(&["-C", worktree.to_str().unwrap(), "checkout", "--detach"]);
         let session = path_of(rows::sessions(&snap, &mut Filter::new(), &tree, &mut cache));
-        let agent = path_of(rows::agents(&snap, &mut Filter::new(), Group::Flat, None, &mut cache, 0, false));
+        let agent = path_of(rows::agents(&snap, &mut Filter::new(), &cards, &mut cache));
         assert_eq!(session.display(200), agent.display(200));
         assert!(session.display(200).contains("(detached "));
         let mut filter = Filter::new(); filter.set(&session.head.as_ref().unwrap().name);
@@ -560,13 +561,14 @@ mod tests {
         assert_eq!(crate::notification::format("finished", "claude", root, "", crate::theme::AgentIcons::Unicode), "✳ finished\nproject (feature/searchable-branch)");
         let line = format!("$1|s|@1|1|w|1|0|%1|0|1|claude||working|0|claude|task||||{root}");
         let mut filter = crate::rows::Filter::new();
+        let cards = crate::rows::Cards { group: crate::rows::Group::Flat, keep: None, now: 0, hidden_expanded: false, notes: &crate::rows::Notes::new(), diffs: &HashMap::new() };
         for hidden in [false, true] {
             let snap = if hidden { crate::backend::tmux::fixture_hidden(&[&line], &["%1"]) } else { crate::backend::tmux::fixture(&[&line]) };
             filter.set("'feature/searchable-branch");
-            let rows = crate::rows::agents(&snap, &mut filter, crate::rows::Group::Flat, None, &mut cache, 0, false);
-            assert_eq!(rows.iter().filter(|r| matches!(r.kind, crate::rows::RowKind::Agent { .. })).count(), 1);
+            let rows = crate::rows::agents(&snap, &mut filter, &cards, &mut cache);
+            assert_eq!(rows.iter().filter(|r| matches!(r.kind, crate::rows::RowKind::Agent(_))).count(), 1);
             filter.set("!searchable-branch");
-            assert!(crate::rows::agents(&snap, &mut filter, crate::rows::Group::Flat, None, &mut cache, 0, false).is_empty());
+            assert!(crate::rows::agents(&snap, &mut filter, &cards, &mut cache).is_empty());
         }
         f.git(&["-C", root, "checkout", "--detach"]);
         let path = cache.get(root);

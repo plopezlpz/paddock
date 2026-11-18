@@ -22,8 +22,8 @@ use crate::diffstat::Diff;
 use crate::edit::{Edited, LineEdit};
 use crate::keys::{self, Input};
 pub use crate::model::{Op, Tab};
-use crate::model::{Mark, Session, Snapshot, State, Target, Window};
-use crate::rows::{self, Filter, Group, New, Row, RowKind, Tree};
+use crate::model::{Mark, Session, Snapshot, Target, Window};
+use crate::rows::{self, Cards, Filter, Group, New, Row, RowKind, Tree};
 
 pub use commands::{Command, Hint, Menu};
 use moves::Carry;
@@ -519,17 +519,15 @@ impl App {
             }
             Tab::Agents => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                let mut rows = rows::agents_noted(&self.snap, &mut self.filter, self.group, self.keep.as_ref(), &mut self.paths, now, self.hidden_expanded, &self.notes);
-                // The changes in a settled agent's folder (a working one's
-                // are on the move), as the worker found them.
-                for row in &mut rows {
-                    let (RowKind::Agent { diff, .. }, Some(pane)) = (&mut row.kind, &row.preview) else { continue };
-                    let Some((s, _, p)) = self.snap.pane(pane) else { continue };
-                    if let Some(d) = self.diffs.get(&p.path).filter(|_| s.host.is_empty() && p.agent.as_ref().is_some_and(|a| a.state != State::Working)) {
-                        *diff = d.label();
-                    }
-                }
-                rows
+                let cards = Cards {
+                    group: self.group,
+                    keep: self.keep.as_ref(),
+                    now,
+                    hidden_expanded: self.hidden_expanded,
+                    notes: &self.notes,
+                    diffs: &self.diffs,
+                };
+                rows::agents(&self.snap, &mut self.filter, &cards, &mut self.paths)
             }
         };
         // When a search ends, a hidden card may fold away: keep the user on
@@ -595,7 +593,7 @@ impl App {
     }
 
     fn selectable(&self, i: usize) -> bool {
-        self.rows.get(i).is_some_and(|r| r.target.is_some() || matches!(r.kind, RowKind::Hidden { .. }))
+        self.rows.get(i).is_some_and(Row::selectable)
     }
 
     /// First selectable row from I (in bounds) walking FORWARD or back.
@@ -762,7 +760,7 @@ impl App {
             return;
         };
         self.set_tab(Tab::Agents);
-        let card = |app: &App| app.rows.iter().position(|r| matches!(r.kind, RowKind::Agent { .. }) && matches!(&r.target, Some(Target::Pane { pane: p, .. }) if *p == pane));
+        let card = |app: &App| app.rows.iter().position(|r| matches!(r.kind, RowKind::Agent(_)) && matches!(&r.target, Some(Target::Pane { pane: p, .. }) if *p == pane));
         if card(self).is_none() && !self.query.is_empty() {
             self.query.set("");
             self.requery();
