@@ -571,193 +571,238 @@ fn queue_refresh(jobs: &Sender<Job>, latest: &Mutex<Latest>, depth: Depth, block
 /// A host's thread: its worker and listener, (re)started when they are
 /// down, do the JOBS (QUEUE sends them).
 fn serve(spawn: &Spawn, queue: &Sender<Job>, jobs: &Receiver<Job>, latest: &Arc<Mutex<Latest>>, wake: &(dyn Fn(Msg) + Send + Sync)) {
-    let lock = || latest.lock().unwrap_or_else(|e| e.into_inner());
-    let mut worker: Option<Worker> = None;
-    let mut retry = Instant::now();
-    // Workers started, and the one whose snapshot failed, if the last did:
-    // when a worker started after it fails too, the host's sessions go.
-    let mut starts = 0;
-    let mut failed = None;
-    // News that came before `rest`: its snapshot is taken then.
-    let mut rest = Instant::now();
-    let mut deferred = false;
-    // A new listener has until then to say it listens: news waits for that
-    // too, as what happens between a snapshot and then is in no event.
-    let mut unheard: Option<Instant> = None;
-    // Listeners started: the last one's word is the one waited for.
-    let mut listeners = 0;
+    let now = Instant::now();
+    let mut s = Serving { spawn, queue, latest, wake, worker: None, retry: now, starts: 0, failed: None, rest: now, deferred: false, unheard: None, listeners: 0 };
     loop {
-        let listening = || lock().listener.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-        let up = |w: &Option<Worker>| w.as_ref().is_some_and(|w| !w.dead && !w.stale);
-        if !(up(&worker) && listening()) && Instant::now() >= retry {
-            retry = Instant::now() + spawn.retry;
-            if !listening() {
-                let (q, l) = (queue.clone(), Arc::clone(latest));
-                listeners += 1;
-                let nth = listeners;
-                lock().ear = nth;
-                let listener = listen(spawn, move |heard| {
-                    // A listener replaced (it ended, another started) has no
-                    // say in whether the host hears.
-                    let deaf = |why: Option<String>| {
-                        let mut latest = l.lock().unwrap_or_else(|e| e.into_inner());
-                        if latest.ear == nth {
-                            latest.deaf = why;
-                        }
-                    };
-                    match heard {
-                        Heard::Ready => {
-                            deaf(None);
-                            let _ = q.send(Job::Listening(nth));
-                        }
-                        Heard::Blocks(ids) => queue_refresh(&q, &l, Depth::Blocks, ids),
-                        Heard::Changed(ids) => queue_refresh(&q, &l, Depth::Layout, ids),
-                        Heard::All => queue_refresh(&q, &l, Depth::Whole, Vec::new()),
-                        // Its end wakes this thread, which starts another
-                        // (and waits for this one no longer).
-                        Heard::Ended(why) => {
-                            if !why.is_empty() {
-                                deaf(Some(why));
-                            }
-                            let _ = q.send(Job::Ended(nth));
-                        }
-                    }
-                });
-                unheard = listener.is_ok().then(|| Instant::now() + LISTENING.min(spawn.retry));
-                let listener = listener.map_err(|e| lock().deaf = Some(e)).ok();
-                let mut old = mem::replace(&mut lock().listener, listener);
-                stop(old.as_mut());
-            }
-            if !up(&worker) {
-                worker = None;
-                starts += 1;
-                match Worker::start(spawn) {
-                    Ok(w) => worker = Some(w),
-                    Err(e) => lock().error = Some(e),
-                }
-            }
-            // What changed while it was down.
-            queue_refresh(queue, latest, Depth::Whole, Vec::new());
-        }
-        let healthy = up(&worker) && listening();
-        // A listener that ended is not waited for.
-        let hold = unheard.filter(|_| listening()).map_or(rest, |u| rest.max(u));
-        let until = [deferred.then_some(hold), (!healthy).then_some(retry)].into_iter().flatten().min();
-        let job = match until {
-            None => jobs.recv().ok(),
-            Some(until) => match jobs.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                Ok(job) => Some(job),
-                Err(RecvTimeoutError::Timeout) if deferred && Instant::now() >= hold => {
-                    deferred = false;
-                    Some(Job::Refresh(None))
-                }
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => None,
-            },
-        };
-        if lock().stopped {
-            stop(lock().listener.as_mut());
+        s.revive();
+        let hold = s.hold();
+        let Some(job) = s.next_job(jobs, hold) else { continue };
+        if s.lock().stopped {
+            stop(s.lock().listener.as_mut());
             return;
         }
-        let working = up(&worker);
-        // A worker that has read nothing yet has it all to read.
-        let unread = worker.as_ref().is_some_and(|w| !w.read);
-        // The answer, and whether it is lost: the worker went without
-        // answering, so made or not, who knows. One that answers an error
-        // refused; one already down was never asked.
-        let mut call = |request: Value, timeout: Duration| -> Reply {
-            let Some(w) = worker.as_mut().filter(|w| !w.dead) else {
-                return (Err(lock().error.clone().unwrap_or_else(|| format!("{} is not reachable", spawn.name()))), false);
-            };
-            let answer = w.call(request, timeout);
-            // A worker whose snapshot failed still answers: no news of that.
-            if w.dead {
-                lock().error = answer.clone().err();
-            } else if !w.stale {
-                lock().error = None;
-            }
-            (answer, w.dead)
-        };
         match job {
-            None | Some(Job::Stop) => return,
+            Job::Stop => return,
             // An earlier listener's (it said so, then ended) is not this one's.
-            Some(Job::Listening(nth)) if nth == listeners => unheard = None,
+            Job::Listening(nth) if nth == s.listeners => s.unheard = None,
             // Its output ended, but it may not have exited yet: seen
             // running, it would be waited on with nothing due, so no
             // other starts until some request came. Reaped, it is down.
-            Some(Job::Ended(nth)) if nth == listeners => stop(lock().listener.as_mut()),
-            Some(Job::Listening(_) | Job::Ended(_)) => {}
-            Some(Job::Call(_, by, reply)) if Instant::now() > by => {
+            Job::Ended(nth) if nth == s.listeners => stop(s.lock().listener.as_mut()),
+            Job::Listening(_) | Job::Ended(_) => {}
+            Job::Call(_, by, reply) if Instant::now() > by => {
                 let _ = reply.send((Err(format!("{} is not answering", spawn.name())), false));
             }
-            Some(Job::Call(request, _, reply)) => {
-                let _ = reply.send(call(request, TIMEOUT));
+            Job::Call(request, _, reply) => {
+                let _ = reply.send(s.call(request, TIMEOUT));
             }
             // Down: the restart takes one.
-            Some(Job::Refresh(None)) if !working => lock().refresh_queued = false,
+            Job::Refresh(None) if !s.up() => s.lock().refresh_queued = false,
             // Too soon after the last, or before the listener listens: still
             // queued, so news joins it.
-            Some(Job::Refresh(None)) if Instant::now() < hold => deferred = true,
-            Some(Job::Refresh(done)) => {
-                // An edit's refresh reads the sessions and tabs again; news,
-                // what it asks for.
-                let (mut depth, blocks) = match done {
-                    Some(_) => (Depth::Layout, BTreeSet::new()),
-                    None => {
-                        let mut latest = lock();
-                        latest.refresh_queued = false;
-                        (mem::take(&mut latest.refresh_depth), mem::take(&mut latest.refresh_blocks))
-                    }
-                };
-                if unread {
-                    depth = Depth::Whole;
-                }
-                let mut request = json!({ "op": "snapshot", "skip": spawn.me });
-                if depth != Depth::Whole {
-                    request["blocks"] = json!(blocks);
-                    request["layout"] = json!(depth == Depth::Layout);
-                }
-                // New panes cost what a whole one's do, and how many there
-                // are is not known before; a block named, a second at most.
-                let timeout = if depth == Depth::Blocks { (TIMEOUT + Duration::from_secs(blocks.len() as u64)).min(WHOLE) } else { WHOLE };
-                let start = Instant::now();
-                lock().reading = Some(start);
-                let (sessions, _) = call(request, timeout);
-                lock().reading = None;
-                rest = Instant::now() + (start.elapsed() * SNAPSHOT_SPACING).min(REST);
-                if let Some(w) = &mut worker {
-                    w.stale = sessions.is_err();
-                    w.read |= sessions.is_ok();
-                }
-                let mut latest = lock();
-                match sessions {
-                    Ok(sessions) => (latest.sessions, latest.error, failed) = (Some(sessions), None, None),
-                    Err(e) => {
-                        if failed.is_some_and(|at| at < starts) {
-                            latest.sessions = None;
-                        }
-                        failed = failed.or(Some(starts));
-                        latest.error = Some(e);
-                    }
-                }
-                latest.taken += 1;
-                drop(latest);
-                wake(Msg::Changed);
-                if let Some(done) = done {
-                    let _ = done.send(());
-                }
-            }
-            Some(Job::Capture(block)) => {
-                // Moved on while it waited: the popup asks for the block shown.
-                if lock().wanted == block {
-                    let start = Instant::now();
-                    let lines = call(json!({ "op": "capture", "block": block }), TIMEOUT).0.map(|v| screen(&v));
-                    lock().landed = Some((block, (lines, start.elapsed())));
-                }
-                lock().capturing = false;
-                wake(Msg::Captured);
+            Job::Refresh(None) if Instant::now() < hold => s.deferred = true,
+            Job::Refresh(done) => s.refresh(done),
+            Job::Capture(block) => s.capture(block),
+        }
+    }
+}
+
+/// What a host's thread keeps between jobs.
+struct Serving<'a> {
+    spawn: &'a Spawn,
+    queue: &'a Sender<Job>,
+    latest: &'a Arc<Mutex<Latest>>,
+    wake: &'a (dyn Fn(Msg) + Send + Sync),
+    worker: Option<Worker>,
+    retry: Instant,
+    /// Workers started, and the one whose snapshot failed, if the last did:
+    /// when a worker started after it fails too, the host's sessions go.
+    starts: u64,
+    failed: Option<u64>,
+    /// News that came before `rest`: its snapshot is taken then.
+    rest: Instant,
+    deferred: bool,
+    /// A new listener has until then to say it listens: news waits for that
+    /// too, as what happens between a snapshot and then is in no event.
+    unheard: Option<Instant>,
+    /// Listeners started: the last one's word is the one waited for.
+    listeners: u64,
+}
+
+impl<'a> Serving<'a> {
+    fn lock(&self) -> MutexGuard<'a, Latest> {
+        self.latest.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn listening(&self) -> bool {
+        self.lock().listener.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+
+    fn up(&self) -> bool {
+        self.worker.as_ref().is_some_and(|w| !w.dead && !w.stale)
+    }
+
+    /// Until when news waits: a listener that ended is not waited for.
+    fn hold(&self) -> Instant {
+        self.unheard.filter(|_| self.listening()).map_or(self.rest, |u| self.rest.max(u))
+    }
+
+    /// Start the worker and listener that are down, once a retry is due.
+    fn revive(&mut self) {
+        if (self.up() && self.listening()) || Instant::now() < self.retry {
+            return;
+        }
+        self.retry = Instant::now() + self.spawn.retry;
+        if !self.listening() {
+            self.listen();
+        }
+        if !self.up() {
+            self.worker = None;
+            self.starts += 1;
+            match Worker::start(self.spawn) {
+                Ok(w) => self.worker = Some(w),
+                Err(e) => self.lock().error = Some(e),
             }
         }
+        // What changed while it was down.
+        queue_refresh(self.queue, self.latest, Depth::Whole, Vec::new());
+    }
+
+    /// Start a listener, which replaces the last.
+    fn listen(&mut self) {
+        let (q, l) = (self.queue.clone(), Arc::clone(self.latest));
+        self.listeners += 1;
+        let nth = self.listeners;
+        self.lock().ear = nth;
+        let listener = listen(self.spawn, move |heard| {
+            // A listener replaced (it ended, another started) has no say in
+            // whether the host hears.
+            let deaf = |why: Option<String>| {
+                let mut latest = l.lock().unwrap_or_else(|e| e.into_inner());
+                if latest.ear == nth {
+                    latest.deaf = why;
+                }
+            };
+            match heard {
+                Heard::Ready => {
+                    deaf(None);
+                    let _ = q.send(Job::Listening(nth));
+                }
+                Heard::Blocks(ids) => queue_refresh(&q, &l, Depth::Blocks, ids),
+                Heard::Changed(ids) => queue_refresh(&q, &l, Depth::Layout, ids),
+                Heard::All => queue_refresh(&q, &l, Depth::Whole, Vec::new()),
+                // Its end wakes this thread, which starts another (and waits
+                // for this one no longer).
+                Heard::Ended(why) => {
+                    if !why.is_empty() {
+                        deaf(Some(why));
+                    }
+                    let _ = q.send(Job::Ended(nth));
+                }
+            }
+        });
+        self.unheard = listener.is_ok().then(|| Instant::now() + LISTENING.min(self.spawn.retry));
+        let listener = listener.map_err(|e| self.lock().deaf = Some(e)).ok();
+        let mut old = mem::replace(&mut self.lock().listener, listener);
+        stop(old.as_mut());
+    }
+
+    /// The next of JOBS, or None if something came due first (a retry).
+    /// Deferred news is due at HOLD: its snapshot is the job then.
+    fn next_job(&mut self, jobs: &Receiver<Job>, hold: Instant) -> Option<Job> {
+        let healthy = self.up() && self.listening();
+        let until = [self.deferred.then_some(hold), (!healthy).then_some(self.retry)].into_iter().flatten().min();
+        let Some(until) = until else { return Some(jobs.recv().unwrap_or(Job::Stop)) };
+        match jobs.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(job) => Some(job),
+            Err(RecvTimeoutError::Timeout) if self.deferred && Instant::now() >= hold => {
+                self.deferred = false;
+                Some(Job::Refresh(None))
+            }
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => Some(Job::Stop),
+        }
+    }
+
+    /// The answer, and whether it is lost: the worker went without
+    /// answering, so made or not, who knows. One that answers an error
+    /// refused; one already down was never asked.
+    fn call(&mut self, request: Value, timeout: Duration) -> Reply {
+        let Some(w) = self.worker.as_mut().filter(|w| !w.dead) else {
+            return (Err(self.lock().error.clone().unwrap_or_else(|| format!("{} is not reachable", self.spawn.name()))), false);
+        };
+        let answer = w.call(request, timeout);
+        let (dead, stale) = (w.dead, w.stale);
+        // A worker whose snapshot failed still answers: no news of that.
+        if dead {
+            self.lock().error = answer.clone().err();
+        } else if !stale {
+            self.lock().error = None;
+        }
+        (answer, dead)
+    }
+
+    /// Take a snapshot, then post `Changed` (and say so on DONE). An edit's
+    /// reads the sessions and tabs again; news, what it asks for.
+    fn refresh(&mut self, done: Option<Sender<()>>) {
+        let (mut depth, blocks) = match done {
+            Some(_) => (Depth::Layout, BTreeSet::new()),
+            None => {
+                let mut latest = self.lock();
+                latest.refresh_queued = false;
+                (mem::take(&mut latest.refresh_depth), mem::take(&mut latest.refresh_blocks))
+            }
+        };
+        // A worker that has read nothing yet has it all to read.
+        if self.worker.as_ref().is_some_and(|w| !w.read) {
+            depth = Depth::Whole;
+        }
+        let mut request = json!({ "op": "snapshot", "skip": self.spawn.me });
+        if depth != Depth::Whole {
+            request["blocks"] = json!(blocks);
+            request["layout"] = json!(depth == Depth::Layout);
+        }
+        // New panes cost what a whole one's do, and how many there are is
+        // not known before; a block named, a second at most.
+        let timeout = if depth == Depth::Blocks { (TIMEOUT + Duration::from_secs(blocks.len() as u64)).min(WHOLE) } else { WHOLE };
+        let start = Instant::now();
+        self.lock().reading = Some(start);
+        let (sessions, _) = self.call(request, timeout);
+        self.lock().reading = None;
+        self.rest = Instant::now() + (start.elapsed() * SNAPSHOT_SPACING).min(REST);
+        if let Some(w) = &mut self.worker {
+            w.stale = sessions.is_err();
+            w.read |= sessions.is_ok();
+        }
+        let mut latest = self.lock();
+        match sessions {
+            Ok(sessions) => (latest.sessions, latest.error, self.failed) = (Some(sessions), None, None),
+            Err(e) => {
+                if self.failed.is_some_and(|at| at < self.starts) {
+                    latest.sessions = None;
+                }
+                self.failed = self.failed.or(Some(self.starts));
+                latest.error = Some(e);
+            }
+        }
+        latest.taken += 1;
+        drop(latest);
+        (self.wake)(Msg::Changed);
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+    }
+
+    /// Capture BLOCK for the preview, unless the popup has moved on while
+    /// it waited: it asks for the block shown.
+    fn capture(&mut self, block: String) {
+        if self.lock().wanted == block {
+            let start = Instant::now();
+            let lines = self.call(json!({ "op": "capture", "block": block }), TIMEOUT).0.map(|v| screen(&v));
+            self.lock().landed = Some((block, (lines, start.elapsed())));
+        }
+        self.lock().capturing = false;
+        (self.wake)(Msg::Captured);
     }
 }
 
@@ -1135,25 +1180,14 @@ pub struct Rex {
     /// The last snapshot's panes, each with its status record's time (0:
     /// none), and whether each host was in it.
     live: HashMap<String, u64>,
-    /// The pane each tab and session of the last snapshot shows: a jump
-    /// there is a visit to it.
+    /// The pane each tab and session of the last snapshot shows (a tab's
+    /// active pane, a session's active tab's): a jump there is a visit to it.
     fronts: HashMap<String, String>,
     answered: Vec<bool>,
     /// The trouble `health` last told of.
     trouble: Option<String>,
     /// The last op's answer was lost (`Ran::unsure`).
     unsure: bool,
-}
-
-/// The pane SESSION's each tab shows (its active one, else its first), and
-/// the one the session shows (its active tab's), by tab and session id.
-fn fronts(session: &RexSession) -> Vec<(String, String)> {
-    let front = |w: &RexWindow| w.panes.iter().find(|p| p.active).or(w.panes.first()).map(|p| p.id.clone());
-    let mut out: Vec<(String, String)> = session.windows.iter().filter_map(|w| Some((w.id.clone(), front(w)?))).collect();
-    if let Some(pane) = session.windows.iter().find(|w| w.active).or(session.windows.first()).and_then(front) {
-        out.push((session.id.clone(), pane));
-    }
-    out
 }
 
 /// A request's answer as text: an ID, or nothing.
@@ -1222,25 +1256,27 @@ impl Rex {
         Ok(())
     }
 
-    /// The worker's request for OP, or None for what paddock keeps itself.
-    fn request(op: &Op) -> Option<Value> {
+    /// The worker's request for OP, with the ID of what it names, whose
+    /// host it goes to (a new session's: its folder); None for what paddock
+    /// keeps itself.
+    fn request(op: &Op) -> Option<(&str, Value)> {
         Some(match op {
-            Op::SetTitle { pane, title } => json!({ "op": "rename_pane", "block": pane, "name": title.as_deref().unwrap_or("") }),
+            Op::SetTitle { pane, title } => (pane, json!({ "op": "rename_pane", "block": pane, "name": title.as_deref().unwrap_or("") })),
             Op::SetHidden { .. } | Op::SetHiddenExpanded(_) => return None,
-            Op::RenameSession { session, name } => json!({ "op": "rename_session", "session": session, "name": name }),
-            Op::RenameWindow { window, name } => json!({ "op": "rename_window", "window": window, "name": name }),
-            Op::Kill(Target::Session { session }) => json!({ "op": "kill_session", "session": session }),
-            Op::Kill(Target::Window { session, window }) => json!({ "op": "kill_window", "session": session, "window": window }),
-            Op::Kill(Target::Pane { pane, .. }) => json!({ "op": "kill_pane", "block": pane }),
-            Op::SwapWindows { session, a, b } => json!({ "op": "swap_windows", "session": session, "a": a, "b": b }),
-            Op::SwapPanes(a, b) => json!({ "op": "swap_panes", "a": a, "b": b }),
+            Op::RenameSession { session, name } => (session, json!({ "op": "rename_session", "session": session, "name": name })),
+            Op::RenameWindow { window, name } => (window, json!({ "op": "rename_window", "window": window, "name": name })),
+            Op::Kill(Target::Session { session }) => (session, json!({ "op": "kill_session", "session": session })),
+            Op::Kill(Target::Window { session, window }) => (session, json!({ "op": "kill_window", "session": session, "window": window })),
+            Op::Kill(Target::Pane { pane, .. }) => (pane, json!({ "op": "kill_pane", "block": pane })),
+            Op::SwapWindows { session, a, b } => (session, json!({ "op": "swap_windows", "session": session, "a": a, "b": b })),
+            Op::SwapPanes(a, b) => (a, json!({ "op": "swap_panes", "a": a, "b": b })),
             Op::MoveWindow { from, window, into, to, before } => {
-                json!({ "op": "move_window", "from": from, "window": window, "into": into, "to": to, "before": before })
+                (from, json!({ "op": "move_window", "from": from, "window": window, "into": into, "to": to, "before": before }))
             }
-            Op::JoinPane { pane, to, before } => json!({ "op": "join_pane", "pane": pane, "to": to, "before": before }),
-            Op::BreakPane { pane, session } => json!({ "op": "break_pane", "pane": pane, "session": session }),
-            Op::NewSession { name, dir } => json!({ "op": "new_session", "name": name, "dir": dir }),
-            Op::NewWindow { session, after, name, dir } => json!({ "op": "new_window", "session": session, "after": after, "name": name, "dir": dir }),
+            Op::JoinPane { pane, to, before } => (to, json!({ "op": "join_pane", "pane": pane, "to": to, "before": before })),
+            Op::BreakPane { pane, session } => (session, json!({ "op": "break_pane", "pane": pane, "session": session })),
+            Op::NewSession { name, dir } => (dir, json!({ "op": "new_session", "name": name, "dir": dir })),
+            Op::NewWindow { session, after, name, dir } => (session, json!({ "op": "new_window", "session": session, "after": after, "name": name, "dir": dir })),
         })
     }
 
@@ -1258,33 +1294,23 @@ impl Rex {
     /// Where OP goes: the index of the host holding what it names (a new
     /// session's folder says its host), and OP's request for it, with a
     /// host's folder (HOST:PATH, as its panes show) as the host's own path.
-    fn route(&self, op: &Op, mut request: Value) -> (usize, Value) {
+    /// None for what paddock keeps itself.
+    fn route(&self, op: &Op) -> Option<(usize, Value)> {
+        let (id, mut request) = Rex::request(op)?;
         let i = match op {
-            Op::SetTitle { pane: id, .. }
-            | Op::Kill(Target::Pane { pane: id, .. })
-            | Op::SwapPanes(id, _)
-            | Op::JoinPane { to: id, .. }
-            | Op::RenameWindow { window: id, .. }
-            | Op::RenameSession { session: id, .. }
-            | Op::Kill(Target::Session { session: id } | Target::Window { session: id, .. })
-            | Op::SwapWindows { session: id, .. }
-            | Op::MoveWindow { from: id, .. }
-            | Op::BreakPane { session: id, .. }
-            | Op::NewWindow { session: id, .. } => self.at(id),
-            Op::NewSession { dir, .. } => self.hosts.iter().position(|h| h.label.as_ref().is_some_and(|l| dir.starts_with(&format!("{l}:")))).unwrap_or(0),
-            Op::SetHidden { .. } | Op::SetHiddenExpanded(_) => 0,
+            Op::NewSession { .. } => self.hosts.iter().position(|h| h.label.as_ref().is_some_and(|l| id.starts_with(&format!("{l}:")))).unwrap_or(0),
+            _ => self.at(id),
         };
         if let Some(label) = &self.hosts[i].label
             && let Some(dir) = request["dir"].as_str().and_then(|d| d.strip_prefix(&format!("{label}:"))).map(String::from)
         {
             request["dir"] = json!(dir);
         }
-        (i, request)
+        Some((i, request))
     }
 
     fn op(&mut self, op: &Op) -> Result<Option<Target>, String> {
-        if let Some(request) = Rex::request(op) {
-            let (i, request) = self.route(op, request);
+        if let Some((i, request)) = self.route(op) {
             let (answer, lost) = self.hosts[i].edit(request);
             self.unsure = lost;
             let id = text(answer?);
@@ -1342,9 +1368,6 @@ impl Backend for Rex {
             let Some(Ok(RexSessions(reported))) = reported else { continue };
             for mut session in reported {
                 session.away = away;
-                let panes = session.windows.iter().flat_map(|w| &w.panes);
-                self.live.extend(panes.map(|p| (p.id.clone(), p.status.as_ref().and_then(|s| epoch(&s.updated_at)).unwrap_or(0))));
-                self.fronts.extend(fronts(&session));
                 if host.label.is_some() {
                     self.routes.extend(session.ids().map(|id| (id.to_string(), i)));
                     session.host.clone_from(&host.label);
@@ -1352,7 +1375,15 @@ impl Backend for Rex {
                 sessions.push(session);
             }
         }
-        Ok(snapshot(sessions, &self.state))
+        let snap = snapshot(sessions, &self.state);
+        for s in &snap.sessions {
+            for w in &s.windows {
+                self.live.extend(w.panes.iter().map(|p| (p.id.clone(), p.agent.as_ref().and_then(|a| a.since).unwrap_or(0))));
+                self.fronts.extend(w.active_pane().map(|p| (w.id.clone(), p.id.clone())));
+            }
+            self.fronts.extend(s.active_window().and_then(Window::active_pane).map(|p| (s.id.clone(), p.id.clone())));
+        }
+        Ok(snap)
     }
 
     // A server that fails is started again.
@@ -1697,18 +1728,23 @@ mod tests {
 
     #[test]
     fn a_tab_or_session_jump_visits_the_pane_it_shows() {
-        let session: RexSession = serde_json::from_value(json!({
+        let fake = FakeRex::new(&[]);
+        let host = fake.host(Duration::from_secs(1));
+        until("the first snapshot", || host.lock().taken == 1);
+        host.lock().sessions = Some(json!([{
             "id": "session:1",
             "windows": [
-                { "id": "window:1", "panes": [{ "id": "block:1" }, { "id": "block:2", "active": true }] },
+                { "id": "window:1", "panes": [{ "id": "block:1" }, { "id": "block:2", "active": true, "status": { "state": "done", "updated_at": "1970-01-01T00:00:07Z" } }] },
                 { "id": "window:2", "active": true, "panes": [{ "id": "block:3" }] },
                 { "id": "window:3", "panes": [] },
             ],
-        }))
-        .unwrap();
-        let got: HashMap<String, String> = fronts(&session).into_iter().collect();
-        let want = [("window:1", "block:2"), ("window:2", "block:3"), ("session:1", "block:3")];
-        assert_eq!(got, want.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(), "a tab without panes shows none");
+        }]));
+        let mut rex = Rex { hosts: vec![host], routes: HashMap::new(), state: Saved::default(), state_path: PathBuf::new(), live: HashMap::new(), fronts: HashMap::new(), answered: Vec::new(), trouble: None, unsure: false };
+        rex.fetch().unwrap();
+        let map = |pairs: &[(&str, &str)]| pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<HashMap<_, _>>();
+        assert_eq!(rex.fronts, map(&[("window:1", "block:2"), ("window:2", "block:3"), ("session:1", "block:3")]), "a tab without panes shows none");
+        let live = HashMap::from([("block:1".to_string(), 0), ("block:2".to_string(), 7), ("block:3".to_string(), 0)]);
+        assert_eq!(rex.live, live, "each pane, with its status record's time");
     }
 
     #[test]
@@ -2013,10 +2049,10 @@ done
     #[test]
     fn every_edit_is_a_worker_request_except_paddocks_own() {
         let title = Op::SetTitle { pane: "block:1".into(), title: None };
-        assert_eq!(Rex::request(&title), Some(json!({ "op": "rename_pane", "block": "block:1", "name": "" })));
+        assert_eq!(Rex::request(&title), Some(("block:1", json!({ "op": "rename_pane", "block": "block:1", "name": "" }))));
         assert_eq!(Rex::request(&Op::SetHidden { pane: "block:1".into(), hidden: true }), None);
         assert_eq!(Rex::request(&Op::SetHiddenExpanded(true)), None);
         let join = Op::JoinPane { pane: "block:1".into(), to: "block:2".into(), before: true };
-        assert_eq!(Rex::request(&join), Some(json!({ "op": "join_pane", "pane": "block:1", "to": "block:2", "before": true })));
+        assert_eq!(Rex::request(&join), Some(("block:2", json!({ "op": "join_pane", "pane": "block:1", "to": "block:2", "before": true }))), "a join goes where the pane joins");
     }
 }
