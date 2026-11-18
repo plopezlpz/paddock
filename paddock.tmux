@@ -63,11 +63,15 @@ if ! out=$(tmux set-option -gqo @paddock-popup-width '#{?#{e|<:#{client_width},1
       msg="paddock: needs tmux 3.8 or later (this server is $(tmux display -p '#{version}'))"
       tmux display-message "$msg"
       # Said once, to no one when tmux starts: the key says it again, on
-      # @paddock-key, else on prefix a unless that is the config's own.
-      k=$(tmux show-options -gqv @paddock-key)
-      if [ -n "$k" ] || ! tmux list-keys -T prefix a >/dev/null 2>&1; then
-        tmux bind -T prefix -- "${k:-a}" display-message "$msg"
+      # @paddock-key, else on prefix a when nothing else is chosen and the
+      # config doesn't bind it (older tmux lists one key only as a table).
+      k=$(tmux show-options -gqv @paddock-key || true)
+      if [ -z "$k" ] && [ -z "$(tmux show-options -gqv @paddock-agents-key || true)" ] \
+        && [ "$(tmux show-options -gqv @paddock-click || true)" != on ] \
+        && ! tmux list-keys -T prefix 2>/dev/null | grep -Eq '^bind-key +(-r +)?-T +prefix +a( |$)'; then
+        k=a
       fi
+      [ -z "$k" ] || tmux bind -T prefix -- "$k" display-message "$msg" || true
       exit 0
       ;;
   esac

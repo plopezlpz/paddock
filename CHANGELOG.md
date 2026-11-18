@@ -6,6 +6,24 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-18
+
+### Fixed
+
+- tmux: a paste starting with `~` (typing mode) arrived with the home folder in its place, and one like `~~~` or `~nobody` pasted nothing: tmux expands a leading `~` even in double quotes. A paste that fails no longer leaves its text in a tmux buffer.
+- A card's changes (`+N −M`) were missing with git in another language, and could be another repository's when paddock's environment had `GIT_DIR` set: git now runs in the C locale, without those.
+- Typing into an agent that then exited, with nothing else listed, went on blind: the preview stays while typing.
+- The only session could be killed through its only window, or its card's pane; a kill that closes a session now says so.
+- A card's changes shown again after a round trip through the sessions tab were the ones from before; and a folder git is slow on (over 250 ms) no longer holds up the others every minute: it is asked again when its agent changes state.
+- A click outside a drop's question left the row carried listed against the filter; a menu whose row a note filtered away stayed open over the next row; `ctrl-o` with no room for the preview turned it off unseen (it now says there is no room); sessions to agents from a pane row picked the current window's agent; a swap with a neighbour the filter hides now names it.
+- A git-tracked home folder no longer anchors every folder label and folder group: a nearer repository does.
+- tmux older than 3.8: the paddock key says why paddock isn't there (the message at start is said to no one).
+
+### Changed
+
+- Filtering no longer reads each repository's HEAD per keystroke: once per snapshot or minute.
+- Internal simplification: dead paths gone (Rex's client label lookup, its raw-write send), the layout decided once from the terminal size, and long functions split, with no change in behaviour.
+
 ## [0.10.3] - 2026-11-17
 
 ### Fixed
@@ -246,7 +264,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.4...HEAD
+[0.10.4]: https://github.com/plopezlpz/paddock/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/plopezlpz/paddock/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/plopezlpz/paddock/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/plopezlpz/paddock/compare/v0.10.0...v0.10.1

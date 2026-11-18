@@ -471,7 +471,8 @@ struct Popup {
     /// Folders' changes were asked for: they show on the agents tab only,
     /// so not before it is.
     diffed: bool,
-    /// Folders whose changes git was slow to tell (SLOW_DIFF).
+    /// Folders whose changes git was slow to tell (SLOW_DIFF): the minute's
+    /// round skips each once, so a one-off slow answer is measured again.
     slow: HashSet<String>,
 }
 
@@ -519,7 +520,7 @@ impl Popup {
             let mark = a.mark();
             if a.state != model::State::Working && (all || self.asked.get(&p.id) != Some(&mark)) {
                 changed |= !all;
-                if diffs && !p.path.is_empty() && !(minute && self.slow.contains(&p.path)) {
+                if diffs && !p.path.is_empty() && !(minute && self.slow.remove(&p.path)) {
                     self.diffs.ask(p.path.clone());
                 }
                 if !a.transcript.is_empty() {

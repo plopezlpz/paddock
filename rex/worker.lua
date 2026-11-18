@@ -264,8 +264,8 @@ function ops.new_window(req)
   return made.window_id
 end
 
--- Type TEXT into BLOCK as if the user had (keys as a terminal's bytes), or
--- with PASTE paste it (bracketed, if its program asked).
+-- Send BLOCK a KEY event, as the user's keyboard would, else TEXT as a
+-- paste (bracketed, if its program asked).
 function ops.send(req)
   local session = block_session(req.block)
   if req.key then

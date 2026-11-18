@@ -1337,7 +1337,7 @@ fn kills_ask_first_and_say_what_runs_there() {
     select(&mut app, window("$2", "@3"));
     ctrl(&mut app, 'x');
     let Mode::Confirm(c) = &app.mode else { panic!("{:?}", app.mode) };
-    assert_eq!(c.question, "kill window play:1 game? 1 pane · codex waiting · play closes");
+    assert_eq!(c.question, "kill window play:1 game? play closes · 1 pane · codex waiting");
     let lines = screen(&draw(&mut app, &mut View::new(), 120, 12));
     assert!(lines.iter().any(|l| l.contains("✗ kill window play:1 game?") && l.contains("can't be undone")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("⏎ kill") && l.ends_with("esc cancel │")), "{lines:#?}");
@@ -1370,7 +1370,18 @@ fn kills_ask_first_and_say_what_runs_there() {
     let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a", "$2|t|@2|1|w|1|0|%2|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
     select(&mut app, window("$1", "@1"));
     ctrl(&mut app, 'x');
-    assert!(matches!(&app.mode, Mode::Confirm(c) if c.question.ends_with("1 pane · s closes")), "{:?}", app.mode);
+    assert!(matches!(&app.mode, Mode::Confirm(c) if c.question == "kill window s:1 w? s closes · 1 pane"), "{:?}", app.mode);
+    // Grouped sessions sharing their only window: both would close.
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a", "$2|t|@1|1|w|1|0|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
+    select(&mut app, window("$1", "@1"));
+    ctrl(&mut app, 'x');
+    assert!(matches!(app.mode, Mode::List) && app.status == Some(only()));
+    // Rex: only the session row is guarded.
+    let mut app = new(fixture(&["$1|s|@1|1|w|1|0|%1|0|1|zsh|||||||||/a"]), Tab::Sessions, "@1");
+    app.caps.rex = true;
+    select(&mut app, window("$1", "@1"));
+    ctrl(&mut app, 'x');
+    assert!(matches!(&app.mode, Mode::Confirm(c) if !c.question.contains("closes")), "{:?}", app.mode);
 }
 
 #[test]

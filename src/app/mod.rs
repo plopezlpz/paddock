@@ -1024,30 +1024,34 @@ impl App {
     /// Ask before killing the selected session, window or pane.
     fn kill(&mut self) {
         let Some(target) = self.selected_target().cloned() else { return };
-        // Whether the kill leaves its session empty, which closes it: a
-        // session's only window, or that window's only pane.
-        let session = self.snap.session(match &target {
-            Target::Session { session } | Target::Window { session, .. } | Target::Pane { session, .. } => session,
-        });
-        let empties = session.is_some_and(|s| match &target {
-            Target::Session { .. } => true,
-            Target::Window { .. } => s.windows.len() == 1,
-            Target::Pane { .. } => s.windows.len() == 1 && s.windows[0].panes.len() == 1,
-        });
-        if empties && self.snap.sessions.len() == 1 {
+        // The window that goes (a window, or the pane alone in its window),
+        // and with it each session it is the only window of. tmux: none may
+        // be left with a window, or the server ends. Rex: what closes with a
+        // tab's last block is Rex's to say, so a session row only.
+        let closing = match &target {
+            Target::Session { .. } => None,
+            _ if self.caps.rex => None,
+            Target::Window { window, .. } => Some(window.as_str()),
+            Target::Pane { session, window, .. } => self.window_at(session, window).filter(|(_, _, _, w)| w.panes.len() == 1).map(|_| window.as_str()),
+        };
+        let last = match (&target, closing) {
+            (Target::Session { .. }, _) => self.snap.sessions.len() == 1,
+            (_, Some(gone)) => !self.snap.sessions.iter().any(|s| s.windows.iter().any(|w| w.id != gone)),
+            (_, None) => false,
+        };
+        if last {
             return self.note(if self.caps.rex { "that is the only session" } else { "that is the only session: kill the server instead" });
         }
-        let closes = match (&target, session) {
-            (Target::Session { .. }, _) | (_, None) => String::new(),
-            (_, Some(s)) if empties => format!(" · {} closes", s.name),
-            _ => String::new(),
-        };
+        let closes: Vec<&str> = closing.map_or(Vec::new(), |gone| self.snap.sessions.iter().filter(|s| s.windows.iter().all(|w| w.id == gone)).map(|s| s.name.as_str()).collect());
+        let closes = if closes.is_empty() { String::new() } else { format!("{} closes", closes.join(", ")) };
         let (label, detail) = self.describe(&target);
         let detail = match (&target, detail.is_empty()) {
             (Target::Pane { pane, .. }, true) => self.snap.pane(pane).map(|(_, _, p)| p.command.clone()).unwrap_or_default(),
             (_, _) => detail,
         };
-        let question = if detail.is_empty() { format!("kill {label}?{closes}") } else { format!("kill {label}? {detail}{closes}") };
+        // What closes first: a narrow question is cut at its end.
+        let said: Vec<&str> = [closes.as_str(), detail.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
+        let question = if said.is_empty() { format!("kill {label}?") } else { format!("kill {label}? {}", said.join(" · ")) };
         self.mode = Mode::Confirm(Confirm { job: Job::new(Op::Kill(target), format!("killed {label}")), question, dropped: false });
     }
 
