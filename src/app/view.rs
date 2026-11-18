@@ -36,11 +36,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Where the last draw put things: the scroll position and what is under
 /// each screen cell. Owned by the loop, written by `ui::draw`.
 pub struct View {
-    /// Under 80 columns (a phone): fewer details, two-line rows, taps.
-    pub compact: bool,
-    /// Whether the preview has room. Assumed until the first draw, so the
-    /// first frame already has it.
-    pub preview_fits: bool,
     /// The first list row on screen.
     pub offset: usize,
     /// List rows: where, their index, their target.
@@ -56,8 +51,6 @@ pub struct View {
 impl View {
     pub fn new() -> View {
         View {
-            compact: false,
-            preview_fits: true,
             offset: 0,
             rows: Vec::new(),
             buttons: Vec::new(),
@@ -78,16 +71,17 @@ impl View {
         self.items.clear();
     }
 
-    /// Scroll so the selection is visible in HEIGHT lines, with what heads
-    /// it when that fits too (a header right above it, a window's or pane's
-    /// session), and no space is left empty below the last row.
-    pub fn scroll(&mut self, rows: &[Row], selected: usize, height: u16) {
+    /// Scroll so the selection is visible in HEIGHT lines (COMPACT: as the
+    /// compact layout draws rows), with what heads it when that fits too (a
+    /// header right above it, a window's or pane's session), and no space is
+    /// left empty below the last row.
+    pub fn scroll(&mut self, rows: &[Row], selected: usize, compact: bool, height: u16) {
         let n = rows.len();
         if n == 0 {
             self.offset = 0;
             return;
         }
-        let h = |i: usize| rows[i].height(self.compact);
+        let h = |i: usize| rows[i].height(compact);
         let sel = selected.min(n - 1);
         let head = match rows[sel].kind {
             RowKind::Window { .. } | RowKind::Pane { .. } => (0..sel).rev().find(|&i| matches!(rows[i].kind, RowKind::Session { .. })),
@@ -182,7 +176,7 @@ impl App {
                 if hit == Some(Hit::Hidden) && let Some(i) = self.hidden_heading() {
                     self.selected = i;
                     if context {
-                        self.open_menu(Position::new(at.x.saturating_add(1), at.y), view.preview_fits);
+                        self.open_menu(Position::new(at.x.saturating_add(1), at.y));
                         return Action::None;
                     }
                 }
@@ -192,7 +186,7 @@ impl App {
                     was_selected = i == self.selected;
                     self.selected = i;
                     if context {
-                        self.open_menu(Position::new(at.x.saturating_add(1), at.y), view.preview_fits);
+                        self.open_menu(Position::new(at.x.saturating_add(1), at.y));
                         // Its release (a right-click's other half) opens nothing.
                         self.press = Some(Press { hit: None, at, was_selected });
                         return Action::None;
@@ -243,7 +237,7 @@ impl App {
                     }
                     Some(Hit::Row(_, target)) => {
                         let double = self.last_click.take().is_some_and(|(t, when)| t == target && now.duration_since(when) <= DOUBLE_CLICK);
-                        if (view.compact && press.was_selected) || (!view.compact && double) {
+                        if (self.compact && press.was_selected) || (!self.compact && double) {
                             return self.run(Command::Open);
                         }
                         self.last_click = Some((target, now));

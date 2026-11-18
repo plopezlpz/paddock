@@ -97,9 +97,8 @@ impl LineEdit {
     /// at the start) count as handled but report No.
     pub fn key(&mut self, key: KeyEvent) -> Edited {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META);
         match key.code {
-            KeyCode::Char(c) if plain => {
+            KeyCode::Char(c) if crate::keys::is_plain(&key) => {
                 if self.insert(c.encode_utf8(&mut [0; 4])) { Edited::Text } else { Edited::No }
             }
             KeyCode::Backspace | KeyCode::Char('h') if ctrl || key.code == KeyCode::Backspace => self.remove(self.prev(), self.cursor),

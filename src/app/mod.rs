@@ -223,10 +223,11 @@ pub struct App {
     /// The preview as toggled; None: shown unless the layout is compact (a
     /// phone, where the list needs the room).
     pub(crate) preview: Option<bool>,
-    /// Whether the last draw was in the compact layout (the loop keeps it).
+    /// The layout (`ui::layout`, which the loop sets before each frame):
+    /// compact, under 80 columns (a phone: fewer details, two-line rows,
+    /// taps), and whether the preview has room (the menu offers to toggle
+    /// it only then). Room is assumed until set.
     pub(crate) compact: bool,
-    /// Whether the last draw had room for the preview (the loop keeps it):
-    /// the menu offers to toggle it only then.
     pub(crate) preview_fits: bool,
     pub(crate) mode: Mode,
     pub(crate) status: Option<Status>,
@@ -310,15 +311,15 @@ impl App {
         self.rows.get(self.selected)?.target.as_ref()
     }
 
-    /// Whether the preview is wanted, in the layout COMPACT or not.
-    pub fn preview_on(&self, compact: bool) -> bool {
-        self.preview.unwrap_or(!compact)
+    /// Whether the preview is wanted, in this layout.
+    pub fn preview_on(&self) -> bool {
+        self.preview.unwrap_or(!self.compact)
     }
 
     /// The pane to preview, if the preview is on screen: the one typed
     /// into, else the selected row's.
-    pub fn preview_pane(&self, view: &View) -> Option<&str> {
-        if !(self.preview_on(view.compact) && view.preview_fits) {
+    pub fn preview_pane(&self) -> Option<&str> {
+        if !(self.preview_on() && self.preview_fits) {
             return None;
         }
         if let Mode::Type(t) = &self.mode {
@@ -327,10 +328,10 @@ impl App {
         self.rows.get(self.selected)?.preview.as_deref()
     }
 
-    /// Whether the last draw had room for the preview: without it, typing
-    /// would be blind, so it ends.
-    pub fn set_preview_fits(&mut self, fits: bool) {
-        self.preview_fits = fits;
+    /// The layout, as `ui::layout` gives it for the terminal's size.
+    /// Without room for the preview, typing would be blind, so it ends.
+    pub fn set_layout(&mut self, (compact, fits): (bool, bool)) {
+        (self.compact, self.preview_fits) = (compact, fits);
         if !fits && matches!(self.mode, Mode::Type(_)) {
             self.mode = Mode::List;
             self.note("no room for the preview: typing ended");
@@ -354,14 +355,9 @@ impl App {
         self.mode = Mode::Type(Typing { pane, label });
     }
 
-    /// TARGET as reached from where the client is: a pane in its own session
-    /// when that shows it too (grouped sessions, linked windows), not in
-    /// whichever lists it first.
+    /// TARGET as reached from where the client is (`Snapshot::local`).
     pub fn local(&self, target: Target) -> Target {
-        match &target {
-            Target::Pane { pane, .. } => self.snap.place_in(pane, &self.current_session).unwrap_or(target),
-            _ => target,
-        }
+        self.snap.local(target, &self.current_session)
     }
 
     /// The suggestion the loop should still be waiting for.
@@ -377,6 +373,8 @@ impl App {
         // opened on none) select where the user is, as opening does.
         let first = self.snap.sessions.is_empty() && !snap.sessions.is_empty();
         self.snap = snap;
+        // Branches switch unannounced: look at each HEAD again.
+        self.paths.recheck();
         // What is being renamed went away: there is nothing left to name.
         if let Mode::Rename(r) = &self.mode {
             let gone = match &r.target {
@@ -488,8 +486,9 @@ impl App {
         changed
     }
 
-    /// Rebuild from the same snapshot (ages tick over).
+    /// Rebuild from the same snapshot (ages tick over, branches switch).
     pub fn refresh(&mut self) {
+        self.paths.recheck();
         self.rebuild(false);
     }
 
@@ -1166,7 +1165,7 @@ impl App {
                 }
             }
             Command::Hide | Command::Show => {
-                if self.can(command, true) && let Some((_, pane)) = self.selected_agent() {
+                if self.can(command) && let Some((_, pane)) = self.selected_agent() {
                     let hidden = command == Command::Hide;
                     let undo = Op::SetHidden { pane: pane.clone(), hidden: !hidden };
                     let done = if hidden { "agent hidden (still running)" } else { "agent shown" };
@@ -1177,7 +1176,7 @@ impl App {
                 self.group = self.group.next();
                 self.rebuild(false);
             }
-            Command::Preview => self.preview = Some(!self.preview_on(self.compact)),
+            Command::Preview => self.preview = Some(!self.preview_on()),
             Command::Type => self.start_typing(),
             Command::Next => self.go_next(),
             Command::Close => return Action::Quit,
@@ -1193,7 +1192,7 @@ impl App {
             Command::Move => self.pick_up(false),
             Command::MoveUp => return self.shift(false),
             Command::MoveDown => return self.shift(true),
-            Command::Menu => self.open_menu(Position::default(), self.preview_fits),
+            Command::Menu => self.open_menu(Position::default()),
             Command::Clear => {
                 self.query.set("");
                 self.requery();
@@ -1246,8 +1245,8 @@ impl App {
                     KeyCode::Esc => return self.run(Command::Cancel),
                     KeyCode::Char('c' | 'a') if ctrl => return self.run(Command::Cancel),
                     // ^a a: tmux's prefix a again, which opened the popup.
-                    KeyCode::Char('a') if menu.by_key && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => return self.run(Command::Close),
-                    KeyCode::Char('A') if menu.by_key && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => return self.run(Command::Next),
+                    KeyCode::Char('a') if menu.by_key && keys::is_plain(&key) => return self.run(Command::Close),
+                    KeyCode::Char('A') if menu.by_key && keys::is_plain(&key) => return self.run(Command::Next),
                     KeyCode::Enter => {
                         let command = menu.items[menu.selected].command;
                         return self.run(command);
@@ -1319,7 +1318,7 @@ impl App {
             // pressed twice would eat the query and move the selection.
             KeyCode::Backspace => self.edit_query(key),
             KeyCode::Char('w' | 'u') if ctrl => self.edit_query(key),
-            KeyCode::Char(_) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => self.edit_query(key),
+            KeyCode::Char(_) if keys::is_plain(&key) => self.edit_query(key),
             _ => {}
         }
         Action::None

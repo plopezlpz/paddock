@@ -4,7 +4,7 @@
 
 use ratatui::layout::Position;
 
-use super::{App, Mode, Tab, View};
+use super::{App, Mode, Tab};
 use crate::model::Target;
 use crate::rows::New;
 
@@ -87,18 +87,17 @@ impl App {
         }
     }
 
-    /// The selected row's menu, hanging from ANCHOR. PREVIEW_FITS: whether
-    /// toggling the preview would show anything.
-    pub(super) fn open_menu(&mut self, anchor: Position, preview_fits: bool) {
-        let items = self.menu_items(preview_fits);
+    /// The selected row's menu, hanging from ANCHOR.
+    pub(super) fn open_menu(&mut self, anchor: Position) {
+        let items = self.menu_items();
         if !items.is_empty() {
             self.mode = Mode::Menu(Menu { target: self.selected_target().cloned(), hidden: self.hidden_selected(), items, selected: 0, anchor, by_key: false });
         }
     }
 
     /// Whether COMMAND applies in the list, to the selected row: what the
-    /// footer and the menu offer. PREVIEW_FITS: whether the preview has room.
-    pub(super) fn can(&self, command: Command, preview_fits: bool) -> bool {
+    /// footer and the menu offer.
+    pub(super) fn can(&self, command: Command) -> bool {
         match command {
             Command::Open | Command::Kill => self.selected_target().is_some(),
             Command::Panes => self.selected_window().is_some(),
@@ -109,8 +108,8 @@ impl App {
             Command::Move | Command::MoveUp | Command::MoveDown => self.movable(),
             Command::Undo => !self.undo.is_empty(),
             Command::Group => self.tab == Tab::Agents,
-            Command::Preview => preview_fits,
-            Command::Type => self.caps.send && preview_fits && self.rows.get(self.selected).is_some_and(|r| r.preview.is_some()),
+            Command::Preview => self.preview_fits,
+            Command::Type => self.caps.send && self.preview_fits && self.rows.get(self.selected).is_some_and(|r| r.preview.is_some()),
             Command::Next => self.next_need().is_some(),
             _ => true,
         }
@@ -155,7 +154,7 @@ impl App {
     }
 
     /// What can be done with the selected row, and in the popup.
-    pub fn menu_items(&self, preview_fits: bool) -> Vec<Hint> {
+    pub fn menu_items(&self) -> Vec<Hint> {
         let open = self.selected_window().is_some_and(|(_, open)| open);
         let group = format!("group by {}", self.group.next().label());
         // Rex's tabs are its windows: the popup's two are its lists there.
@@ -179,17 +178,17 @@ impl App {
             (Command::NewSession, "new session"),
             (Command::Undo, "undo"),
             (Command::Group, &group),
-            (Command::Preview, if self.preview_on(self.compact) { "hide preview" } else { "show preview" }),
+            (Command::Preview, if self.preview_on() { "hide preview" } else { "show preview" }),
             (Command::Tab(self.tab.other()), &tab),
         ]
         .into_iter()
-        .filter(|&(c, _)| self.can(c, preview_fits))
+        .filter(|&(c, _)| self.can(c))
         .map(|(c, label)| self.hint(c, label, 0))
         .collect()
     }
 
     /// The footer: hints in display order, and the one pinned on the right.
-    pub fn hints(&self, view: &View) -> (Vec<Hint>, Hint) {
+    pub fn hints(&self) -> (Vec<Hint>, Hint) {
         let cancel = self.hint(Command::Cancel, "cancel", 0);
         match &self.mode {
             Mode::Rename(r) => {
@@ -213,7 +212,7 @@ impl App {
         }
         let open = self.selected_window().is_some_and(|(_, open)| open);
         let other = self.tab.other();
-        let group = if view.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
+        let group = if self.compact { "group".to_string() } else { format!("group: {}", self.group.label()) };
         let hints = [
             (Command::Open, "open", 0),
             (Command::Type, "type", 1),
@@ -235,7 +234,7 @@ impl App {
         ];
         // New windows show in the sessions tab: its footer offers them.
         let out = (hints.into_iter())
-            .filter(|&(c, ..)| self.can(c, view.preview_fits) && (c != Command::NewWindow || self.tab == Tab::Sessions))
+            .filter(|&(c, ..)| self.can(c) && (c != Command::NewWindow || self.tab == Tab::Sessions))
             .map(|(c, label, rank)| self.hint(c, label, rank))
             .collect();
         (out, if self.query.is_empty() { self.hint(Command::Close, "close", 0) } else { self.hint(Command::Clear, "clear", 0) })
