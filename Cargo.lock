@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "paddock"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "ansi-to-tui",
  "libc",

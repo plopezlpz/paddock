@@ -512,7 +512,7 @@ impl App {
                 };
                 let mut rows = rows::sessions(&self.snap, &mut self.filter, &tree, &mut self.paths);
                 if let Mode::Create(c) = &self.mode {
-                    rows::place_new(&mut rows, &c.new);
+                    rows::place_new(&mut rows, &c.new, &self.snap);
                 }
                 rows
             }

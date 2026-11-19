@@ -409,8 +409,9 @@ pub fn sessions(snap: &Snapshot, filter: &mut Filter, tree: &Tree, paths: &mut P
 
 /// Put the "+ new" row for NEW where the window or session will appear:
 /// after the window it follows (and its listed panes), else at the end of
-/// that session's rows; a session at the very end.
-pub fn place_new(rows: &mut Vec<Row>, new: &New) {
+/// that session's rows; a session after the sessions of the host its folder
+/// is on (SNAP's), where Rex adds it, else at the very end.
+pub fn place_new(rows: &mut Vec<Row>, new: &New, snap: &Snapshot) {
     let at = match new {
         New::Window { session, after, .. } => {
             let window = Target::Window { session: session.clone(), window: after.clone() };
@@ -423,7 +424,20 @@ pub fn place_new(rows: &mut Vec<Row>, new: &New) {
                 None => rows.iter().rposition(in_session).map_or(rows.len(), |i| i + 1),
             }
         }
-        New::Session { .. } => rows.len(),
+        // Before the first row of a session listed after that host's last
+        // (the rows keep the snapshot's order, and a filter may hide that
+        // host's own).
+        New::Session { dir } => {
+            let host = split_host(dir).0;
+            let index = |r: &Row| match &r.target {
+                Some(Target::Session { session } | Target::Window { session, .. } | Target::Pane { session, .. }) => snap.sessions.iter().position(|s| &s.id == session),
+                None => None,
+            };
+            match snap.sessions.iter().rposition(|s| s.host == host) {
+                Some(last) => rows.iter().position(|r| index(r).is_some_and(|i| i > last)).unwrap_or(rows.len()),
+                None => rows.len(),
+            }
+        }
     };
     rows.insert(at, Row { target: None, kind: RowKind::New, preview: None, score: None });
 }

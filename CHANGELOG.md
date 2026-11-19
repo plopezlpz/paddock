@@ -6,6 +6,12 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-11-19
+
+### Fixed
+
+- Rex with other hosts: a new session's row (`ctrl-s ctrl-s`) showed at the very end of the list, under the last host's sessions, whichever host it was made on. It now shows after the sessions of the host it is made on (the selected row's folder's), where it is listed.
+
 ## [0.10.5] - 2026-11-18
 
 ### Fixed
@@ -273,7 +279,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.5...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.6...HEAD
+[0.10.6]: https://github.com/plopezlpz/paddock/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/plopezlpz/paddock/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/plopezlpz/paddock/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/plopezlpz/paddock/compare/v0.10.2...v0.10.3

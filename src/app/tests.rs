@@ -2010,6 +2010,39 @@ fn a_rex_session_sharing_a_name_is_renamed_by_id() {
 }
 
 #[test]
+fn a_new_rex_session_is_listed_last_on_the_host_it_is_made_on() {
+    let mut app = rex_app(Tab::Sessions);
+    app.snap.sessions[1].windows[0].panes[0].path = "devbox:/src/api".into();
+    let new_row = |app: &App| app.rows.iter().position(|r| matches!(r.kind, RowKind::New)).unwrap();
+    let first_on_devbox = |app: &App| app.rows.iter().position(|r| r.target == Some(Target::Session { session: "session:2".into() })).unwrap();
+    // From a pane here: after this server's sessions, before devbox's.
+    select(&mut app, Target::Window { session: "session:1".into(), window: "window:2".into() });
+    ctrl(&mut app, 's');
+    ctrl(&mut app, 's');
+    assert_eq!(new_row(&app), first_on_devbox(&app) - 1, "{:?}", app.rows.iter().map(|r| &r.target).collect::<Vec<_>>());
+    type_(&mut app, "web");
+    assert_eq!(job(enter(&mut app)).op, Op::NewSession { name: "web".into(), dir: "/src/api".into() });
+    // From devbox's: at the end, after devbox's, and made there.
+    select(&mut app, Target::Session { session: "session:2".into() });
+    ctrl(&mut app, 's');
+    ctrl(&mut app, 's');
+    assert_eq!(new_row(&app), app.rows.len() - 1);
+    assert!(new_row(&app) > first_on_devbox(&app));
+    type_(&mut app, "web");
+    assert_eq!(job(enter(&mut app)).op, Op::NewSession { name: "web".into(), dir: "devbox:/src/api".into() });
+    // This server's sessions filtered away: still before devbox's, for one
+    // made here (from a devbox row whose folder isn't known).
+    app.snap.sessions[1].windows[0].panes[0].path = String::new();
+    type_(&mut app, "web");
+    select(&mut app, Target::Window { session: "session:2".into(), window: "window:3".into() });
+    ctrl(&mut app, 's');
+    ctrl(&mut app, 's');
+    let on_devbox = |r: &Row| matches!(&r.target, Some(Target::Session { session } | Target::Window { session, .. } | Target::Pane { session, .. }) if session == "session:2");
+    let first = app.rows.iter().position(on_devbox);
+    assert!(first.is_some() && new_row(&app) < first.unwrap(), "{:?}", app.rows.iter().map(|r| (matches!(r.kind, RowKind::New), &r.target)).collect::<Vec<_>>());
+}
+
+#[test]
 fn rex_moves_are_offered_within_their_session_only() {
     let mut app = rex_app(Tab::Sessions);
     let shift = |app: &mut App, code| app.on_key(key(code, KeyModifiers::SHIFT));
