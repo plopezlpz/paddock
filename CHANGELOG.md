@@ -6,6 +6,12 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-22
+
+### Added
+
+- `paddock save [NAME]`, `paddock restore [NAME]`, `paddock list` and `paddock remove NAME`: named bookmarks of every tmux session on the server (default name `session`), kept in `~/.local/state/paddock/workspaces`. A restore brings back session and window names, layouts, directories, zoom and focus, grouped sessions, and each window's `automatic-rename` and `window-size`. Claude, Pi, Codex and Antigravity panes reopen their conversation by the exact ID the agent-status hooks recorded, typed into a login shell so Ctrl-Z and `fg` work. Running sessions are skipped, and no pane contents are saved.
+
 ## [0.10.6] - 2026-11-19
 
 ### Fixed
@@ -279,7 +285,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.10.6...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/plopezlpz/paddock/compare/v0.10.6...v0.11.0
 [0.10.6]: https://github.com/plopezlpz/paddock/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/plopezlpz/paddock/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/plopezlpz/paddock/compare/v0.10.3...v0.10.4

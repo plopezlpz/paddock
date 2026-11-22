@@ -59,7 +59,7 @@ enum Ev {
 
 /// Without --tab (or with --tab last), paddock opens on the tab it was last
 /// closed on.
-const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init [--rex] | paddock --version\n       paddock --rex [--tab sessions|agents] [--client CLIENT] [--suggest COMMAND] [--color ROLE=COLOUR]... [--icons unicode|nerd]\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]\n       paddock next [-c CLIENT]";
+const USAGE: &str = "usage: paddock [--tab sessions|agents|last] | paddock init [--rex] | paddock --version\n       paddock --rex [--tab sessions|agents] [--client CLIENT] [--suggest COMMAND] [--color ROLE=COLOUR]... [--icons unicode|nerd]\n       paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]\n       paddock next [-c CLIENT]\n       paddock save [NAME] | restore [NAME] | list | remove NAME (tmux workspaces)";
 
 /// For `paddock init`: a binary installed without the plugin checkout
 /// (Homebrew) still binds the keys, by running this script itself.
@@ -76,6 +76,7 @@ enum Cmd {
     Notification { state: String, kind: String, path: String, icons: theme::AgentIcons },
     /// Jump CLIENT (else tmux's current one) to the next agent that needs you.
     Next(Option<String>),
+    Workspace(backend::tmux::workspace::Action),
     Version,
     Help,
 }
@@ -94,6 +95,12 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
         ["notification", state @ ("finished" | "asking" | "waiting" | "failed"), kind, path, mode @ ("unicode" | "nerd")] => {
             Ok(Cmd::Notification { state: (*state).into(), kind: (*kind).into(), path: (*path).into(), icons: if *mode == "nerd" { theme::AgentIcons::Nerd } else { theme::AgentIcons::Unicode } })
         }
+        [op @ ("save" | "restore"), rest @ ..] if rest.len() <= 1 => {
+            backend::tmux::workspace::Action::named(op, rest.first().copied().unwrap_or("session")).map(Cmd::Workspace)
+        }
+        // Deleting takes an explicit name, even for the default bookmark.
+        ["remove", name] => backend::tmux::workspace::Action::named("remove", name).map(Cmd::Workspace),
+        ["list"] => Ok(Cmd::Workspace(backend::tmux::workspace::Action::List)),
         ["next"] => Ok(Cmd::Next(None)),
         ["next", "-c", client] => Ok(Cmd::Next(Some((*client).to_string()))),
         ["--version" | "-V"] => Ok(Cmd::Version),
@@ -128,7 +135,7 @@ fn version_mismatch(plugin: Option<&str>, ours: &str, rex: bool) -> Option<Strin
 /// version is what to fix.
 fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
     let cmd = parse(args);
-    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. } | Cmd::Next(_))) {
+    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. } | Cmd::Next(_) | Cmd::Workspace(_))) {
         return cmd;
     }
     version_mismatch(plugin, ours, args.first() == Some(&"--rex")).map_or(cmd, Err)
@@ -230,6 +237,7 @@ fn main() {
             println!("{}", notification::format(&state, &kind, &path, &env::var("HOME").unwrap_or_default(), icons));
             Ok(())
         }
+        Cmd::Workspace(action) => action.run(),
         Cmd::Next(client) => backend::tmux::next(client.as_deref()),
         Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));

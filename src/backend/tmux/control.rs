@@ -42,7 +42,7 @@ const HOOKS: &[&str] = &["client-attached", "client-session-changed", "client-re
 /// `tmux` invocation for the server the popup runs on. Inside tmux the TMUX
 /// variable names the socket; it is dropped so `attach` is not refused as
 /// nesting.
-fn tmux_command() -> Command {
+pub(super) fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
     if let Ok(env) = std::env::var("TMUX") {
         if let Some(socket) = env.split(',').next().filter(|s| !s.is_empty()) {

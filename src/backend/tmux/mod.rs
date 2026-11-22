@@ -6,6 +6,7 @@
 
 mod control;
 mod snapshot;
+pub mod workspace;
 
 use std::process::Command;
 use std::time::{Duration, Instant};

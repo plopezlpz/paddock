@@ -339,6 +339,24 @@ Both tabs search the absolute and `~/…` paths, repo label, full branch name,
 and full detached commit ID, even when shortened on screen. Agents also searches
 hidden cards; Sessions also matches Git metadata from inactive panes.
 
+### Save and restore a tmux workspace
+
+```sh
+paddock save            # replace the default bookmark, named session
+paddock save aa         # keep another bookmark
+paddock list
+paddock restore         # e.g. from an SSH shell after reboot, before attaching
+paddock restore aa
+tmux attach -t work     # use one of the restored tmux session names
+paddock remove aa       # remove only the bookmark, never a session or chat (a name is required)
+```
+
+One bookmark covers **all sessions on the current tmux server** except `_paddock`. It includes session names, window names and indexes, pane layout, directories, zoom and focus, plus each window's `automatic-rename` and `window-size` when they differ from the global setting: a window you named keeps its name, and one tmux names keeps following its command. Grouped sessions (`new-session -t`) come back grouped, on their own current window. Restore creates detached sessions and skips any name already running; it doesn't merge sessions, switch clients or replay arbitrary commands. If one session fails, the others are still restored and the failures are listed. Other panes open as login shells. A window linked into several sessions is saved only in the first, and a window with floating panes is left out; save warns about both.
+
+For **Claude, Pi, Codex and Antigravity (`agy`)**, install the agent-status.tmux hooks described below. Paddock reads their per-pane identity at save time and reopens the conversation by exact ID, typing `command <agent> … <ID>` into the pane's login shell, so Ctrl-Z and `fg` work as usual and your shell aliases are not applied. It doesn't guess the most recent chat in a directory. Codex needs trusted hooks and `--no-daemon`; agy reports its conversation on a turn, so after an in-app switch submit a prompt before saving. Without a usable identity or working directory, you get a shell. The agent must be on your login shell's `PATH` and its saved conversation must still exist. The typed line needs a shell with a `command` builtin (sh, bash, zsh, fish), and startup files that neither change directory nor read input, such as an update prompt. A save made before a restored agent has reported again keeps the ID restore typed. This resumes conversations, not work in progress.
+
+Bookmarks are private JSON files under `$XDG_STATE_HOME/paddock/workspaces` (default `~/.local/state/paddock/workspaces`). They include paths and session IDs but **no scrollback, prompts or transcripts**. Save and restore are manual; if tmux-continuum also restores at startup, disable its auto-restore when using Paddock as your restorer.
+
 ### Notification formatting
 
 `paddock notification finished|asking|waiting|failed KIND PATH [unicode|nerd]`
