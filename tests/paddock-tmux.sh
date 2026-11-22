@@ -38,6 +38,7 @@ mkdir "$TMP/tools"
 ln -s "$(command -v tmux)" "$TMP/tools/tmux"
 PATH="$TMP/tools:/usr/bin:/bin"
 export HOME="$TMP" PATH
+unset XDG_STATE_HOME # paddock save, below, keeps its bookmarks under HOME
 
 # A checkout at a made-up version, so no real paddock can match it.
 V=0.0.0-test
@@ -449,6 +450,18 @@ EOF
   t kill-window -t main:late \; kill-window -t main:early \; kill-window -t main:done
   # On the client's status line (display-message is not logged).
   next; check "real paddock next: says when none needs you" wait_screen "no other agent needs you"
+  # The save key saves and says so; autosave keeps a bookmark named for the
+  # server's socket, and stops when turned off.
+  t set -g @paddock-save-key S \; set -g @paddock-autosave 1s
+  t run-shell "$(tmq "$PB") init"
+  check "real paddock init binds the save key" has "$(t list-keys -N -T prefix S 2>/dev/null)" "paddock save"
+  tmux -L "$OUT" send-keys C-b S
+  check "real paddock: the save key saves" wait_screen "saved session"
+  check "real paddock: autosave saves" until_ok test -s "$HOME/.local/state/paddock/workspaces/auto-$IN.json"
+  t set -g @paddock-autosave off
+  unowned() { [ -z "$(t show -gqv @paddock-autosave-owner)" ]; }
+  check "real paddock: autosave stops when off" until_ok unowned
+  t set -gu @paddock-save-key \; set -gu @paddock-autosave
   tmux -L "$OUT" resize-window -x 60 -y 10
   t set-hook -gu pane-focus-in
   t set -gu @paddock-key

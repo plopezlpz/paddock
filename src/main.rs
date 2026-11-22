@@ -77,6 +77,8 @@ enum Cmd {
     /// Jump CLIENT (else tmux's current one) to the next agent that needs you.
     Next(Option<String>),
     Workspace(backend::tmux::workspace::Action),
+    /// paddock init's background job for @paddock-autosave.
+    Autosave,
     Version,
     Help,
 }
@@ -98,9 +100,11 @@ fn parse(args: &[&str]) -> Result<Cmd, String> {
         [op @ ("save" | "restore"), rest @ ..] if rest.len() <= 1 => {
             backend::tmux::workspace::Action::named(op, rest.first().copied().unwrap_or("session")).map(Cmd::Workspace)
         }
+        ["restore", "--at-start", name] => backend::tmux::workspace::Action::at_start(name).map(Cmd::Workspace),
         // Deleting takes an explicit name, even for the default bookmark.
         ["remove", name] => backend::tmux::workspace::Action::named("remove", name).map(Cmd::Workspace),
         ["list"] => Ok(Cmd::Workspace(backend::tmux::workspace::Action::List)),
+        ["autosave"] => Ok(Cmd::Autosave),
         ["next"] => Ok(Cmd::Next(None)),
         ["next", "-c", client] => Ok(Cmd::Next(Some((*client).to_string()))),
         ["--version" | "-V"] => Ok(Cmd::Version),
@@ -135,7 +139,7 @@ fn version_mismatch(plugin: Option<&str>, ours: &str, rex: bool) -> Option<Strin
 /// version is what to fix.
 fn command(args: &[&str], plugin: Option<&str>, ours: &str) -> Result<Cmd, String> {
     let cmd = parse(args);
-    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. } | Cmd::Next(_) | Cmd::Workspace(_))) {
+    if matches!(cmd, Ok(Cmd::Init | Cmd::InitRex | Cmd::Version | Cmd::Help | Cmd::Notification { .. } | Cmd::Next(_) | Cmd::Workspace(_) | Cmd::Autosave)) {
         return cmd;
     }
     version_mismatch(plugin, ours, args.first() == Some(&"--rex")).map_or(cmd, Err)
@@ -238,6 +242,7 @@ fn main() {
             Ok(())
         }
         Cmd::Workspace(action) => action.run(),
+        Cmd::Autosave => backend::tmux::workspace::autosave(&self_path()?),
         Cmd::Next(client) => backend::tmux::next(client.as_deref()),
         Cmd::Version => {
             println!("paddock {}", env!("CARGO_PKG_VERSION"));

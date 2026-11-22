@@ -1,6 +1,7 @@
 """Real tmux, fake agents, private socket/state. Run after cargo build --locked."""
 import json
 import os
+import pty
 from pathlib import Path
 import shlex
 import shutil
@@ -20,7 +21,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
     config = root / 'tmux.conf'
     config.write_text("set -g default-shell /bin/sh\nset -g default-command 'exec sleep 120'\n")
     wrapper.write_text(f'''#!/bin/sh
-if [ -f "$HOME/fail-launch" ] && [ "$3" = respawn-pane ]; then
+if [ -f "$HOME/fail-launch" ] && [ "$4" = respawn-pane ]; then # -S SOCKET -u
   if [ -f "$HOME/launched-one" ]; then exit 1; fi
   touch "$HOME/launched-one"
 fi
@@ -36,8 +37,8 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
         return p.stdout.rstrip('\n')
     def t(*args, **kw): return run(wrapper, '-S', sock, *args, **kw)
     def cli(*args, **kw): return run(binary, *args, **kw)
-    def until(check, what):
-        for _ in range(100):
+    def until(check, what, tries=100):
+        for _ in range(tries):
             if check(): return
             time.sleep(0.02)
         raise AssertionError(what)
@@ -81,11 +82,17 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
         assert all(word not in raw for word in ['NEVER_SAVE', 'stale', '_paddock', '123:id'])
         assert raw.count('"resume"') == 4
         saved = {s['name']: s for s in json.loads(raw)['sessions']}
-        assert saved['viewer'] == {'name': 'viewer', 'group': {'leader': 'project', 'window': 3}, 'windows': []}
+        assert saved['viewer'] == {'name': 'viewer', 'group': {'leader': 'project', 'window': 3}, 'path': os.getcwd(), 'windows': []}
+        assert saved['project']['path'] == str(path) + '/.'
         # Only options that differ from the global value are kept.
         assert [(w.get('size_policy'), w.get('automatic_rename')) for w in saved['untouched']['windows']] == [('manual', None)]
         assert [(w.get('size_policy'), w.get('automatic_rename')) for w in saved['project']['windows']] == [(None, False)] * 2
         assert cli('restore').count('skipped') == 3
+        # A grouped session never joins a leader that was running already.
+        t('kill-session', '-t', 'viewer')
+        assert 'skipped viewer (project was already running' in cli('restore', 'aa')
+        t('has-session', '-t', '=viewer', ok=False)
+        t('new-session', '-ds', 'viewer', '-t', 'project'); t('select-window', '-t', 'viewer:3')
         # A linked window is saved once; a window with a floating pane is left out.
         t('link-window', '-s', 'project:7', '-t', 'untouched:9')
         t('new-window', '-d', '-t', 'untouched:5'); t('new-pane', '-d', '-t', 'untouched:5', '-x', '20', '-y', '5')
@@ -118,12 +125,21 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
         record.write_text(json.dumps(invalid)); cli('restore', 'aa', ok=False)
         assert t('list-sessions', '-F', '#S') == 'untouched' and not any(root.glob('*.log'))
         t('kill-server'); record.write_text(raw)
-        # Fail the second pane launch, after rename. Only the new sessions roll back.
+        # Fail the second pane launch. Only the new sessions roll back.
         t('new-session', '-ds', 'survivor'); (root / 'fail-launch').touch()
         cli('restore', 'aa', ok=False)
         assert (root / 'launched-one').exists() and t('list-sessions', '-F', '#S') == 'survivor'
         (root / 'fail-launch').unlink(); t('kill-server')
+        # Staging sessions left by a restore that died: removed, or with
+        # agents started in them, kept under a name save sees.
+        t('new-session', '-ds', '_paddock_restore_99999999', 'sleep', '86400')
+        t('new-session', '-ds', '_paddock_restore_99999998', 'sleep', '120')
         assert cli('restore', 'aa').count('restored') == 3
+        left = t('list-sessions', '-F', '#S').split()
+        assert '_paddock_restore_99999999' not in left and '_paddock_restore_99999998' not in left, left
+        t('kill-session', '-t', '=unfinished-restore-99999998')
+        assert t('display', '-pt', 'project:', '#{session_path}') == str(path) + '/.'
+        assert 'default-size' not in t('show-options', '-t', 'project:')
         assert t('display', '-pt', 'viewer:', '#{session_group}:#{window_index}') == 'project:3'
         assert t('show-options', '-wv', '-t', 'project:3', 'automatic-rename') == 'off'
         assert t('show-options', '-wv', '-t', 'untouched:', 'window-size') == 'manual'
@@ -154,6 +170,18 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
         cli('save', 'early'); cli('remove', 'early')
         assert t('show-options', '-pqv', '-t', first_pane, '@paddock-resume') == ''
         t('set-option', '-pu', '-t', first_pane, '@agent-instance')
+        # A save with the shell in front (the agent stopped) keeps the ID; the
+        # agent exiting drops it.
+        _, second, third, _ = t('list-panes', '-t', 'project:3', '-F', '#{pane_id} #{pane_pid}').splitlines()
+        def agent_of(line): return int(subprocess.run(['pgrep', '-P', line.split()[1], 'sleep'], text=True, capture_output=True).stdout.split()[0])
+        stopped = agent_of(second)
+        os.kill(stopped, 18 if sys.platform == 'darwin' else 20)  # SIGTSTP
+        until(lambda: t('display', '-pt', second.split()[0], '#{pane_current_command}') != 'sleep', 'stop')
+        os.kill(agent_of(third), 15)
+        until(lambda: t('show-options', '-pqv', '-t', third.split()[0], '@paddock-resume') == '', 'an exited agent drops its tag')
+        cli('save', 'early'); early = (root / 'state/paddock/workspaces/early.json').read_text(); cli('remove', 'early')
+        assert '"id-1"' in early and '"id-2"' not in early, early
+        os.kill(stopped, 19 if sys.platform == 'darwin' else 18)  # SIGCONT
         # They run under the login shell, so Ctrl-Z stops one and fg brings it back.
         first = t('list-panes', '-t', 'project:3', '-F', '#{pane_id} #{pane_pid}').splitlines()[0]
         pane, shell_pid = first.split()
@@ -170,6 +198,50 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
         cli('remove', ok=False)  # deleting needs a name, even for the default
         cli('remove', 'aa'); cli('remove', 'session'); assert not cli('list')
         assert t('has-session', '-t', '=project') == ''
-        print('workspace lifecycle, groups, linked/floating windows, window options, fresh-server layout/focus, shell fallback, job control and four exact-ID launchers: passed')
+        # Autosave, on a server of its own (bookmark auto-as): it saves at the
+        # interval, one job per server, restores at the next server's start
+        # (keeping the bookmark it restored), and stops when turned off.
+        sock3 = root / 'as'; env3 = dict(env, TMUX=f'{sock3},1,0')
+        def t3(*args, **kw): return run(wrapper, '-S', sock3, *args, **kw)
+        auto = root / 'state/paddock/workspaces/auto-as.json'
+        gone = root / 'gone'; gone.mkdir()
+        for name in ('alpha', 'gamma', 'plain'):
+            t3('new-session', '-ds', name, '-n', f'{name}-saved')
+            if name != 'plain': t3('split-window', '-d', '-t', f'{name}:', '-c', str(gone))
+        t3('set', '-g', '@paddock-autosave', '1s')
+        job = subprocess.Popen([binary, 'autosave'], env=env3)
+        until(auto.exists, 'autosave should save', tries=300)
+        start = time.monotonic(); run(binary, 'autosave', env=env3)
+        assert time.monotonic() - start < 2 and job.poll() is None
+        t3('kill-server'); job.wait(timeout=5); gone.rmdir()
+        # The new server's sessions, as a terminal would start them: alpha,
+        # a shell just started, is replaced; gamma, in use, is kept; plain
+        # (a single pane when saved) is kept, the saved one skipped.
+        t3('new-session', '-ds', 'alpha', '/bin/sh')
+        # Attached, as a terminal is: the client moves to the restored alpha.
+        master, slave = pty.openpty()
+        client = subprocess.Popen([wrapper, '-S', sock3, 'attach', '-t', 'alpha'], env=dict(env3, TERM='xterm', TMUX=''), stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
+        until(lambda: t3('list-clients', '-F', '#S') == 'alpha', 'client should attach')
+        t3('new-session', '-ds', 'gamma'); t3('split-window', '-d', '-t', 'gamma:')
+        t3('new-session', '-ds', 'plain', '-n', 'mine')
+        t3('set', '-g', '@paddock-autosave', '1s')
+        job = subprocess.Popen([binary, 'autosave'], env=env3)
+        until(lambda: 'gamma-restored' in t3('list-sessions', '-F', '#S').split(), 'autosave should restore', tries=300)
+        windows = dict(line.split(':', 1) for line in t3('list-windows', '-a', '-F', '#S:#W').split())
+        assert windows.pop('gamma') != 'gamma-saved' and windows == {'alpha': 'alpha-saved', 'gamma-restored': 'gamma-saved', 'plain': 'mine'}, windows
+        assert t3('list-clients', '-F', '#S:#W') == 'alpha:alpha-saved'
+        client.kill(); client.wait(); os.close(master)
+        assert (auto.parent / 'auto-as.previous.json').exists() and not (auto.parent / 'auto-as.unrestored.json').exists()
+        log = auto.parent.parent / 'auto-as.restore.log'
+        # Its output and errors, in order, in one log.
+        text = log.read_text()
+        assert text.index('missing directory') < text.index('restored gamma as gamma-restored'), text
+        assert log.stat().st_mode & 0o777 == 0o600
+        t3('set', '-g', '@paddock-autosave', 'off'); job.wait(timeout=5)
+        assert t3('show-options', '-gqv', '@paddock-autosave-owner') == ''
+        t3('kill-server'); cli('remove', 'auto-as'); cli('remove', 'auto-as.previous'); assert not cli('list')
+        print('workspace lifecycle, groups, linked/floating windows, window options, fresh-server layout/focus, shell fallback, job control, four exact-ID launchers and autosave: passed')
     finally:
-        subprocess.run([wrapper, '-S', sock, 'kill-server'], env=env, capture_output=True)
+        for s in (sock, root / 'as'):
+            subprocess.run([wrapper, '-S', s, 'kill-server'], env=env, capture_output=True)

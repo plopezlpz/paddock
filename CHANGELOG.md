@@ -6,6 +6,22 @@ Notable changes to paddock, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-22
+
+### Added
+
+- `@paddock-autosave` (minutes) saves the tmux workspace to its own bookmark, `auto`, in the background, and restores it when tmux starts; the bookmark it restored is kept as `auto.previous`. A session the terminal just started is replaced by the saved one of its name, and one in use is kept, with the saved one restored as `NAME-restored`.
+- `@paddock-save-key` binds a key that saves the default bookmark and shows the result.
+- A bookmark keeps each session's start directory.
+
+### Fixed
+
+- A resumed agent that exits no longer leaves its ID behind for the next save; one stopped with Ctrl-Z, or with its shell still starting, keeps it.
+- Restore no longer adds a grouped session to a session of that leader's name that was already running.
+- Restored sessions no longer keep a fixed default size from the restore.
+- A restore cut short no longer leaves the saved session name on placeholder panes. The next restore removes its staging session, or keeps it as `unfinished-restore-PID` if agents had started in it.
+- Paths with control characters are no longer saved mangled.
+
 ## [0.11.0] - 2026-11-22
 
 ### Added
@@ -285,7 +301,8 @@ First release: a fast tmux popup for jumping between sessions, windows and panes
 - Prebuilt binaries for macOS and Linux, arm64 and x86_64. With TPM, the first key press offers the download (checksum verified), so no Rust is needed. Also installs with Homebrew or `cargo install --git`, with `run-shell 'paddock init'` binding the keys, or from a clone. The plugin binds only a binary of its own version.
 - Requires tmux 3.8 or later.
 
-[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/plopezlpz/paddock/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/plopezlpz/paddock/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/plopezlpz/paddock/compare/v0.10.6...v0.11.0
 [0.10.6]: https://github.com/plopezlpz/paddock/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/plopezlpz/paddock/compare/v0.10.4...v0.10.5

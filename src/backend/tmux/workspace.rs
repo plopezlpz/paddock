@@ -9,14 +9,19 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Restore builds a session under this prefix, so a partial layout never
 /// takes the saved name. Save skips any that an interrupted restore left.
 const STAGE: &str = "_paddock_restore_";
+/// What a pane runs until restore starts its shell or agent.
+const PLACEHOLDER: &str = "86400";
 
 pub enum Action {
     Save(String),
-    Restore(String),
+    /// With true, as autosave restores at tmux's start: see Taken::Start.
+    Restore(String, bool),
     List,
     Remove(String),
 }
@@ -28,20 +33,19 @@ impl Action {
         }
         Ok(match op {
             "save" => Self::Save(name.into()),
-            "restore" => Self::Restore(name.into()),
+            "restore" => Self::Restore(name.into(), false),
             "remove" => Self::Remove(name.into()),
             _ => unreachable!(),
         })
     }
 
+    /// `restore --at-start NAME`, the restore autosave runs at tmux's start.
+    pub fn at_start(name: &str) -> Result<Self, String> {
+        Self::named("restore", name).map(|_| Self::Restore(name.into(), true))
+    }
+
     pub fn run(self) -> Result<(), String> {
-        let dir = env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state")))
-            .ok_or("neither XDG_STATE_HOME nor HOME is set")?
-            .join("paddock/workspaces");
-        self.apply(&dir).map_err(|e| e.to_string())
+        self.apply(&state_dir()?).map_err(|e| e.to_string())
     }
 
     fn apply(self, dir: &Path) -> io::Result<()> {
@@ -95,17 +99,27 @@ impl Action {
                 }
                 println!("saved {name} ({} tmux sessions)", snapshot.sessions.len());
             }
-            Self::Restore(name) => {
+            Self::Restore(name, at_start) => {
                 let file = fs::File::open(path(&name))
                     .map_err(|e| io::Error::other(format!("open workspace {name}: {e}")))?;
                 let snapshot: Workspace = serde_json::from_reader(file)?;
                 snapshot.check()?;
+                clean_stages();
                 // One broken session does not keep the others from coming back.
                 let mut failed = Vec::new();
+                // Saved name -> the name it came back as.
+                let mut created = HashMap::new();
+                let saved: HashSet<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
                 for s in &snapshot.sessions {
-                    if let Err(e) = restore(s) {
-                        eprintln!("{}: {e}", s.name);
-                        failed.push(s.name.as_str());
+                    match restore(s, &created, &saved, at_start) {
+                        Ok(Some(name)) => {
+                            created.insert(s.name.as_str(), name);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("{}: {e}", s.name);
+                            failed.push(s.name.as_str());
+                        }
                     }
                 }
                 if !failed.is_empty() {
@@ -115,6 +129,114 @@ impl Action {
         }
         Ok(())
     }
+}
+
+/// How often @paddock-autosave saves: minutes, or seconds with an `s`
+/// suffix, at most a day. Anything else (off, 0, empty) turns it off.
+fn interval(value: &str) -> Option<Duration> {
+    let (n, unit) = value.strip_suffix('s').map_or((value, 60), |n| (n, 1));
+    let secs = n.parse::<u64>().ok()? * unit;
+    (1..=86_400).contains(&secs).then(|| Duration::from_secs(secs))
+}
+
+/// The bookmark autosave keeps: `auto` for tmux's default socket, and
+/// `auto-NAME` for another (`tmux -L NAME`), with any character but a
+/// letter, digit or `-` as `_`: never a `.`, so never one of its copies
+/// (`auto.previous`).
+fn auto_name(socket: &str) -> String {
+    match Path::new(socket).file_name().map(|n| n.to_string_lossy()) {
+        None => "auto".into(),
+        Some(n) if n == "default" => "auto".into(),
+        Some(n) => {
+            let n: String = n.chars().take(100).map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+            format!("auto-{n}")
+        }
+    }
+}
+
+/// `paddock autosave`, which paddock init starts in the background when
+/// @paddock-autosave is set. Once per server, within two minutes of its
+/// start, it restores the server's auto bookmark (kept first as
+/// NAME.previous, and as NAME.unrestored if that fails); then it saves the
+/// bookmark at each interval. One job runs per server: the
+/// @paddock-autosave-owner option names it, and a job that no longer owns
+/// it, or finds autosave off, stops.
+pub fn autosave(bin: &Path) -> Result<(), String> {
+    let dir = state_dir()?;
+    let logs = dir.parent().unwrap_or(&dir).to_path_buf();
+    let me = format!("{} {}", std::process::id(), env!("CARGO_PKG_VERSION"));
+    let read = |format: &str| -> Option<Vec<String>> {
+        let out = tmux(&["display-message", "-p", format]).ok()?;
+        Some(out.split('\x1f').map(str::to_owned).collect())
+    };
+    let Some(info) = read("#{socket_path}\x1f#{start_time}\x1f#{@paddock-autosave}\x1f#{@paddock-autosave-owner}") else {
+        return Ok(());
+    };
+    let [socket, started, every, owner] = &info[..] else { return Ok(()) };
+    if interval(every).is_none() {
+        return Ok(());
+    }
+    // Another job of this version, still running, already keeps this server.
+    let running = owner
+        .split_once(' ')
+        .is_some_and(|(pid, version)| version == env!("CARGO_PKG_VERSION") && pid.parse().is_ok_and(alive));
+    if running {
+        return Ok(());
+    }
+    tmux(&["set-option", "-g", "@paddock-autosave-owner", &me]).map_err(|e| e.to_string())?;
+    DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| e.to_string())?;
+    let name = auto_name(socket);
+    // Its output, private as the bookmarks are, in NAME.save.log and
+    // NAME.restore.log (the last run's). True if it succeeded.
+    let run = |args: &[&str], log: &str| {
+        let open = || OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(logs.join(format!("{name}.{log}.log")));
+        // One open file for both: two would each write from the start.
+        let Ok(out) = open() else { return false };
+        let Ok(err) = out.try_clone() else { return false };
+        Command::new(bin).args(args).stdin(Stdio::null()).stdout(out).stderr(err).status().is_ok_and(|s| s.success())
+    };
+    let now = now();
+    let fresh = started.parse::<u64>().is_ok_and(|t| now.saturating_sub(t) <= 120);
+    // -o: only one job, of any started at once, claims the restore.
+    if fresh && tmux(&["set-option", "-go", "@paddock-autorestored", "1"]).is_ok() {
+        let file = dir.join(format!("{name}.json"));
+        if file.exists() {
+            // Before any save of this server replaces it.
+            let _ = fs::copy(&file, dir.join(format!("{name}.previous.json")));
+            if !run(&["restore", "--at-start", &name], "restore") {
+                let _ = fs::copy(&file, dir.join(format!("{name}.unrestored.json")));
+            }
+        }
+    }
+    let mut every = every.clone();
+    while let Some(wait) = interval(&every) {
+        std::thread::sleep(wait);
+        // Gone (the server exited), or taken over by a newer job.
+        let Some(now) = read("#{@paddock-autosave}\x1f#{@paddock-autosave-owner}") else { return Ok(()) };
+        if now.get(1) != Some(&me) {
+            return Ok(());
+        }
+        every = now[0].clone();
+        if interval(&every).is_some() {
+            run(&["save", &name], "save");
+        }
+    }
+    // Turned off: no owner left behind, so turning it on again starts a job.
+    let _ = tmux(&["set-option", "-gu", "@paddock-autosave-owner"]);
+    Ok(())
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+fn state_dir() -> Result<PathBuf, String> {
+    Ok(env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state")))
+        .ok_or("neither XDG_STATE_HOME nor HOME is set")?
+        .join("paddock/workspaces"))
 }
 
 fn token(s: &str) -> bool {
@@ -136,6 +258,9 @@ struct Session {
     /// windows, so it saves none of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<Group>,
+    /// The session's start directory (new windows open there); empty: unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    path: String,
     windows: Vec<Window>,
 }
 #[derive(Serialize, Deserialize)]
@@ -264,6 +389,7 @@ impl Workspace {
         )?;
         let plain = |s: &str| !s.chars().any(char::is_control);
         let printable = |s: &str| !s.is_empty() && plain(s);
+        let directory = |d: &str| d.is_empty() || (plain(d) && Path::new(d).is_absolute());
         let mut names = HashSet::new();
         let mut leaders = HashSet::new();
         for s in &self.sessions {
@@ -275,6 +401,7 @@ impl Workspace {
                     && names.insert(&s.name),
                 "invalid or duplicate tmux session name",
             )?;
+            ensure(directory(&s.path), "session directory is not absolute")?;
             if let Some(g) = &s.group {
                 ensure(
                     s.windows.is_empty() && leaders.contains(&g.leader),
@@ -308,10 +435,7 @@ impl Workspace {
                     "missing or ambiguous active pane",
                 )?;
                 for p in &w.panes {
-                    ensure(
-                        p.cwd.is_empty() || (plain(&p.cwd) && Path::new(&p.cwd).is_absolute()),
-                        "pane working directory is not absolute",
-                    )?;
+                    ensure(directory(&p.cwd), "pane working directory is not absolute")?;
                     if let Some(r) = &p.resume {
                         ensure(token(&r.id), "invalid agent resume ID")?;
                     }
@@ -323,7 +447,8 @@ impl Workspace {
 }
 
 fn tmux(args: &[&str]) -> io::Result<String> {
-    let out = tmux_command().args(args).output()?;
+    // -u: as the popup's client, names are read as UTF-8 whatever the locale.
+    let out = tmux_command().arg("-u").args(args).output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
             "tmux {}: {}",
@@ -425,6 +550,7 @@ fn capture() -> io::Result<Workspace> {
                     leader: l.into(),
                     window: index,
                 }),
+                path: readable(session_path).into(),
                 windows: vec![],
             });
         }
@@ -464,11 +590,12 @@ fn capture() -> io::Result<Workspace> {
         let mut resume = identity(kind, instance, cmd, registered, stale, dead);
         if !pending.is_empty() {
             // Restore's tag holds a resumed agent's ID until its hooks report
-            // it (agy only does on a turn), so an early save keeps it. A shell
-            // in front (the agent still starting, or stopped) keeps the tag.
+            // it (agy only does on a turn), so an early save keeps it, even
+            // with a shell in front: the agent is starting, or stopped. The
+            // typed line drops the tag when the agent exits.
             if !instance.is_empty() || dead == "1" {
                 settled.push(pane_id);
-            } else if !is_shell(cmd) {
+            } else {
                 resume = pending.split_once(':').and_then(|(bin, id)| {
                     let agent = Agent::from_bin(bin)?;
                     token(id).then(|| Resume { agent, id: id.into() })
@@ -480,7 +607,11 @@ fn capture() -> io::Result<Workspace> {
         }
         s.windows.last_mut().unwrap().panes.push(Pane {
             // Empty when tmux can't read it (a root-owned or dead process).
-            cwd: if cwd.is_empty() { session_path } else { cwd }.into(),
+            cwd: match readable(cwd) {
+                "" => readable(session_path),
+                cwd => cwd,
+            }
+            .into(),
             active: focused == "1",
             resume,
         });
@@ -519,54 +650,149 @@ fn capture() -> io::Result<Workspace> {
     })
 }
 
+/// A captured directory, or empty if it had a control character (now \x7f).
+fn readable(dir: &str) -> &str {
+    if dir.contains('\x7f') { "" } else { dir }
+}
+
 // Names and start directories are tmux *formats*, even in separate argv
 // entries. Quote hashes; the empty suffix also keeps a final ';' literal.
 fn literal(value: &str) -> String {
     format!("{}#{{l:}}", value.replace('#', "##"))
 }
 
-fn restore(s: &Session) -> io::Result<()> {
-    let target = format!("={}:", s.name);
-    if tmux(&["has-session", "-t", &target]).is_ok() {
+/// Restore S, unless a session by its name is running; at tmux's start,
+/// see `taken`. The name it came back as, if created. A grouped session is
+/// only with a leader this run CREATED (saved name -> name).
+fn restore(s: &Session, created: &HashMap<&str, String>, saved: &HashSet<&str>, at_start: bool) -> io::Result<Option<String>> {
+    let exists = |name: &str| tmux(&["has-session", "-t", &format!("={name}:")]).is_ok();
+    let trivial = s.windows.len() == 1 && s.windows[0].panes.len() == 1 && s.windows[0].panes[0].resume.is_none();
+    if exists(&s.name) && (!at_start || s.group.is_some() || trivial) {
         println!("skipped {} (already exists)", s.name);
-        return Ok(());
+        return Ok(None);
     }
+    let path = literal(&s.path);
+    let start = if Path::new(&s.path).is_dir() { vec!["-c", path.as_str()] } else { vec![] };
     if let Some(g) = &s.group {
-        // Without that session, -t would quietly start a new group by that name.
-        tmux(&["has-session", "-t", &format!("={}:", g.leader)])
-            .map_err(|_| io::Error::other(format!("{} is not running to share windows with", g.leader)))?;
+        let Some(leader) = created.get(g.leader.as_str()) else {
+            // Without that session, -t would quietly start a new group by that
+            // name; with one this restore skipped, it would join the user's.
+            if tmux(&["has-session", "-t", &format!("={}:", g.leader)]).is_err() {
+                return Err(io::Error::other(format!("{} is not running to share windows with", g.leader)));
+            }
+            println!("skipped {} ({} was already running, not restored)", s.name, g.leader);
+            return Ok(None);
+        };
         // A session target ends in ':', so a name ending in ';' stays an argument.
-        tmux(&["new-session", "-d", "-s", &literal(&s.name), "-t", &format!("={}:", g.leader)])?;
-        if let Err(e) = tmux(&["select-window", "-t", &format!("{target}{}", g.window)]) {
+        let (name, target) = (literal(&s.name), format!("={leader}:"));
+        let mut args = vec!["new-session", "-d", "-s", &name, "-t", &target];
+        args.extend(&start);
+        tmux(&args)?;
+        if let Err(e) = tmux(&["select-window", "-t", &format!("={}:{}", s.name, g.window)]) {
             eprintln!("{}: {e}", s.name);
         }
-        println!("restored {} (grouped with {})", s.name, g.leader);
-        return Ok(());
+        println!("restored {} (grouped with {leader})", s.name);
+        return Ok(Some(s.name.clone()));
     }
     // Construct the layout with inert placeholders before starting any agents.
     // A partial layout never takes the requested name or blocks a retry.
     let stage = format!("{STAGE}{}", std::process::id());
     let mut sid = String::new();
     let mut launches = Vec::new();
-    let result = build(s, &stage, &mut sid, &mut launches)
-        .and_then(|()| tmux(&["rename-session", "-t", &sid, &literal(&s.name)]))
-        .and_then(|_| {
+    // The agents start before the rename: a restore cut short leaves a
+    // staging session (the next restore removes it), never the saved name
+    // on panes that are still placeholders.
+    let result = build(s, &stage, &start, &mut sid, &mut launches)
+        .and_then(|()| {
             launches
                 .into_iter()
                 .try_for_each(|(pane, p)| launch(&pane, p))
+        })
+        .and_then(|()| match tmux(&["rename-session", "-t", &sid, &literal(&s.name)]) {
+            Ok(_) => Ok(s.name.clone()),
+            // Taken (a moment ago, perhaps): at tmux's start, never lost.
+            Err(_) if at_start && exists(&s.name) => taken(&s.name, &sid, created, saved),
+            Err(e) => Err(e),
         });
-    if let Err(e) = result {
+    let name = match result {
+        Ok(name) => name,
+        Err(e) => {
         if !sid.is_empty() {
             tmux(&["kill-session", "-t", &sid]).map_err(|cleanup| {
                 io::Error::other(format!(
                     "{e}; cleaning up newly created session {sid}: {cleanup}"
                 ))
             })?;
+            }
+            return Err(e);
         }
-        return Err(e);
+    };
+    if name == s.name {
+        println!("restored {name}");
+    } else {
+        println!("restored {} as {name} ({} was in use)", s.name, s.name);
     }
-    println!("restored {}", s.name);
-    Ok(())
+    Ok(Some(name))
+}
+
+/// At tmux's start, the saved session NAME (built as SID) when a session of
+/// that name runs: the one tmux or the terminal just started, a shell in a
+/// single pane, is replaced (its clients switched over); one in use stays,
+/// and the saved one becomes NAME-restored (or -2, -3...), a name neither
+/// SAVED nor CREATED by this restore. The final name.
+fn taken(name: &str, sid: &str, created: &HashMap<&str, String>, saved: &HashSet<&str>) -> io::Result<String> {
+    let target = format!("={name}:");
+    let ours = created.values().any(|c| c == name);
+    let fields = tmux(&["display-message", "-p", "-t", &target, "#{session_windows}\x1f#{window_panes}\x1f#{pane_current_command}\x1f#{session_created}"])?;
+    let pristine = match fields.split('\x1f').collect::<Vec<_>>()[..] {
+        [windows, panes, cmd, created] => {
+            windows == "1" && panes == "1" && is_shell(cmd) && created.parse::<u64>().is_ok_and(|t| now().saturating_sub(t) <= 120)
+        }
+        _ => false,
+    };
+    if pristine && !ours {
+        let clients = tmux(&["list-clients", "-t", &target, "-F", "#{client_name}"]).unwrap_or_default();
+        for client in clients.lines() {
+            let _ = tmux(&["switch-client", "-c", client, "-t", sid]);
+        }
+        tmux(&["kill-session", "-t", &target])?;
+        tmux(&["rename-session", "-t", sid, &literal(name)])?;
+        return Ok(name.into());
+    }
+    for n in 1..=100 {
+        let other = if n == 1 { format!("{name}-restored") } else { format!("{name}-restored-{n}") };
+        if saved.contains(other.as_str()) || created.values().any(|c| *c == other) {
+            continue;
+        }
+        if tmux(&["rename-session", "-t", sid, &literal(&other)]).is_ok() {
+            return Ok(other);
+        }
+    }
+    Err(io::Error::other(format!("no free name for {name}")))
+}
+
+/// Staging sessions whose restore is no longer running: removed, unless
+/// agents were started in them, which are kept as `unfinished-restore-PID`.
+fn clean_stages() {
+    let Ok(names) = tmux(&["list-sessions", "-F", "#{session_name}"]) else { return };
+    for name in names.lines() {
+        let Some(pid) = name.strip_prefix(STAGE).and_then(|p| p.parse::<i32>().ok()) else { continue };
+        if pid <= 0 || alive(pid) {
+            continue;
+        }
+        let target = format!("={name}:");
+        let commands = tmux(&["list-panes", "-s", "-t", &target, "-F", "#{pane_start_command}"]).unwrap_or_default();
+        if commands.lines().all(|c| c.contains(PLACEHOLDER)) {
+            let _ = tmux(&["kill-session", "-t", &target]);
+        } else {
+            let _ = tmux(&["rename-session", "-t", &target, &format!("unfinished-restore-{pid}")]);
+        }
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
 fn launch(id: &str, p: &Pane) -> io::Result<()> {
@@ -582,14 +808,27 @@ fn launch(id: &str, p: &Pane) -> io::Result<()> {
     args.extend(["--", "sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"]);
     tmux(&args)?;
     if exists && let Some(r) = &p.resume {
+        // Tagged first: the line below drops the tag once the agent exits,
+        // however soon that is.
+        let tag = format!("{}:{}", r.agent.bin(), r.id);
+        tmux(&["set-option", "-p", "-t", id, "@paddock-resume", &tag])?;
         // Typed into the login shell, so its PATH finds the agent and its job
         // control handles Ctrl-Z. `command` skips an alias that would repeat
         // a flag. The ID is a token, so it needs no quoting in any shell.
-        let line = format!("command {} {}", r.agent.resume(), r.id);
+        // Shells run the rest of the line when Ctrl-Z stops the agent (with
+        // the status 128 + SIGTSTP): the tag stays for it.
+        // The shell is the pane's: tmux sets its SHELL to default-shell.
+        let shell = tmux(&["display-message", "-p", "-t", id, "#{default-shell}"])?;
+        let fish = Path::new(shell.trim()).file_name() == Some("fish".as_ref());
+        let line = format!(
+            "command {} {}; [ {} -eq {} ] || command tmux set-option -pu -t \"$TMUX_PANE\" @paddock-resume 2>/dev/null",
+            r.agent.resume(),
+            r.id,
+            if fish { "$status" } else { "$?" },
+            128 + libc::SIGTSTP
+        );
         tmux(&["send-keys", "-t", id, "-l", &line])?;
         tmux(&["send-keys", "-t", id, "Enter"])?;
-        let tag = format!("{}:{}", r.agent.bin(), r.id);
-        tmux(&["set-option", "-p", "-t", id, "@paddock-resume", &tag])?;
     }
     Ok(())
 }
@@ -605,6 +844,7 @@ fn window_option(window: &str, option: &str, value: Option<&str>) -> io::Result<
 fn build<'a>(
     s: &'a Session,
     stage: &str,
+    start: &[&str],
     sid: &mut String,
     launches: &mut Vec<(String, &'a Pane)>,
 ) -> io::Result<()> {
@@ -636,6 +876,9 @@ fn build<'a>(
                     "-n",
                     &title,
                 ]
+                .into_iter()
+                .chain(start.iter().copied())
+                .collect()
             } else if i == 0 {
                 vec!["new-window", "-d", "-t", &target, "-n", &title]
             } else {
@@ -646,7 +889,7 @@ fn build<'a>(
                 "-F",
                 "#{session_id} #{window_id} #{window_index} #{pane_id}",
             ]);
-            args.extend(["--", "sleep", "86400"]);
+            args.extend(["--", "sleep", PLACEHOLDER]);
             let ids = tmux(&args)?;
             let ids: Vec<_> = ids.split_whitespace().collect();
             let [session_id, window_id, index, pane_id] = ids[..] else {
@@ -711,12 +954,32 @@ fn build<'a>(
         }
     }
     tmux(&["select-window", "-t", &format!("{sid}:{focus}")])?;
+    // new-session -x/-y set the session's default-size: the global applies.
+    tmux(&["set-option", "-u", "-t", sid, "default-size"])?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autosave_interval_and_bookmark() {
+        let secs = |v| interval(v).map(|d| d.as_secs());
+        assert_eq!(secs("5"), Some(300));
+        assert_eq!(secs("1440"), Some(86_400));
+        assert_eq!(secs("30s"), Some(30));
+        for off in ["", "off", "0", "0s", "1441", "-5", "5m", "s", " 5"] {
+            assert_eq!(secs(off), None, "{off:?}");
+        }
+        assert_eq!(auto_name("/tmp/tmux-501/default"), "auto");
+        assert_eq!(auto_name(""), "auto");
+        assert_eq!(auto_name("/tmp/tmux-501/work"), "auto-work");
+        assert_eq!(auto_name("/tmp/x/bad name"), "auto-bad_name");
+        // Never a copy's name: auto-x.previous is auto-x's.
+        assert_eq!(auto_name("/tmp/x/x.previous"), "auto-x_previous");
+        assert!(token(&auto_name(&"é".repeat(300))));
+    }
 
     #[test]
     fn require_live_scoped_resume_identity() {

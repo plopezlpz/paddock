@@ -353,9 +353,26 @@ paddock remove aa       # remove only the bookmark, never a session or chat (a n
 
 One bookmark covers **all sessions on the current tmux server** except `_paddock`. It includes session names, window names and indexes, pane layout, directories, zoom and focus, plus each window's `automatic-rename` and `window-size` when they differ from the global setting: a window you named keeps its name, and one tmux names keeps following its command. Grouped sessions (`new-session -t`) come back grouped, on their own current window. Restore creates detached sessions and skips any name already running; it doesn't merge sessions, switch clients or replay arbitrary commands. If one session fails, the others are still restored and the failures are listed. Other panes open as login shells. A window linked into several sessions is saved only in the first, and a window with floating panes is left out; save warns about both.
 
-For **Claude, Pi, Codex and Antigravity (`agy`)**, install the agent-status.tmux hooks described below. Paddock reads their per-pane identity at save time and reopens the conversation by exact ID, typing `command <agent> … <ID>` into the pane's login shell, so Ctrl-Z and `fg` work as usual and your shell aliases are not applied. It doesn't guess the most recent chat in a directory. Codex needs trusted hooks and `--no-daemon`; agy reports its conversation on a turn, so after an in-app switch submit a prompt before saving. Without a usable identity or working directory, you get a shell. The agent must be on your login shell's `PATH` and its saved conversation must still exist. The typed line needs a shell with a `command` builtin (sh, bash, zsh, fish), and startup files that neither change directory nor read input, such as an update prompt. A save made before a restored agent has reported again keeps the ID restore typed. This resumes conversations, not work in progress.
+For **Claude, Pi, Codex and Antigravity (`agy`)**, install the agent-status.tmux hooks described below. Paddock reads their per-pane identity at save time and reopens the conversation by exact ID, typing `command <agent> … <ID>` into the pane's login shell, so Ctrl-Z and `fg` work as usual and your shell aliases are not applied. It doesn't guess the most recent chat in a directory. Codex needs trusted hooks and `--no-daemon`; agy reports its conversation on a turn, so after an in-app switch submit a prompt before saving. Without a usable identity or working directory, you get a shell. The agent must be on your login shell's `PATH` and its saved conversation must still exist. The typed line needs a shell with a `command` builtin (sh, bash, zsh, fish), and startup files that neither change directory nor read input, such as an update prompt. A save made before a restored agent has reported again keeps the ID restore typed, including while it's stopped with Ctrl-Z; once it exits, that ID is dropped (if it was stopped and resumed with `fg` first, only when its hooks report). This resumes conversations, not work in progress.
 
-Bookmarks are private JSON files under `$XDG_STATE_HOME/paddock/workspaces` (default `~/.local/state/paddock/workspaces`). They include paths and session IDs but **no scrollback, prompts or transcripts**. Save and restore are manual; if tmux-continuum also restores at startup, disable its auto-restore when using Paddock as your restorer.
+Bookmarks are private JSON files under `$XDG_STATE_HOME/paddock/workspaces` (default `~/.local/state/paddock/workspaces`). They include paths and session IDs but **no scrollback, prompts or transcripts**. If tmux-continuum also restores at startup, disable its auto-restore when using Paddock as your restorer.
+
+#### Automatic save and restore
+
+tmux has no hook for its own exit, so Paddock saves on a timer instead:
+
+```tmux
+set -g @paddock-autosave '5'     # minutes
+set -g @paddock-save-key 'C-s'   # prefix C-s: save now
+```
+
+With `@paddock-autosave` set (1 to 1440 minutes), `paddock init` starts a background job that saves the bookmark `auto` at that interval; a server on another socket (`tmux -L work`) uses `auto-work`. It never touches `session` or your named bookmarks. When tmux starts (within two minutes of the server's start, once), the job first restores `auto`, keeping the copy it restored as `auto.previous` (and as `auto.unrestored` if the restore failed). The session tmux or your terminal just started can't wait for it, so this restore treats a saved name that is already running differently from `paddock restore`:
+
+- a session that is still a single shell pane, just started, is replaced by the saved one, and its clients switch over;
+- a session that is in use stays, and the saved one comes back as `NAME-restored`;
+- a saved session that was only a single shell pane, or a grouped one, is skipped.
+
+Set the option to `off` and the job stops at its next tick. The output of the last save and of the start-up restore is in `$XDG_STATE_HOME/paddock` (default `~/.local/state/paddock`), as `auto.save.log` and `auto.restore.log`.
 
 ### Notification formatting
 
@@ -474,6 +491,8 @@ of room, its menu (`ctrl-a`) has the rest.
 |---|---|---|
 | `@paddock-key`, `@paddock-agents-key` | `a` (if nothing else is set and prefix `a` is free), unset | keys that open paddock on the tab it was last closed on, and on the agents tab |
 | `@paddock-next-key` | `A` (if prefix `A` is free) | key that jumps to the next agent that needs you (`paddock next`), without the popup; `off`: none |
+| `@paddock-save-key` | unset | key that saves the default bookmark (`paddock save`) and shows the result |
+| `@paddock-autosave` | unset | minutes (1 to 1440) between saves of the `auto` bookmark, which is restored when tmux starts; `off`: none |
 | `@paddock-agent-icons` | `unicode` | `nerd`: Nerd Font logos/marks; `unicode`: portable text marks; explicit choice, applied on next popup open; a format, expanded for the popup's client |
 | `@paddock-click` | unset | `on`: a click on the session name (status-left) opens paddock, handy on a phone; needs `set -g mouse on` |
 | `@paddock-popup-width`, `@paddock-popup-height` | `80%`, or `100%` on a terminal under 128 columns (30 rows) | may be a format, as the defaults are: `#{?#{e\|<:#{client_width},128},100%,80%}` |

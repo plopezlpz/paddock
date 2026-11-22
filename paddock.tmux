@@ -4,7 +4,10 @@
 # and with @paddock-click on, a click on the session name (status-left). With
 # none of the three set, @paddock-key is a, unless the config binds prefix a to
 # something else. @paddock-next-key (A unless taken; off: none) jumps to the
-# next agent that needs you, without the popup. The binary must report this plugin's version: the popup's
+# next agent that needs you, without the popup. @paddock-save-key (none
+# unless set) runs paddock save. With @paddock-autosave (minutes), a
+# background paddock autosave restores the server's auto bookmark when tmux
+# starts and saves it at that interval. The binary must report this plugin's version: the popup's
 # flags and env are a contract between the two.
 set -euf
 CURRENT_DIR='' VERSION='' BIN='' install=''
@@ -50,7 +53,7 @@ SEP=$'\037'
 if ! out=$(tmux set-option -gqo @paddock-popup-width '#{?#{e|<:#{client_width},128},100%,80%}' \; \
     set-option -gqo @paddock-popup-height '#{?#{e|<:#{client_height},30},100%,80%}' \; \
     set-option -gqo @paddock-popup-style 'bg=terminal,fg=terminal' \; \
-    display-message -p "#{@paddock-key}$SEP#{@paddock-agents-key}$SEP#{@paddock-next-key}$SEP#{@paddock-click}$SEP#{@paddock-popup-width}$SEP#{@paddock-popup-height}$SEP#{@paddock-popup-style}" \; \
+    display-message -p "#{@paddock-key}$SEP#{@paddock-agents-key}$SEP#{@paddock-next-key}$SEP#{@paddock-click}$SEP#{@paddock-popup-width}$SEP#{@paddock-popup-height}$SEP#{@paddock-popup-style}$SEP#{@paddock-save-key}$SEP#{@paddock-autosave}" \; \
     show-hooks -g client-closed \; \
     list-keys -aN -P prefix -T prefix \; \
     list-keys -aN -P root -T root 2>/dev/null); then
@@ -90,7 +93,7 @@ keyarg() {
 }
 taken= next_taken=
 {
-  IFS=$SEP read -r key agents_key next_key click width height style
+  IFS=$SEP read -r key agents_key next_key click width height style save_key autosave
   # Bindings with a paddock note are ours, from the last run: dropped, as the
   # options may have changed. One the config has since rebound has its own.
   while read -r table k desc; do
@@ -180,5 +183,15 @@ bind_tab root "${click:+MouseUp1StatusLeft}"
 if [ -n "$next_key" ] && [ -n "$BIN" ] && [ -x "$BIN" ]; then
   keyarg k "$next_key"
   later bind -N "paddock next" -T prefix "$k" run-shell -b "$bin next -c #{q:client_name}"
+fi
+if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+  # The last line paddock save prints (saved, or why not), on the client
+  # whose key it was; -l shows it as written.
+  if [ -n "$save_key" ]; then
+    keyarg k "$save_key"
+    later bind -N "paddock save" -T prefix "$k" run-shell -b "tmux display-message -c #{q:client_name} -l \"\$($bin save 2>&1 | tail -n 1)\""
+  fi
+  # Every load starts it: a job already keeping this server stops at once.
+  case $autosave in '' | off | 0) ;; *) later run-shell -b "$bin autosave >/dev/null 2>&1" ;; esac
 fi
 [ ${#writes[@]} -eq 0 ] || tmux "${writes[@]}"
