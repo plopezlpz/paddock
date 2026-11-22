@@ -44,8 +44,9 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
     agents = [('pi', '--session'), ('claude', '--resume'), ('codex', '--no-daemon resume'), ('agy', '--conversation')]
     try:
         assert not cli('list')
+        # Scripts, not links: a multi-call coreutils (uutils) picks its tool by argv[0].
         for name, _ in agents:
-            (tools / name).symlink_to(shutil.which('sleep'))
+            (tools / name).write_text('#!/bin/sh\nexec sleep "$@"\n'); (tools / name).chmod(0o700)
         path = root / 'project # with spaces;'
         path.mkdir()
         t('new-session', '-ds', 'project', '-n', 'agents', '-c', str(path) + '/.', str(tools / 'pi'), '120')
@@ -54,6 +55,7 @@ exec {shlex.quote(real_tmux)} -f {shlex.quote(str(config))} "$@"
             panes.append(t('split-window', '-dhP', '-F', '#{pane_id}', '-t', panes[-1], '-c', str(path) + '/.', str(tools / name), '120'))
         for i, ((name, _), pane) in enumerate(zip(agents, panes)):
             kind = 'antigravity' if name == 'agy' else name
+            until(lambda: t('display', '-pt', pane, '#{pane_current_command}') == 'sleep', f'{name} should exec sleep')
             actual = t('display', '-pt', pane, '#{pane_current_command}')
             t('set-option', '-pt', pane, '@agent-command', actual)
             t('set-option', '-pt', pane, '@agent-kind', kind)
